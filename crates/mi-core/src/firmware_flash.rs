@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -32,8 +32,11 @@ impl BootloaderPort {
         let SerialPortType::UsbPort(usb) = info.port_type else {
             return None;
         };
-        // Input 1.1.0 identifies an Espressif loader, not a Work Louder model.
-        if usb.vid != 0x303a || usb.manufacturer.as_deref() != Some("Espressif") {
+        // Input 1.1.0 identifies an Espressif ESP32-S3 USB JTAG/serial loader, not a Work Louder model.
+        if usb.vid != 0x303a
+            || usb.pid != 0x1001
+            || usb.manufacturer.as_deref() != Some("Espressif")
+        {
             return None;
         }
         #[cfg(target_os = "macos")]
@@ -50,6 +53,20 @@ impl BootloaderPort {
         })
     }
 
+    pub fn matches_expected_serial(&self, expected_serial: Option<&str>) -> bool {
+        let Some(expected) = expected_serial.and_then(normalize_serial_identifier) else {
+            return true;
+        };
+        let Some(actual) = self
+            .serial_number
+            .as_deref()
+            .and_then(normalize_serial_identifier)
+        else {
+            return true;
+        };
+        expected == actual
+    }
+
     fn usb_info(&self) -> UsbPortInfo {
         UsbPortInfo {
             vid: self.vid,
@@ -59,6 +76,26 @@ impl BootloaderPort {
             product: self.product.clone(),
         }
     }
+}
+
+pub fn normalize_serial_identifier(raw: &str) -> Option<String> {
+    let normalized: String = raw
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && !matches!(ch, ':' | '-'))
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+pub fn filter_ports_for_expected_serial(
+    ports: Vec<BootloaderPort>,
+    expected_serial: Option<&str>,
+) -> Vec<BootloaderPort> {
+    ports
+        .into_iter()
+        .filter(|port| port.matches_expected_serial(expected_serial))
+        .collect()
 }
 
 pub fn enumerate_bootloaders() -> Result<Vec<BootloaderPort>, String> {
@@ -102,11 +139,7 @@ fn persist(
     error: Option<&str>,
 ) -> Result<(), String> {
     let temp = receipt.backup_dir.join("operation.json.next");
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&temp).map_err(|e| e.to_string())?;
+    let mut file = mi_macos::open_private_file(&temp, mi_macos::PrivateOpenMode::Truncate)?;
     let bytes = serde_json::to_vec_pretty(&Operation {
         schema_version: 1,
         port,
@@ -123,11 +156,23 @@ fn persist(
         .map_err(|e| e.to_string())
 }
 
+const MAX_FIRMWARE_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+
 fn image_bytes(firmware: &DownloadedFirmware) -> Result<Vec<u8>, String> {
     if !firmware.digest_verified {
         return Err("此资产没有通过官方 SHA-256 校验，不能自动安装".into());
     }
-    let bytes = fs::read(&firmware.path).map_err(|e| e.to_string())?;
+    if firmware.size == 0 || firmware.size > MAX_FIRMWARE_IMAGE_BYTES {
+        return Err("下载后的固件文件大小超出允许范围".into());
+    }
+    let file = mi_macos::open_verified_readonly_file(&firmware.path)?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if meta.len() != firmware.size {
+        return Err("下载后的固件文件已变化，请重新下载".into());
+    }
+    let mut bytes = Vec::with_capacity(firmware.size as usize);
+    Read::read_to_end(&mut file.take(firmware.size.saturating_add(1)), &mut bytes)
+        .map_err(|e| e.to_string())?;
     if bytes.len() as u64 != firmware.size
         || format!("{:x}", Sha256::digest(&bytes)) != firmware.sha256
     {
@@ -291,7 +336,7 @@ pub fn flash(
         return Err("所选引导端口已经断开或身份变化，请重新选择".into());
     }
     let _awake = Awake::acquire()?;
-    fs::create_dir_all(backup_root).map_err(|e| e.to_string())?;
+    mi_macos::ensure_private_dir(backup_root)?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -301,6 +346,7 @@ pub fn flash(
     #[cfg(unix)]
     builder.mode(0o700);
     builder.create(&backup_dir).map_err(|e| e.to_string())?;
+    mi_macos::ensure_private_dir(&backup_dir)?;
     let mut receipt = FlashReceipt {
         backup_dir,
         backup_sha256: String::new(),
@@ -385,7 +431,7 @@ pub fn flash(
             .map_err(|e| e.to_string())?;
         receipt.status = "flash_verified_restart_pending".into();
         persist(port, &receipt, None)?;
-        // Input 1.1.0 clears this ESP32-S3 register before toggling RTS (K:13730–13743).
+        // Clear ESP32-S3 download-mode reset register before toggling RTS.
         let mut connection = flasher.into_connection();
         connection
             .write_reg(0x6000_812c, 0, None)
@@ -483,12 +529,64 @@ mod tests {
             port_type: SerialPortType::UsbPort(usb.clone())
         })
         .is_some());
+
+        let wrong_pid = UsbPortInfo {
+            pid: 0x1002,
+            ..usb.clone()
+        };
+        assert!(
+            BootloaderPort::from_info(SerialPortInfo {
+                port_name: "/dev/cu.example".into(),
+                port_type: SerialPortType::UsbPort(wrong_pid)
+            })
+            .is_none(),
+            "Espressif VID with non-0x1001 bootloader PID must be rejected"
+        );
+
         usb.manufacturer = Some("Other".into());
         assert!(BootloaderPort::from_info(SerialPortInfo {
             port_name: "/dev/cu.example".into(),
             port_type: SerialPortType::UsbPort(usb)
         })
         .is_none());
+    }
+
+    #[test]
+    fn serial_correlation_normalizes_colons_and_case_and_filters_mismatches() {
+        assert_eq!(
+            normalize_serial_identifier(" aa:bb:cc-11:22:33 "),
+            Some("AABBCC112233".into())
+        );
+        assert_eq!(normalize_serial_identifier(" :- "), None);
+
+        let matching = BootloaderPort {
+            path: "/dev/cu.usbmodem-test-1".into(),
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: Some("AABBCC112233".into()),
+            manufacturer: Some("Espressif".into()),
+            product: None,
+        };
+        let mismatched = BootloaderPort {
+            path: "/dev/cu.usbmodem-test-2".into(),
+            serial_number: Some("DEADBEEF0000".into()),
+            ..matching.clone()
+        };
+        let omitted_serial = BootloaderPort {
+            path: "/dev/cu.usbmodem-test-3".into(),
+            serial_number: None,
+            ..matching.clone()
+        };
+
+        let filtered = filter_ports_for_expected_serial(
+            vec![matching.clone(), mismatched.clone(), omitted_serial.clone()],
+            Some("aa:bb:cc:11:22:33"),
+        );
+        assert_eq!(filtered, vec![matching.clone(), omitted_serial.clone()]);
+
+        let unfiltered =
+            filter_ports_for_expected_serial(vec![matching, mismatched, omitted_serial], None);
+        assert_eq!(unfiltered.len(), 3);
     }
 
     #[test]
@@ -521,6 +619,50 @@ mod tests {
             ..firmware
         };
         assert!(image_bytes(&wrong_chip).unwrap_err().contains("ESP32-S3"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_bytes_rejects_symlink_oversized_and_preserves_0644_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_path = dir.path().join("real-firmware.bin");
+        let mut bytes = vec![0u8; 24];
+        bytes[0] = 0xe9;
+        bytes[12] = 9;
+        fs::write(&real_path, &bytes).unwrap();
+        fs::set_permissions(&real_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let firmware_0644 = DownloadedFirmware {
+            path: real_path.clone(),
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            digest_verified: true,
+            size: bytes.len() as u64,
+        };
+        assert!(image_bytes(&firmware_0644).is_ok());
+        let mode = fs::metadata(&real_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+
+        let link_path = dir.path().join("symlink-firmware.bin");
+        symlink(&real_path, &link_path).unwrap();
+        let symlink_fw = DownloadedFirmware {
+            path: link_path,
+            ..firmware_0644.clone()
+        };
+        assert!(image_bytes(&symlink_fw).is_err());
+
+        let zero_fw = DownloadedFirmware {
+            size: 0,
+            ..firmware_0644.clone()
+        };
+        assert!(image_bytes(&zero_fw).is_err());
+
+        let huge_fw = DownloadedFirmware {
+            size: MAX_FIRMWARE_IMAGE_BYTES + 1,
+            ..firmware_0644
+        };
+        assert!(image_bytes(&huge_fw).is_err());
     }
 
     #[test]

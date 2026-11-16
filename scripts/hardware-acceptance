@@ -44,14 +44,14 @@ def main():
                MI_HARDWARE_PATH=args.device_path, MI_HARDWARE_TARGET=target)
     if args.execute == 'h1':
         env.update(MI_HARDWARE_KEYMAP_SHA256=args.expected_keymap_sha256, MI_HARDWARE_REVIEWED='yes')
-    directory = ROOT / '.scratch' / 'input-study' / ('hardware-supervisor-' + uuid.uuid4().hex)
+    directory = ROOT / '.scratch' / 'hardware-probes' / ('hardware-supervisor-' + uuid.uuid4().hex)
     directory.mkdir(parents=True, mode=0o700)
     child = None
     def journal(stage):
         value = {'stage': stage, 'scope': args.execute, 'target': target,
                  'pid': child.pid if child else None,
                  'result': 'UNKNOWN_UNTIL_HARNESS_RECORD_VERIFIED',
-                 'hardware_records': '.scratch/input-study/probe-h-*/stage-*.json'}
+                 'hardware_records': '.scratch/hardware-probes/probe-h-*/stage-*.json'}
         kit.write_new(directory / (stage + '.json'), kit.encoded(value))
         fd = os.open(directory, os.O_RDONLY)
         try: os.fsync(fd)

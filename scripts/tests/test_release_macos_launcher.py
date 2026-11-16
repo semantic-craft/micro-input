@@ -151,6 +151,42 @@ Load command 23
         self.assertNotIn('0123456789ABCDEF0123456789ABCDEF01234567', redacted)
         self.assertNotIn('jane@example.com', redacted)
 
+    def test_redact_sensitive_masks_team_ids_key_paths_and_uuid_issuer_ids(self):
+        sample = '\n'.join([
+            '{"teamId": "TEAM123456", "team_id": "TEAM654321", "issuerId": "57246542-96fe-1a63-e053-0824d011072a", "keyId": "2X9R4HXF34"}',
+            '<key>TeamIdentifier</key><string>TEAM778899</string>',
+            'xcrun notarytool submit app.zip --team-id TEAM001122 --issuer 11223344-5566-7788-99aa-bbccddeeff00 --key-id 9A8B7C6D5E --key ~/.private_keys/AuthKey_9A8B7C6D5E.p8',
+            'pkcs12=/Users/example/.private_keys/cert.p12',
+        ])
+        redacted = release_mod.redact_sensitive(sample)
+        for secret in (
+            'TEAM123456',
+            'TEAM654321',
+            'TEAM778899',
+            'TEAM001122',
+            '57246542-96fe-1a63-e053-0824d011072a',
+            '11223344-5566-7788-99aa-bbccddeeff00',
+            '2X9R4HXF34',
+            '9A8B7C6D5E',
+            '.private_keys',
+            'AuthKey_9A8B7C6D5E.p8',
+            'cert.p12',
+            '/Users/example',
+        ):
+            self.assertNotIn(secret, redacted, f'Leaked {secret!r} in:\n{redacted}')
+
+    def test_format_notary_failure_log_redacts_before_truncating_at_2000_chars(self):
+        prefix = 'A' * 1990
+        secret_tail = 'TEAM889900 SECRET_TOKEN_AFTER_2000_CHARS'
+        formatted = release_mod.format_notary_failure_log(
+            f'{prefix} --team-id {secret_tail}',
+            None,
+            ['SECRET_TOKEN_AFTER_2000_CHARS'],
+        )
+        self.assertLessEqual(len(formatted), 2000)
+        self.assertNotIn('TEAM889900', formatted)
+        self.assertNotIn('SECRET_TOKEN', formatted)
+
 
 if __name__ == '__main__':
     unittest.main()

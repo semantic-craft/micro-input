@@ -47,7 +47,7 @@ class ObservationLauncherTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as result:
                     runpy.run_path(str(script), run_name='__main__')
             if popen.called:
-                private = list(root.glob('.scratch/input-study/input-observation-*'))[0]
+                private = list(root.glob('.scratch/hardware-probes/input-observation-*'))[0]
                 self.assertEqual(private.stat().st_mode & 0o777, 0o700)
                 self.assertTrue(all(p.stat().st_mode & 0o777 == 0o600 for p in private.iterdir()))
             return result.exception.code, popen.call_count, run, kill

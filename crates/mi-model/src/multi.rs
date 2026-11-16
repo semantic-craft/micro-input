@@ -7,6 +7,12 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+pub const MAX_MULTI_TERM_MS: u32 = 60_000;
+pub const MAX_MULTI_DEPTH: usize = 16;
+pub const MAX_GRAPH_ACTIONS: usize = 4096;
+pub const MAX_GRAPH_PROFILES: usize = 256;
+pub const MAX_GRAPH_LAYERS: usize = 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LocalMulti {
@@ -40,8 +46,10 @@ impl LocalMulti {
         ]
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self.format_version != 1 || self.term_ms == 0 {
-            return Err("本地 Multi 版本不支持，或本地判定时长不是正整数毫秒；固件范围未知".into());
+        if self.format_version != 1 || self.term_ms == 0 || self.term_ms > MAX_MULTI_TERM_MS {
+            return Err(format!(
+                "本地 Multi 版本不支持，或本地判定时长超出 1..={MAX_MULTI_TERM_MS} 毫秒范围；固件范围未知"
+            ));
         }
         for (_, r) in self.branches() {
             if let Some(r) = r {
@@ -86,20 +94,47 @@ pub fn parent_references(d: &LocalDocumentV2, target: &str) -> Vec<MacroReferenc
         .collect()
 }
 pub fn validate_references(g: &Graph) -> Result<(), String> {
+    if g.actions.len() > MAX_GRAPH_ACTIONS {
+        return Err(format!(
+            "文档动作数量超过上限（最多 {MAX_GRAPH_ACTIONS} 个）"
+        ));
+    }
+    if g.profiles.len() > MAX_GRAPH_PROFILES {
+        return Err(format!(
+            "文档配置数量超过上限（最多 {MAX_GRAPH_PROFILES} 个）"
+        ));
+    }
+    if g.layers.len() > MAX_GRAPH_LAYERS {
+        return Err(format!("文档层数量超过上限（最多 {MAX_GRAPH_LAYERS} 个）"));
+    }
+
     fn visit(
         id: &str,
+        depth: usize,
         g: &Graph,
         visiting: &mut BTreeSet<String>,
-        done: &mut BTreeSet<String>,
-    ) -> Result<(), String> {
-        if done.contains(id) {
-            return Ok(());
+        heights: &mut BTreeMap<String, usize>,
+    ) -> Result<usize, String> {
+        if let Some(&subtree_height) = heights.get(id) {
+            if depth + subtree_height > MAX_MULTI_DEPTH {
+                return Err(format!(
+                    "Multi 嵌套层级超过上限（最多 {MAX_MULTI_DEPTH} 层）"
+                ));
+            }
+            return Ok(subtree_height);
+        }
+        let multi = g.actions.get(id).and_then(local_multi);
+        if depth + usize::from(multi.is_some()) > MAX_MULTI_DEPTH {
+            return Err(format!(
+                "Multi 嵌套层级超过上限（最多 {MAX_MULTI_DEPTH} 层）"
+            ));
         }
         if !visiting.insert(id.into()) {
             return Err("Multi 分支存在递归引用".into());
         }
-        if let Some(m) = local_multi(&g.actions[id]) {
+        let height = if let Some(m) = multi {
             m.validate()?;
+            let mut max_child = 0usize;
             for (branch, r) in m.branches() {
                 if let Some(r) = r {
                     let a = g.actions.get(r.id()).ok_or_else(|| {
@@ -111,17 +146,21 @@ pub fn validate_references(g: &Graph) -> Result<(), String> {
                             g.actions[id].name
                         ));
                     }
-                    visit(r.id(), g, visiting, done)?;
+                    max_child = max_child.max(visit(r.id(), depth + 1, g, visiting, heights)?);
                 }
             }
-        }
+            1 + max_child
+        } else {
+            0
+        };
         visiting.remove(id);
-        done.insert(id.into());
-        Ok(())
+        heights.insert(id.into(), height);
+        Ok(height)
     }
-    let mut done = BTreeSet::new();
+    let mut visiting = BTreeSet::new();
+    let mut heights = BTreeMap::new();
     for id in g.actions.keys() {
-        visit(id, g, &mut BTreeSet::new(), &mut done)?;
+        visit(id, 0, g, &mut visiting, &mut heights)?;
     }
     Ok(())
 }

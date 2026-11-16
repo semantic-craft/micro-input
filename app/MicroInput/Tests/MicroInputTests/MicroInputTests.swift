@@ -578,6 +578,112 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.header.engineVersion, "0.2.0")
     }
 
+    func testUpdateLaunchPolicyResolvesSymlinksRejectsEphemeralBundlesAndWrongBundleId() throws {
+        let validFeed = "https://github.com/semantic-craft/micro-input/releases/latest/download/appcast.xml"
+        let validKey = Data(repeating: 7, count: 32).base64EncodedString()
+        let prodIdentity = AppReleaseIdentity(
+            marketingVersion: "0.5.0",
+            buildVersion: "5",
+            bundleIdentifier: LaunchAtLoginPolicy.productionBundleIdentifier,
+            feedURLString: validFeed,
+            publicEDKey: validKey
+        )
+
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".mi-update-symlink-\(UUID().uuidString)")
+        let ephemeralTarget = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mi-ephemeral-upd-\(UUID().uuidString)/Micro Input.app")
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: ephemeralTarget.deletingLastPathComponent())
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: ephemeralTarget, withIntermediateDirectories: true)
+        let symlinkApp = root.appendingPathComponent("Micro Input.app")
+        try FileManager.default.createSymbolicLink(at: symlinkApp, withDestinationURL: ephemeralTarget)
+
+        if case .isolated(reason: .ephemeralBuildBundle) = UpdateLaunchPolicy.evaluate(
+            identity: prodIdentity,
+            bundlePath: symlinkApp.path,
+            environment: [:],
+            arguments: []
+        ) {} else {
+            XCTFail("Expected symlink to ephemeral /var/folders or /tmp .app bundle to isolate updater")
+        }
+
+        for ephemeralAppPath in [
+            "/tmp/Micro Input.app",
+            "/private/tmp/Micro Input.app",
+            "/var/folders/xx/yy/T/Micro Input.app",
+            "/Users/example/work/.scratch/qa-runs/1/Micro Input.app",
+        ] {
+            if case .isolated(reason: .ephemeralBuildBundle) = UpdateLaunchPolicy.evaluate(
+                identity: prodIdentity,
+                bundlePath: ephemeralAppPath,
+                environment: [:],
+                arguments: []
+            ) {} else {
+                XCTFail("Expected \(ephemeralAppPath) to isolate updater as ephemeralBuildBundle")
+            }
+        }
+
+        let foreignIdentity = AppReleaseIdentity(
+            marketingVersion: "0.5.0",
+            buildVersion: "5",
+            bundleIdentifier: "com.example.other",
+            feedURLString: validFeed,
+            publicEDKey: validKey
+        )
+        XCTAssertEqual(
+            UpdateLaunchPolicy.evaluate(
+                identity: foreignIdentity,
+                bundlePath: "/Applications/Micro Input.app",
+                environment: [:],
+                arguments: []
+            ),
+            .unavailable(reason: .wrongBundleIdentifier(actual: "com.example.other"))
+        )
+    }
+
+    @MainActor
+    func testCoreStoreDeinitFromBackgroundAndMainThreadCleansUpSafely() throws {
+        final class WeakStoreBox {
+            weak var store: CoreStore?
+            init(_ store: CoreStore?) { self.store = store }
+        }
+        final class SendableStoreTransfer: @unchecked Sendable {
+            var store: CoreStore?
+            init(_ store: CoreStore?) { self.store = store }
+        }
+
+        let dir = try makeIsolatedTempDir("corestore-deinit")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var mainStore: CoreStore? = CoreStore(isolatedDirectory: dir.path, pollInIsolation: true)
+        let mainBox = WeakStoreBox(mainStore)
+        XCTAssertNotNil(mainBox.store)
+        mainStore = nil
+        XCTAssertNil(mainBox.store)
+
+        let bgTransfer = SendableStoreTransfer(CoreStore(isolatedDirectory: dir.path, pollInIsolation: true))
+        let bgBox = WeakStoreBox(bgTransfer.store)
+        XCTAssertNotNil(bgBox.store)
+
+        let releasedOnBg = XCTestExpectation(description: "Released CoreStore off main thread")
+        DispatchQueue.global(qos: .utility).async {
+            bgTransfer.store = nil
+            releasedOnBg.fulfill()
+        }
+        wait(for: [releasedOnBg], timeout: 5.0)
+
+        let mainDrained = XCTestExpectation(description: "Main queue processed deferred teardown")
+        DispatchQueue.main.async {
+            mainDrained.fulfill()
+        }
+        wait(for: [mainDrained], timeout: 5.0)
+        XCTAssertNil(bgBox.store)
+    }
+
     @MainActor
     func testProfileLockAndAccessibilitySlicesRoundtrip() throws {
         let dir = try makeIsolatedTempDir("profile-lock-slices")
@@ -1140,6 +1246,83 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.canvas.joystickModeLabel, "硬件指针")
         XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "mouse")
         XCTAssertEqual(store.canvas.encoderHoldLabel, "搜索会话")
+    }
+
+    @MainActor
+    func testSecurityDefaultsFailClosedAndPresetImportStagesPreview() throws {
+        let fallbackParsed = CoreStore.parseProjection([
+            "inspector": [
+                "body": [
+                    "Editable": [:],
+                ]
+            ],
+            "status_menu": [
+                "pending_import": [
+                    "raw_text": "{}",
+                    "name": "Scoped Profile",
+                    "scope": "profile",
+                    "contains_complete_archive": true,
+                    "profile_count": 1,
+                    "layer_count": 2,
+                    "action_count": 5,
+                ],
+                "preset_error": "invalid preset",
+            ],
+        ])
+        XCTAssertEqual(
+            fallbackParsed.editableInspector?.commandExecutionEnabled,
+            false,
+            "missing command_execution_enabled must fail closed to false"
+        )
+        XCTAssertEqual(fallbackParsed.pendingImport?.name, "Scoped Profile")
+        XCTAssertEqual(fallbackParsed.pendingImport?.scope, "profile")
+        XCTAssertEqual(fallbackParsed.pendingImport?.containsCompleteArchive, true)
+        XCTAssertEqual(fallbackParsed.pendingImport?.profileCount, 1)
+        XCTAssertEqual(fallbackParsed.pendingImport?.layerCount, 2)
+        XCTAssertEqual(fallbackParsed.pendingImport?.actionCount, 5)
+        XCTAssertEqual(fallbackParsed.presetError, "invalid preset")
+
+        let statusSlice = StatusMenuSliceModel(from: fallbackParsed)
+        XCTAssertEqual(statusSlice.pendingImport?.scope, "profile")
+        XCTAssertEqual(statusSlice.presetError, "invalid preset")
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("micro-input-swift-unit2-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = CoreStore(isolatedDirectory: tempDir.path)
+        defer { store.stopEventLoops() }
+        XCTAssertEqual(store.inspector.editableInspector?.commandExecutionEnabled, false)
+
+        let selectedPid = store.sidebar.selectedProfileId
+        store.dispatch("sidebar", [
+            "Backup": [
+                "ExportPreset": [
+                    "profile_id": selectedPid as Any? ?? NSNull(),
+                    "layer_id": NSNull(),
+                ]
+            ]
+        ])
+        let exported = try XCTUnwrap(store.sidebar.lastExportedPreset)
+        store.stagePresetImport(data: Data(exported.utf8))
+        let staged = try XCTUnwrap(store.statusMenu.pendingImport)
+        XCTAssertEqual(staged.scope, "profile")
+        XCTAssertTrue(staged.containsCompleteArchive)
+        XCTAssertGreaterThan(staged.profileCount, 0)
+
+        store.dispatch("status_menu", "CancelStagedPresetImport")
+        XCTAssertNil(store.statusMenu.pendingImport)
+
+        store.stagePresetImport(data: Data("not-json".utf8))
+        XCTAssertNotNil(store.statusMenu.presetError)
+        XCTAssertNil(store.statusMenu.pendingImport)
+
+        store.stagePresetImport(data: Data(exported.utf8))
+        XCTAssertNil(store.statusMenu.presetError)
+        XCTAssertNotNil(store.statusMenu.pendingImport)
+        store.dispatch("status_menu", "ConfirmStagedPresetImport")
+        XCTAssertNil(store.statusMenu.pendingImport)
     }
 }
 

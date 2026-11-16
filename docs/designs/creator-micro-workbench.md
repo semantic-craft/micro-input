@@ -22,7 +22,7 @@
 
 遵循 docs/agents/research-context.md、docs/module-contracts.md 及 docs/designs/four-app-control.md。编辑草稿、运行目标和设备状态保持分离；UI 改动不扩展固件写入范围。验证包含 Rust 浏览/激活/空层回归、FFI 契约、Swift 域切片重算检查、八个隔离应用场景和原生窗口交互。实体按键、真人听写和灯光视觉不由本次 UI 验收替代。
 
-本轮验收：完整 `scripts/verify-offline` 与八个隔离场景通过；核对 820×640、1180×740、1440×900 原生渲染，完成导航、浏览、空层、绑定与撤销交互检查。日常安装包与构建二进制 SHA-256 一致，签名验证通过。原始回执在 `.scratch/native-redesign/result.json`。
+本轮验收：完整 `scripts/verify-offline` 与八个隔离场景通过；核对 820×640、1180×740、1440×900 原生渲染，完成导航、浏览、空层、绑定与撤销交互检查。日常安装包与构建二进制 SHA-256 一致，签名验证通过（离线验收回执留存本地未入库）。
 
 ## 会话长标题
 

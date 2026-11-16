@@ -370,7 +370,7 @@ impl Record {
         let token: String = random::<16>()?.iter().map(|b| format!("{b:02x}")).collect();
         let target = format!("mi_{}.txt", &token[..12]);
         temp_name(&target)?;
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/input-study");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/hardware-probes");
         fs::create_dir_all(&root).map_err(|_| "private_parent_failed")?;
         let directory = root.join(format!(
             "probe-{}-{}-{}-{}-{}-{}",

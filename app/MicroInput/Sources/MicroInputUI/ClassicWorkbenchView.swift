@@ -290,9 +290,9 @@ private struct WorkbenchSidebarView: View {
                                 panel.canChooseDirectories = false
                                 if panel.runModal() == .OK,
                                    let url = panel.url,
-                                   let text = try? String(contentsOf: url, encoding: .utf8)
+                                   let data = try? Data(contentsOf: url)
                                 {
-                                    store.dispatch("sidebar", ["Backup": ["ImportPreset": ["text": text]]])
+                                    store.stagePresetImport(data: data)
                                 }
                             }
                             Divider()
@@ -387,8 +387,6 @@ private struct WorkbenchSidebarView: View {
             ]
         ])
         guard let text = store.sidebar.lastExportedPreset else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
         let env = ProcessInfo.processInfo.environment
         guard env["XCTestConfigurationFilePath"] == nil, env["MI_SYNTHETIC_SCENARIO"] == nil else {
             return

@@ -4,6 +4,23 @@ import MicroInputCoreFFI
 import Observation
 import SwiftUI
 
+private struct CoreTeardownResources: @unchecked Sendable {
+    let timer: Timer?
+    let observer: NSObjectProtocol?
+    let center: NotificationCenter
+    let handle: OpaquePointer?
+
+    func releaseAll() {
+        timer?.invalidate()
+        if let observer {
+            center.removeObserver(observer)
+        }
+        if let handle {
+            mi_core_free(handle)
+        }
+    }
+}
+
 @MainActor
 @Observable
 public final class CoreStore {
@@ -55,12 +72,18 @@ public final class CoreStore {
     }
 
     deinit {
-        pollTimer?.invalidate()
-        if let observer = workspaceObserver {
-            workspaceNotificationCenter.removeObserver(observer)
-        }
-        if let h = handle {
-            mi_core_free(h)
+        let resources = CoreTeardownResources(
+            timer: pollTimer,
+            observer: workspaceObserver,
+            center: workspaceNotificationCenter,
+            handle: handle
+        )
+        if Thread.isMainThread {
+            resources.releaseAll()
+        } else {
+            DispatchQueue.main.async {
+                resources.releaseAll()
+            }
         }
     }
 
@@ -130,6 +153,12 @@ public final class CoreStore {
 
     public func dispatch(_ domain: String, _ action: Any) {
         dispatchRaw(["domain": domain, "action": action])
+    }
+
+    public func stagePresetImport(data: Data) {
+        let maxBytes = 4 * 1024 * 1024 + 1
+        let capped = Array(data.prefix(maxBytes)).map { Int($0) }
+        dispatch("status_menu", ["StagePresetImportBytes": capped])
     }
 
     public func selectHeaderCandidateDevice(_ selector: String) {
@@ -505,6 +534,17 @@ public final class CoreStore {
             m.lightingEnabled = sm["lighting_enabled"] as? Bool ?? true
             m.cheatSheetPreview = (sm["cheat_sheet_preview"] as? [String: Any]).map(parseCheatSheet)
             m.cheatSheetVisible = sm["cheat_sheet_visible"] as? Bool ?? false
+            if let pending = sm["pending_import"] as? [String: Any] {
+                m.pendingImport = PendingPresetImportModel(
+                    name: pending["name"] as? String ?? "预设方案",
+                    scope: pending["scope"] as? String ?? "document",
+                    containsCompleteArchive: pending["contains_complete_archive"] as? Bool ?? false,
+                    profileCount: pending["profile_count"] as? Int ?? 0,
+                    layerCount: pending["layer_count"] as? Int ?? 0,
+                    actionCount: pending["action_count"] as? Int ?? 0
+                )
+            }
+            m.presetError = sm["preset_error"] as? String
             if !hasHeader {
                 if let ps = sm["power_status"] as? [String: Any] {
                     m.powerStatus = parsePowerStatus(ps)
@@ -652,7 +692,7 @@ public final class CoreStore {
         }
         e.canAddLighting = edit["can_add_lighting"] as? Bool ?? false
         e.hasLayerLighting = edit["has_layer_lighting"] as? Bool ?? false
-        e.commandExecutionEnabled = edit["command_execution_enabled"] as? Bool ?? true
+        e.commandExecutionEnabled = edit["command_execution_enabled"] as? Bool ?? false
         return e
     }
 

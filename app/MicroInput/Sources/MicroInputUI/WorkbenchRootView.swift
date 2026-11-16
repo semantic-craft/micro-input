@@ -37,6 +37,18 @@ public struct WorkbenchRootView: View {
                 updater: updater,
                 launchAtLogin: launchAtLogin
             )
+            .sheet(
+                item: Binding(
+                    get: { store.statusMenu.pendingImport },
+                    set: { newVal in
+                        if newVal == nil {
+                            store.dispatch("status_menu", "CancelStagedPresetImport")
+                        }
+                    }
+                )
+            ) { preview in
+                StagedPresetImportSheet(store: store, preview: preview)
+            }
 
             if overlay.cheatSheetVisible, let cs = overlay.cheatSheet {
                 CheatSheetOverlayView(store: store, sheet: cs)
@@ -55,6 +67,85 @@ public struct WorkbenchRootView: View {
         ) { activeModal in
             ActiveModalSheetView(store: store, modal: activeModal)
         }
+    }
+}
+
+private struct StagedPresetImportSheet: View {
+    let store: CoreStore
+    let preview: PendingPresetImportModel
+
+    private var scopeTitle: String {
+        switch preview.scope {
+        case "profile":
+            return store.tr("单个应用方案")
+        case "layer":
+            return store.tr("单个按键层")
+        default:
+            return store.tr("整份本地文档")
+        }
+    }
+
+    private var countsSummary: String {
+        if store.locale == .en {
+            return "\(preview.profileCount) profile(s) · \(preview.layerCount) layer(s) · \(preview.actionCount) action(s)"
+        }
+        return "\(preview.profileCount) 个方案 · \(preview.layerCount) 个层 · \(preview.actionCount) 个动作"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text(store.tr("确认导入预设预览"))
+                    .font(UITheme.heading)
+                    .foregroundStyle(UITheme.textPrimary)
+                Spacer()
+                Button {
+                    store.dispatch("status_menu", "CancelStagedPresetImport")
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .surfaceButton(.icon)
+            }
+
+            SettingsCard {
+                SettingsRow(store.tr("预设名称"), showsDivider: true) {
+                    Text(preview.name)
+                        .font(UITheme.bodySemibold)
+                        .foregroundStyle(UITheme.textPrimary)
+                }
+                SettingsRow(store.tr("导入来源范围"), subtitle: countsSummary, showsDivider: true) {
+                    Text(scopeTitle)
+                        .font(UITheme.monoBadge)
+                        .foregroundStyle(UITheme.textSecondary)
+                }
+                SettingsRow(
+                    store.tr("覆盖与权限提醒"),
+                    subtitle: store.tr("确认导入将替换当前本地草稿，不会自动写入键盘硬件或启用命令执行。"),
+                    showsDivider: preview.containsCompleteArchive
+                )
+                if preview.containsCompleteArchive {
+                    SettingsRow(
+                        store.tr("完整归档来源提示"),
+                        subtitle: store.tr("该预设文件内包含完整源文档归档，请仅导入来自可信来源的预设文件。")
+                    )
+                }
+            }
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button(store.tr("取消")) {
+                    store.dispatch("status_menu", "CancelStagedPresetImport")
+                }
+                .surfaceButton(.ghost)
+                Button(store.tr("确认导入草稿")) {
+                    store.dispatch("status_menu", "ConfirmStagedPresetImport")
+                }
+                .surfaceButton(.primary)
+            }
+        }
+        .padding(20)
+        .frame(width: 540)
+        .background(UITheme.pageBackground)
     }
 }
 

@@ -45,7 +45,7 @@ impl DeviceSession {
         Ok(())
     }
 
-    /// Input 1.1.0 device-kit K:4330–4338, 4406–4412, 4628–4637.
+    /// Request bootloader entry over the active vendor HID session.
     /// A successful reply acknowledges the request only. The caller must observe
     /// the bootloader separately; timeout/disconnect must never trigger replay.
     pub async fn enter_firmware_bootloader(&self) -> Result<(), SessionError> {

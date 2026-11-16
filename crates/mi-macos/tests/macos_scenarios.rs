@@ -169,6 +169,43 @@ fn test_document_instance_lock_rejects_duplicate_owner_until_released() {
 }
 
 #[test]
+fn test_document_instance_lock_rejects_symlink_and_public_mode_and_reads_pid_when_locked() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let temp = TempDir::new().expect("temp dir");
+    let doc_dir = temp.path().join("micro-input-doc-sec");
+    std::fs::create_dir_all(&doc_dir).unwrap();
+    std::fs::set_permissions(&doc_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let outside = temp.path().join("outside.txt");
+    std::fs::write(&outside, "preserve-me\n").unwrap();
+    let lock_path = doc_dir.join("instance.lock");
+    symlink(&outside, &lock_path).unwrap();
+
+    assert!(
+        DocumentInstanceLock::acquire_with_pid(&doc_dir, 4242).is_err(),
+        "acquire must reject symlink at instance.lock"
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "preserve-me\n");
+    assert_eq!(DocumentInstanceLock::owner_pid(&doc_dir), None);
+    std::fs::remove_file(&lock_path).unwrap();
+
+    std::fs::write(&lock_path, "9999\n").unwrap();
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        DocumentInstanceLock::acquire_with_pid(&doc_dir, 4242).is_err(),
+        "acquire must reject 0o644 instance.lock"
+    );
+    assert_eq!(DocumentInstanceLock::owner_pid(&doc_dir), None);
+    std::fs::remove_file(&lock_path).unwrap();
+
+    let _held = DocumentInstanceLock::acquire_with_pid(&doc_dir, 5151)
+        .unwrap()
+        .unwrap();
+    assert_eq!(DocumentInstanceLock::owner_pid(&doc_dir), Some(5151));
+}
+
+#[test]
 fn test_app_bundle_cache_caches_lookups_and_handles_wildcard() {
     let cache = AppBundleCache::with_resolver(Arc::new(|bundle_id| AppBundleInfo {
         bundle_id: bundle_id.to_string(),
@@ -887,4 +924,86 @@ fn codex_dial_reasoning_and_fast_mode_actions_route_through_live_host_action_exe
     let receipt = untrusted_executor.execute("Codex", "AG00", &action);
     assert_eq!(receipt.outcome, "blocked");
     assert_eq!(receipt.detail, "accessibility_untrusted");
+}
+
+#[test]
+fn open_url_sink_rejects_disallowed_schemes_and_leading_dashes() {
+    let driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(driver.clone());
+    for bad in [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "smb://files.local/share",
+        "-a",
+        "https://example.com/\r\n",
+    ] {
+        let receipt = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::OpenUrl {
+                url: bad.to_string(),
+            },
+        );
+        assert_eq!(receipt.outcome, "failed", "must reject {bad:?}");
+        assert!(
+            !driver
+                .events()
+                .iter()
+                .any(|e| matches!(e, RecordedOsEvent::OpenUrl(u) if u == bad)),
+            "disallowed URL {bad:?} must never reach driver.open_url"
+        );
+    }
+}
+
+#[test]
+fn shell_command_redacts_home_target_and_releases_execution_lock_during_wait() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let driver = RecordingOsDriver::new(true);
+    let executor = Arc::new(LiveHostActionExecutor::new(driver.clone()));
+    if let Ok(home) = std::env::var("HOME") {
+        let normalized = home.trim_end_matches('/');
+        if !normalized.is_empty() && normalized != "/" {
+            let receipt = executor.execute(
+                "Antigravity",
+                "AG00",
+                &ResolvedHostAction::ShellCommand {
+                    command: String::new(),
+                    working_directory: format!("{normalized}/projects/demo"),
+                },
+            );
+            assert_eq!(receipt.target, "~/projects/demo");
+        }
+    }
+
+    let exec_bg = Arc::clone(&executor);
+    let handle = std::thread::spawn(move || {
+        exec_bg.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: "sleep 0.35".to_string(),
+                working_directory: "/tmp".to_string(),
+            },
+        )
+    });
+
+    std::thread::sleep(Duration::from_millis(60));
+    let t0 = Instant::now();
+    let app_receipt = executor.execute(
+        "Antigravity",
+        "AG01",
+        &ResolvedHostAction::OpenApp {
+            bundle_id: "com.google.antigravity".to_string(),
+        },
+    );
+    let concurrent_elapsed = t0.elapsed();
+    assert_eq!(app_receipt.outcome, "executed");
+    assert!(
+        concurrent_elapsed < Duration::from_millis(120),
+        "ShellCommand must release execution_lock before waiting, concurrent OpenApp took {concurrent_elapsed:?}"
+    );
+    let shell_receipt = handle.join().unwrap();
+    assert_eq!(shell_receipt.outcome, "executed");
 }

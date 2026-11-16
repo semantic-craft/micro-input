@@ -81,6 +81,7 @@ impl WorkbenchStore {
 
         match source {
             TargetSource::ExistingBootloader(ports) => {
+                self.firmware_update.expected_serial = None;
                 if let Some(transport) = self.mac_watcher_transport.take() {
                     mi_transport::HidTransport::stop_discovery(transport.as_ref());
                 }
@@ -91,6 +92,11 @@ impl WorkbenchStore {
                     "检测到设备已处于引导模式，请核对并选择对应串口".into();
             }
             TargetSource::Usb(target) => {
+                let expected_serial = target
+                    .serial_number
+                    .as_deref()
+                    .and_then(crate::firmware_flash::normalize_serial_identifier);
+                self.firmware_update.expected_serial = expected_serial.clone();
                 let transport = match self.mac_watcher_transport.take() {
                     Some(existing) if existing.is_exclusive_vendor() => existing,
                     Some(descriptor_only) => {
@@ -138,7 +144,12 @@ impl WorkbenchStore {
                             let mut detected = Ok(Vec::new());
                             for _ in 0..10 {
                                 std::thread::sleep(std::time::Duration::from_millis(350));
-                                match crate::firmware_flash::enumerate_bootloaders() {
+                                match crate::firmware_flash::enumerate_bootloaders().map(|ports| {
+                                    crate::firmware_flash::filter_ports_for_expected_serial(
+                                        ports,
+                                        expected_serial.as_deref(),
+                                    )
+                                }) {
                                     Ok(ports) if !ports.is_empty() => {
                                         detected = Ok(ports);
                                         break;
@@ -151,6 +162,12 @@ impl WorkbenchStore {
                             }
                             if detected.as_ref().is_ok_and(|ports| ports.is_empty()) {
                                 detected = crate::firmware_flash::enumerate_bootloaders()
+                                    .map(|ports| {
+                                        crate::firmware_flash::filter_ports_for_expected_serial(
+                                            ports,
+                                            expected_serial.as_deref(),
+                                        )
+                                    })
                                     .map_err(|e| e.to_string());
                             }
                             UpdateEvent::Bootloader(detected)
@@ -225,6 +242,7 @@ impl WorkbenchStore {
                 if !self.firmware_update.reserved() {
                     return Err("当前没有设备更新流程".into());
                 }
+                self.firmware_update.expected_serial = None;
                 self.firmware_update.projection.device_reserved = false;
                 self.firmware_update.projection.phase = "idle".into();
                 self.firmware_update.projection.ports.clear();
@@ -329,7 +347,7 @@ mod tests {
         assert!(!store.firmware_update.reserved());
 
         let port = crate::firmware_flash::BootloaderPort {
-            path: "/dev/cu.usbmodem201".into(),
+            path: "/dev/cu.usbmodem-test-201".into(),
             vid: 0x303a,
             pid: 0x1001,
             serial_number: Some("BOOT201".into()),
@@ -355,5 +373,37 @@ mod tests {
             .unwrap();
         assert!(store.mac_watcher_transport.is_none());
         assert!(store.firmware_update.reserved());
+        assert!(store.firmware_update.expected_serial.is_none());
+
+        store.firmware_update.projection.busy = false;
+        store.dispatch_firmware(FirmwareAction::Finish).unwrap();
+        assert!(store.firmware_update.expected_serial.is_none());
+
+        store.firmware_update.projection.downloaded = true;
+        store.firmware_update.projection.digest_verified = true;
+        let serial_candidate = mi_transport::HidCandidate {
+            vid: 0x303a,
+            pid: 0x8298,
+            usage_page: 0xff00,
+            usage: 1,
+            usage_pairs: vec![mi_transport::UsagePair {
+                page: 0xff00,
+                usage: 1,
+            }],
+            transport_hint: mi_transport::TransportHint::Usb,
+            product: "Creator Micro 2".into(),
+            path: "usb-serial".into(),
+            serial_number: Some("aa:bb:cc:dd:ee:ff".into()),
+        };
+        store
+            .prepare_device_with_discovery(|| Ok(vec![serial_candidate]), || Ok(vec![]))
+            .unwrap();
+        assert_eq!(
+            store.firmware_update.expected_serial.as_deref(),
+            Some("AABBCCDDEEFF")
+        );
+        store.firmware_update.projection.busy = false;
+        store.dispatch_firmware(FirmwareAction::Finish).unwrap();
+        assert!(store.firmware_update.expected_serial.is_none());
     }
 }

@@ -859,6 +859,9 @@ impl HidLink for NativeFixtureLink {
     fn backend(&self) -> LinkBackend {
         LinkBackend::MacHidapi267Numbered
     }
+    fn is_exclusive_vendor(&self) -> bool {
+        true
+    }
     async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
         self.inner.write(report).await
     }

@@ -904,7 +904,7 @@ impl Default for EditableSlotInspectorProjection {
             open_drawers: Vec::new(),
             can_add_lighting: false,
             has_layer_lighting: false,
-            command_execution_enabled: true,
+            command_execution_enabled: false,
         }
     }
 }

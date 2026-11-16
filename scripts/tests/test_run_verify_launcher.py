@@ -149,7 +149,8 @@ class RunVerifyLauncherTests(unittest.TestCase):
         script = root / 'scripts/run'
         qa_root = root / '.scratch/qa-runs'
         qa_root.mkdir(parents=True)
-        lock_file = (qa_root / 'qa.lock').open('w', encoding='utf-8')
+        lock_fd = os.open(qa_root / 'qa.lock', os.O_RDWR | os.O_CREAT, 0o600)
+        lock_file = os.fdopen(lock_fd, 'w', encoding='utf-8')
         self.addCleanup(lock_file.close)
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
@@ -258,7 +259,8 @@ class RunVerifyLauncherTests(unittest.TestCase):
         fake_home = root / 'fake_home'
         doc_dir = fake_home / 'Library/Application Support/MicroInput'
         doc_dir.mkdir(parents=True)
-        lock_file = (doc_dir / 'instance.lock').open('w', encoding='utf-8')
+        lock_fd = os.open(doc_dir / 'instance.lock', os.O_RDWR | os.O_CREAT, 0o600)
+        lock_file = os.fdopen(lock_fd, 'w', encoding='utf-8')
         self.addCleanup(lock_file.close)
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
@@ -396,6 +398,121 @@ class RunVerifyLauncherTests(unittest.TestCase):
         self.assertIn('1700000000024-100', remaining_completed)
         self.assertTrue((active_dir / 'Micro Input QA.app').exists())
         self.assertTrue((qa_root / 'qa.lock').exists())
+
+    def test_unique_bundle_id_cleanup_never_deletes_other_qa_session_plists(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+        child = FakeVerifyChild([0])
+        captured_plist = {}
+
+        def fake_spawn(command, **kwargs):
+            info_path = Path(command[0]).parent.parent / 'Info.plist'
+            with info_path.open('rb') as handle:
+                captured_plist.update(plistlib.load(handle))
+            return child
+
+        fake_home = root / 'fake_home'
+        prefs_dir = fake_home / 'Library/Preferences'
+        prefs_dir.mkdir(parents=True)
+        other_unique = prefs_dir / 'com.semanticcraft.microinput.qa.other999.plist'
+        fixed_qa = prefs_dir / 'com.semanticcraft.microinput.qa.plist'
+        prod_plist = prefs_dir / 'com.semanticcraft.microinput.plist'
+        for p in (other_unique, fixed_qa, prod_plist):
+            p.write_text('plist', encoding='utf-8')
+
+        with patch.object(sys, 'argv', [str(script), '--verify', '--unique-bundle-id']), \
+                patch('pathlib.Path.home', return_value=fake_home), \
+                patch('subprocess.Popen', side_effect=fake_spawn), \
+                patch('subprocess.run'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+
+        self.assertTrue(captured_plist['CFBundleIdentifier'].startswith('com.semanticcraft.microinput.qa.'))
+        self.assertTrue(other_unique.exists(), 'Concurrent --unique-bundle-id session plist must not be deleted')
+        self.assertTrue(fixed_qa.exists(), 'Fixed QA session plist must not be deleted by --unique-bundle-id run')
+        self.assertTrue(prod_plist.exists(), 'Production preferences plist must not be deleted')
+
+    def test_lock_hardening_rejects_fifo_symlink_user_symlink_parent_and_loose_mode(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+
+        qa_root = root / '.scratch/qa-runs'
+        qa_root.mkdir(parents=True)
+        fifo_qa_lock = qa_root / 'qa.lock'
+        os.mkfifo(fifo_qa_lock, 0o600)
+
+        stderr = io.StringIO()
+        with patch.object(sys, 'argv', [str(script), '--verify']), \
+                patch('subprocess.Popen') as popen, \
+                patch('subprocess.run'), \
+                contextlib.redirect_stderr(stderr):
+            result_box = []
+
+            def run_launcher():
+                try:
+                    runpy.run_path(str(script), run_name='__main__')
+                except SystemExit as exc:
+                    result_box.append(('exit', exc.code))
+                except BaseException as exc:
+                    result_box.append(('err', exc))
+
+            import threading
+            t = threading.Thread(target=run_launcher, daemon=True)
+            t.start()
+            t.join(timeout=0.5)
+            if t.is_alive():
+                drain = os.open(fifo_qa_lock, os.O_RDONLY | os.O_NONBLOCK)
+                t.join(timeout=1.0)
+                os.close(drain)
+                self.fail('scripts/run blocked opening FIFO qa.lock without O_NONBLOCK')
+            self.assertEqual(result_box[0][0], 'exit')
+            self.assertEqual(result_box[0][1], 2)
+            popen.assert_not_called()
+
+        fifo_qa_lock.unlink()
+        victim = root / 'victim.txt'
+        victim.write_text('KEEP', encoding='utf-8')
+        fifo_qa_lock.symlink_to(victim)
+        with patch.object(sys, 'argv', [str(script), '--verify']), \
+                patch('subprocess.Popen') as popen, \
+                patch('subprocess.run'), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 2)
+            popen.assert_not_called()
+        self.assertEqual(victim.read_text(encoding='utf-8'), 'KEEP')
+
+        fifo_qa_lock.unlink()
+        fifo_qa_lock.write_text('', encoding='utf-8')
+        os.chmod(fifo_qa_lock, 0o644)
+        with patch.object(sys, 'argv', [str(script), '--verify']), \
+                patch('subprocess.Popen') as popen, \
+                patch('subprocess.run'), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 2)
+            popen.assert_not_called()
+
+        fake_home = root / 'fake_home'
+        real_target = root / 'real_doc_dir'
+        real_target.mkdir(parents=True)
+        os.chmod(real_target, 0o755)
+        doc_parent = fake_home / 'Library/Application Support'
+        doc_parent.mkdir(parents=True)
+        (doc_parent / 'MicroInput').symlink_to(real_target)
+        with patch.object(sys, 'argv', [str(script)]), \
+                patch('pathlib.Path.home', return_value=fake_home), \
+                patch('subprocess.Popen') as popen, \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 2)
+            popen.assert_not_called()
+        self.assertEqual(stat.S_IMODE(real_target.stat().st_mode), 0o755)
 
 
 if __name__ == '__main__':

@@ -90,6 +90,48 @@ public enum UpdateServiceStatus: Equatable, Sendable {
     }
 }
 
+private enum BundlePathNormalization {
+    static let ephemeralMarkers = [
+        "/target/",
+        "/DerivedData/",
+        "/.build/",
+        "/tmp/",
+        "/private/tmp/",
+        "/var/folders/",
+        "/.scratch/",
+    ]
+
+    static func normalize(_ bundlePath: String) -> (trimmed: String, resolved: String) {
+        var trimmed = bundlePath
+        while trimmed.count > 1 && trimmed.hasSuffix("/") {
+            trimmed.removeLast()
+        }
+        return (trimmed, resolvedBundlePath(for: trimmed))
+    }
+
+    private static func resolvedBundlePath(for trimmedPath: String) -> String {
+        let resolved = URL(fileURLWithPath: trimmedPath).resolvingSymlinksInPath().path
+        if resolved != trimmedPath {
+            return resolved
+        }
+        if let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: trimmedPath) {
+            let expanded: String
+            if dest.hasPrefix("/") {
+                expanded = dest
+            } else {
+                let parent = URL(fileURLWithPath: trimmedPath).deletingLastPathComponent()
+                expanded = parent.appendingPathComponent(dest).standardized.path
+            }
+            var trimmedDest = expanded
+            while trimmedDest.count > 1 && trimmedDest.hasSuffix("/") {
+                trimmedDest.removeLast()
+            }
+            return URL(fileURLWithPath: trimmedDest).resolvingSymlinksInPath().path
+        }
+        return resolved
+    }
+}
+
 public enum UpdateLaunchPolicy {
     public static func evaluate(
         identity: AppReleaseIdentity,
@@ -107,14 +149,20 @@ public enum UpdateLaunchPolicy {
         ) {
             return .isolated(reason: .qaVerifyMode)
         }
-        if bundlePath.contains("/target/") || bundlePath.contains("/.build/") || bundlePath.contains("/DerivedData/") {
-            return .isolated(reason: .ephemeralBuildBundle(bundlePath: bundlePath))
+        let paths = BundlePathNormalization.normalize(bundlePath)
+        if !paths.trimmed.hasSuffix(".app") || !paths.resolved.hasSuffix(".app") {
+            return .unavailable(reason: .unbundledExecutable)
         }
-        if bundlePath.contains("/AppTranslocation/") || bundlePath.hasPrefix("/Volumes/") {
+        if paths.trimmed.contains("/AppTranslocation/") || paths.trimmed.hasPrefix("/Volumes/")
+            || paths.resolved.contains("/AppTranslocation/") || paths.resolved.hasPrefix("/Volumes/")
+        {
             return .unavailable(reason: .translocatedOrMountedVolume(bundlePath: bundlePath))
         }
-        if !bundlePath.hasSuffix(".app") {
-            return .unavailable(reason: .unbundledExecutable)
+        if BundlePathNormalization.ephemeralMarkers.contains(where: { paths.trimmed.contains($0) || paths.resolved.contains($0) }) {
+            return .isolated(reason: .ephemeralBuildBundle(bundlePath: paths.resolved))
+        }
+        guard identity.bundleIdentifier == LaunchAtLoginPolicy.productionBundleIdentifier else {
+            return .unavailable(reason: .wrongBundleIdentifier(actual: identity.bundleIdentifier))
         }
         guard let feedRaw = identity.feedURLString,
               let feedURL = URL(string: feedRaw),
@@ -258,28 +306,6 @@ public final class SoftwareUpdateController {
 public enum LaunchAtLoginPolicy {
     public static let productionBundleIdentifier = "craft.semantic.micro-input.dev"
 
-    private static func resolvedBundlePath(for trimmedPath: String) -> String {
-        let resolved = URL(fileURLWithPath: trimmedPath).resolvingSymlinksInPath().path
-        if resolved != trimmedPath {
-            return resolved
-        }
-        if let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: trimmedPath) {
-            let expanded: String
-            if dest.hasPrefix("/") {
-                expanded = dest
-            } else {
-                let parent = URL(fileURLWithPath: trimmedPath).deletingLastPathComponent()
-                expanded = parent.appendingPathComponent(dest).standardized.path
-            }
-            var trimmedDest = expanded
-            while trimmedDest.count > 1 && trimmedDest.hasSuffix("/") {
-                trimmedDest.removeLast()
-            }
-            return URL(fileURLWithPath: trimmedDest).resolvingSymlinksInPath().path
-        }
-        return resolved
-    }
-
     public static func evaluate(
         bundleIdentifier: String?,
         bundlePath: String,
@@ -296,21 +322,16 @@ public enum LaunchAtLoginPolicy {
         if environment["MI_DISABLE_LOGIN_ITEM"] == "1" {
             return .disabledByEnvironment(variable: "MI_DISABLE_LOGIN_ITEM")
         }
-        var trimmedPath = bundlePath
-        while trimmedPath.count > 1 && trimmedPath.hasSuffix("/") {
-            trimmedPath.removeLast()
-        }
-        let resolvedPath = resolvedBundlePath(for: trimmedPath)
-        if !trimmedPath.hasSuffix(".app") || !resolvedPath.hasSuffix(".app") {
+        let paths = BundlePathNormalization.normalize(bundlePath)
+        if !paths.trimmed.hasSuffix(".app") || !paths.resolved.hasSuffix(".app") {
             return .unbundledExecutable
         }
-        if trimmedPath.contains("/AppTranslocation/") || trimmedPath.hasPrefix("/Volumes/")
-            || resolvedPath.contains("/AppTranslocation/") || resolvedPath.hasPrefix("/Volumes/")
+        if paths.trimmed.contains("/AppTranslocation/") || paths.trimmed.hasPrefix("/Volumes/")
+            || paths.resolved.contains("/AppTranslocation/") || paths.resolved.hasPrefix("/Volumes/")
         {
             return .translocatedOrMountedVolume(bundlePath: bundlePath)
         }
-        let ephemeralMarkers = ["/target/", "/DerivedData/", "/.build/", "/tmp/", "/var/folders/", "/.scratch/"]
-        if ephemeralMarkers.contains(where: { trimmedPath.contains($0) || resolvedPath.contains($0) }) {
+        if BundlePathNormalization.ephemeralMarkers.contains(where: { paths.trimmed.contains($0) || paths.resolved.contains($0) }) {
             return .ephemeralBuildBundle(bundlePath: bundlePath)
         }
         guard bundleIdentifier == productionBundleIdentifier else {

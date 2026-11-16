@@ -1334,3 +1334,249 @@ fn action_catalog_exposes_all_19_mouse_tokens_and_4_cheat_sheet_tokens_with_hone
         assert!(cap.prerequisites.iter().any(|p| p.contains("0.6.3+")));
     }
 }
+
+#[test]
+fn open_url_routing_enforces_http_or_https_scheme_and_rejects_flag_or_control_chars() {
+    let mut draft = Draft::default();
+    let pid = draft.document.editable.graph.profile_order[0].clone();
+    let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+    let slot_key = draft.document.editable.graph.layers[&lid]
+        .controls
+        .iter()
+        .find(|(_, c)| c.logical_control == "logical-0")
+        .map(|(k, _)| k.clone())
+        .expect("logical-0 slot");
+
+    let mut resolve_raw_url = |raw: &str| {
+        let aid = "crafted-open-url".to_string();
+        draft.document.editable.graph.actions.insert(
+            aid.clone(),
+            Action {
+                id: aid.clone(),
+                name: "Crafted URL".into(),
+                category: "导航".into(),
+                detail: raw.into(),
+                payload: json!({
+                    "type": "open_url",
+                    "url": raw,
+                }),
+            },
+        );
+        draft
+            .document
+            .editable
+            .graph
+            .layers
+            .get_mut(&lid)
+            .unwrap()
+            .controls
+            .get_mut(&slot_key)
+            .unwrap()
+            .action_id = Some(aid);
+        resolve_host_action_with_command_consent(&draft.document, Some(&pid), "AG00", true, false)
+    };
+
+    for invalid in [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "smb://server/share",
+        "-flag",
+        "https://example.com/path with spaces",
+        "https://example.com/\n",
+        "https://example.com/\x07",
+        "http:example.com",
+        "https://",
+        "",
+    ] {
+        assert!(
+            resolve_raw_url(invalid).is_none(),
+            "host_router must reject invalid OpenUrl {invalid:?}"
+        );
+    }
+
+    for valid in [
+        "http://localhost:8080/health",
+        "HTTPS://Example.COM/docs?q=1#frag",
+    ] {
+        assert_eq!(
+            resolve_raw_url(valid),
+            Some(ResolvedHostAction::OpenUrl {
+                url: valid.to_string(),
+            }),
+            "host_router must allow valid http/https OpenUrl {valid:?}"
+        );
+    }
+}
+
+#[test]
+fn strict_bundle_id_and_shortcut_target_validation_reject_injection_and_malformed_inputs() {
+    use mi_model::host_router::is_valid_bundle_id;
+
+    let mut draft = Draft::default();
+    let pid = draft.document.editable.graph.profile_order[0].clone();
+    let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+    let slot_key = draft.document.editable.graph.layers[&lid]
+        .controls
+        .iter()
+        .find(|(_, c)| c.logical_control == "logical-0")
+        .map(|(k, _)| k.clone())
+        .expect("logical-0 slot");
+
+    let mut resolve_raw_payload = |payload: serde_json::Value| {
+        let aid = "crafted-bundle-action".to_string();
+        let action = Action {
+            id: aid.clone(),
+            name: "Crafted Bundle Action".into(),
+            category: "应用".into(),
+            detail: String::new(),
+            payload,
+        };
+        let valid_action = action.validate().is_ok();
+        draft
+            .document
+            .editable
+            .graph
+            .actions
+            .insert(aid.clone(), action);
+        draft
+            .document
+            .editable
+            .graph
+            .layers
+            .get_mut(&lid)
+            .unwrap()
+            .controls
+            .get_mut(&slot_key)
+            .unwrap()
+            .action_id = Some(aid);
+        (
+            valid_action,
+            resolve_host_action_with_command_consent(
+                &draft.document,
+                Some(&pid),
+                "AG00",
+                true,
+                false,
+            ),
+        )
+    };
+
+    for invalid_bundle in [
+        "com.apple.Safari' || kMDItemFSName == '*'",
+        "-a.evil",
+        "singleword",
+        ".leading.dot",
+        "trailing.dot.",
+        "empty..segment",
+        "com.example.has space",
+        "",
+        &format!("com.example.{}", "a".repeat(250)),
+    ] {
+        assert!(!is_valid_bundle_id(invalid_bundle), "{invalid_bundle:?}");
+        let (valid_open, resolved_open) = resolve_raw_payload(json!({
+            "type": "open_app",
+            "bundle_id": invalid_bundle,
+        }));
+        assert!(!valid_open, "validate() must reject {invalid_bundle:?}");
+        assert!(
+            resolved_open.is_none(),
+            "router must reject {invalid_bundle:?}"
+        );
+
+        let (valid_shortcut, resolved_shortcut) = resolve_raw_payload(json!({
+            "type": "shortcut",
+            "key": "k",
+            "modifiers": ["command"],
+            "target": invalid_bundle,
+        }));
+        if invalid_bundle == "singleword" {
+            assert!(valid_shortcut);
+            assert_eq!(
+                resolved_shortcut,
+                Some(ResolvedHostAction::Shortcut {
+                    key: "k".into(),
+                    key_code: 0x28,
+                    modifiers: vec!["command".into()],
+                    target_bundle_id: None,
+                })
+            );
+        } else if invalid_bundle.is_empty() {
+            assert!(
+                !valid_shortcut,
+                "validate() must reject empty shortcut target"
+            );
+            assert!(
+                resolved_shortcut.is_none(),
+                "router must reject empty shortcut target"
+            );
+        } else {
+            assert!(
+                !valid_shortcut,
+                "validate() must reject shortcut target {invalid_bundle:?}"
+            );
+            assert!(
+                resolved_shortcut.is_none(),
+                "router must reject shortcut target {invalid_bundle:?}"
+            );
+        }
+    }
+
+    for valid_bundle in ["com.example.my_app", "com.apple.Safari", "dev.herdr.app-1"] {
+        assert!(is_valid_bundle_id(valid_bundle), "{valid_bundle:?}");
+        let (valid_open, resolved_open) = resolve_raw_payload(json!({
+            "type": "open_app",
+            "bundle_id": valid_bundle,
+        }));
+        assert!(valid_open);
+        assert_eq!(
+            resolved_open,
+            Some(ResolvedHostAction::OpenApp {
+                bundle_id: valid_bundle.to_string(),
+            })
+        );
+        let (valid_shortcut, resolved_shortcut) = resolve_raw_payload(json!({
+            "type": "shortcut",
+            "key": "k",
+            "modifiers": ["command"],
+            "target": valid_bundle,
+        }));
+        assert!(valid_shortcut);
+        assert_eq!(
+            resolved_shortcut,
+            Some(ResolvedHostAction::Shortcut {
+                key: "k".into(),
+                key_code: 0x28,
+                modifiers: vec!["command".into()],
+                target_bundle_id: Some(valid_bundle.to_string()),
+            })
+        );
+    }
+
+    for symbolic in ["frontmost-editor", "specific-editor", "editor", "device"] {
+        let (valid_shortcut, resolved_shortcut) = resolve_raw_payload(json!({
+            "type": "shortcut",
+            "key": "k",
+            "modifiers": ["command"],
+            "target": symbolic,
+        }));
+        assert!(valid_shortcut, "symbolic target {symbolic:?} must validate");
+        assert_eq!(
+            resolved_shortcut,
+            Some(ResolvedHostAction::Shortcut {
+                key: "k".into(),
+                key_code: 0x28,
+                modifiers: vec!["command".into()],
+                target_bundle_id: None,
+            })
+        );
+    }
+
+    let (valid_bad_symbolic, resolved_bad_symbolic) = resolve_raw_payload(json!({
+        "type": "shortcut",
+        "key": "k",
+        "modifiers": ["command"],
+        "target": "-bad-symbolic",
+    }));
+    assert!(!valid_bad_symbolic);
+    assert!(resolved_bad_symbolic.is_none());
+}

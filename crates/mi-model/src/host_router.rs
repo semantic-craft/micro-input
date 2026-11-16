@@ -474,6 +474,34 @@ pub fn macos_virtual_key_code(key: &str) -> Option<u16> {
     }
 }
 
+pub fn is_valid_bundle_id(bundle_id: &str) -> bool {
+    !bundle_id.is_empty()
+        && bundle_id.len() <= 256
+        && bundle_id
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && bundle_id.split('.').count() >= 2
+        && bundle_id.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
+pub(crate) fn is_valid_symbolic_shortcut_target(target: &str) -> bool {
+    !target.is_empty()
+        && target.len() <= 256
+        && target
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && target
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn profile_open_app_bundle_id(doc: &LocalDocumentV2, profile_id: &str) -> Option<String> {
     let profile = doc.editable.graph.profiles.get(profile_id)?;
     let lid = profile.layer_order.first()?;
@@ -489,12 +517,40 @@ fn profile_open_app_bundle_id(doc: &LocalDocumentV2, profile_id: &str) -> Option
             serde_json::from_value(action.payload.clone())
         {
             let trimmed = bundle_id.trim();
-            if !trimmed.is_empty() && trimmed.contains('.') {
+            if is_valid_bundle_id(trimmed) {
                 return Some(trimmed.to_owned());
             }
         }
     }
     None
+}
+
+pub fn validate_open_url(url: &str) -> Result<(), String> {
+    if url.is_empty() || url.len() > 16384 {
+        return Err("网址不能为空且不能超过 16384 字节".into());
+    }
+    if url.starts_with('-') {
+        return Err("网址不能以连字符开头".into());
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("网址不能包含空白或控制字符".into());
+    }
+    let has_http_prefix = url
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || url
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+    if !has_http_prefix {
+        return Err("仅支持 http:// 或 https:// 网址".into());
+    }
+    let parsed = url::Url::parse(url).map_err(|_| "网址格式无效".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.host_str().is_some_and(|host| !host.is_empty())
+    {
+        return Err("仅支持包含有效主机的 http:// 或 https:// 网址".into());
+    }
+    Ok(())
 }
 
 fn convert_action(
@@ -511,12 +567,18 @@ fn convert_action(
             target,
         } => {
             let key_code = macos_virtual_key_code(&key)?;
-            let target_bundle_id = if target == "frontmost-editor" || target.trim().is_empty() {
+            let target_bundle_id = if target == "frontmost-editor" {
                 None
             } else if target.contains('.') {
-                Some(target)
-            } else {
+                if is_valid_bundle_id(&target) {
+                    Some(target)
+                } else {
+                    return None;
+                }
+            } else if is_valid_symbolic_shortcut_target(&target) {
                 None
+            } else {
+                return None;
             };
             Some(ResolvedHostAction::Shortcut {
                 key,
@@ -541,8 +603,13 @@ fn convert_action(
                 submit: false,
             })
         }
-        ActionKind::OpenApp { bundle_id } => Some(ResolvedHostAction::OpenApp { bundle_id }),
-        ActionKind::OpenUrl { url } => Some(ResolvedHostAction::OpenUrl { url }),
+        ActionKind::OpenApp { bundle_id } => {
+            is_valid_bundle_id(&bundle_id).then_some(ResolvedHostAction::OpenApp { bundle_id })
+        }
+        ActionKind::OpenUrl { url } => {
+            validate_open_url(&url).ok()?;
+            Some(ResolvedHostAction::OpenUrl { url })
+        }
         ActionKind::ShellCommand {
             command,
             working_directory,

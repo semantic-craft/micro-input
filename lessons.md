@@ -26,14 +26,14 @@
 
 ## Creator Micro 2 逐键状态灯须绑定 KV_OAI_AG 键位并基于真实设备 ACK 记账
 
-- 起因与后果：固件 `0.6.3`（`wl_lights.cpp`）仅对当前层键码为 `KV_OAI_AG00..KV_OAI_AG19` 的物理轴体应用 `v.oai.thstatus` 逐键颜色，标准 HID 键码直接回退渲染层背光且省去 `"lights"` 时默认整盘常亮 `#FFFFFF` 纯白；加之六层核验后关闭 `DeviceSession`、`store.rs` 跳过发送却硬编码返回 `"synced": true`、草稿选中层保护混入实时灯效，导致菜单栏显示绿/蓝会话槽位而实体键盘全白。
+- 起因与后果：固件 `0.6.3` 逐键灯控逻辑仅对当前层键码为 `KV_OAI_AG00..KV_OAI_AG19` 的物理轴体应用 `v.oai.thstatus` 逐键颜色，标准 HID 键码直接回退渲染层背光且省去 `"lights"` 时默认整盘常亮 `#FFFFFF` 纯白；加之六层核验后关闭 `DeviceSession`、`store.rs` 跳过发送却硬编码返回 `"synced": true`、草稿选中层保护混入实时灯效，导致菜单栏显示绿/蓝会话槽位而实体键盘全白。
 - 修复：六层方案将第 2/3 层顶部 6 槽编为 `KV_OAI_AG06..AG11` 与 `KV_OAI_AG12..AG17`（避开第 1 层 Codex 独占的 `AG00..AG05`）并为托管层写入 `"lights"` 关灯底色；`SharedVendorBridge` 共享侧通道同时承载 `v.oai.hid` 6 微动跨层去重收键与 `v.oai.thstatus` 真实 ACK 确认（`WireSyncState::Confirmed`）、900 次请求无感预轮转；移除旧版布局兼容分支，在核实设备快照仍与 `planned-keymap.json` 一致且保留原始出厂备份的前提下直接原位升级第 2..6 层。
 - 验证点：`mi-proto` 校验 `AG00..AG19` 20 键边界并拒绝 `ENC_*`；`mi-model` / `mi-session` / `mi-core` 覆盖过期六层快照启动自动原位升级、外部手工改键拒绝覆盖、保留第 1 层原始字节与出厂恢复链；`mi-bridge` / `mi-core` 覆盖绿/蓝逐键下发、真实 ACK 同步确认、断联关灯防重放与 `R21` 隔离。Seen 2x（2026-11-12）。
 
-## Antigravity 会话状态分类与侧栏直达须对齐 Jetski Web 与 AXLink
+## Antigravity 会话状态分类与侧栏直达须对齐前端列表规则与 AXLink
 
 - 起因与后果：UI 改版与 `3b72418` 引入两处退化。其一，`store.rs` 按主观猜测匹配不存在的 `WAITING_FOR_*` 枚举并加了 15 分钟蓝点过期与 `NO_TOOL_CALL` 门控，导致超过 15 分钟的未读完成会话丢蓝点、`BUSY` / `hasRunningSubagents` / `notFullyIdle` 漏判进行中；其二，`native_ax.rs` 读取 `AXLink` 时漏读 `AXURL`，退而点击 `Search Conversations` 向模态搜索框输入 UUID，造成切换时弹窗闪烁。
-- 修复：经只读 REA 解包 `language_server` 内嵌 `Jetski Web`（`Pk` / `Rk` / `Qcb`）与实机侧栏 AX 核验，`classify_antigravity_trajectory_summaries` 对齐真实状态谓词并结合最前窗口 `/c/<cid>` 抑制已打开蓝点；`ObservationPurpose::Sessions` 补读 `AXLink.AXURL`、`AXButton.AXExpanded` 与 `AXStaticText.AXValue`，直接按侧栏行 `Stop execution` / `Archive conversation` / 时间戳识别三态并对目标 `/c/<uuid>` 执行单次 `AXPress`，删除全部模态搜索弹窗代码；主舞台恢复 `灯光筛选` 浮层与 `已读熄灯`。
+- 修复：对照安装版客户端前端会话分类规则与实机侧栏 AX 核验，`classify_antigravity_trajectory_summaries` 对齐真实状态谓词并结合最前窗口 `/c/<cid>` 抑制已打开蓝点；`ObservationPurpose::Sessions` 补读 `AXLink.AXURL`、`AXButton.AXExpanded` 与 `AXStaticText.AXValue`，直接按侧栏行 `Stop execution` / `Archive conversation` / 时间戳识别三态并对目标 `/c/<uuid>` 执行单次 `AXPress`，删除全部模态搜索弹窗代码；主舞台恢复 `灯光筛选` 浮层与 `已读熄灯`。
 - 验证点：`mi-core::session_navigation` 覆盖 2 小时未读蓝点保留、`markedAsUnread`、最前窗口抑制与 `BUSY` / `waitingSteps` 分类；`mi-macos::native_ax` 覆盖同名会话 `AXURL` 区分、折叠侧栏/项目/`See all` 原地展开及跨工作区同名目录消歧。Seen 1x（2026-11-11）。
 
 ## Antigravity 实时语音须走应用内 Start/End Voice，不得映射成 Ctrl+M 听写
@@ -66,7 +66,7 @@
 
 - 标签：#设备 #验收
 - 起因与后果：Input 1.1.0 中点击 Profile 名称会出现 Updating device 倒计时；不能因另有激活按钮就推断名称选择仅影响编辑器。
-- 修复与证据：观察结束恢复 Codex，两份本地配置哈希一致；未做固件读回。见 .scratch/input-study/out/layer-lighting-joystick-followup.md。
+- 修复与证据：观察结束恢复 Codex，两份本地配置哈希一致；未做固件读回。
 - 正确做法：自研区分 UI 选中对象、草稿和设备活动配置；写入通过明确入口执行。
 - 验证点：后续测试应确认普通页面导航不发送设备写请求，写入后需读回；当前尚未实现这些检查。
 - 复发记录：Seen 1x（2026-11-02）。

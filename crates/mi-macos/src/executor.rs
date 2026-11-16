@@ -5,9 +5,7 @@ use crate::native_ax::NativeAxProvider;
 use mi_model::host_router::{ResolvedHostAction, ResolvedMacroEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -21,6 +19,7 @@ pub const KEY_CODE_N: u16 = 0x2D;
 pub const CG_EVENT_TYPE_FLAGS_CHANGED: u32 = 12;
 pub const CG_EVENT_FLAG_MASK_SECONDARY_FN: u64 = 0x0080_0000;
 pub const MAX_CLIPBOARD_STASH_BYTES: usize = 4 * 1024 * 1024;
+pub const DEFAULT_SHELL_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_ANTIGRAVITY_AX_DEPTH: usize = 36;
 pub const MAX_ANTIGRAVITY_AX_NODES: usize = 1800;
 
@@ -314,6 +313,10 @@ unsafe extern "C" {
         value: CFTypeRef,
     ) -> AXError;
     fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
+    fn AXUIElementGetTypeID() -> usize;
+    fn CFGetTypeID(cf: CFTypeRef) -> usize;
+    fn CFStringGetTypeID() -> usize;
+    fn CFArrayGetTypeID() -> usize;
     static kCFBooleanTrue: CFTypeRef;
     static kCFBooleanFalse: CFTypeRef;
     static kCFTypeDictionaryKeyCallBacks: u8;
@@ -451,7 +454,7 @@ unsafe fn cf_string_from_str(s: &str) -> CFStringRef {
 
 #[cfg(target_os = "macos")]
 unsafe fn cf_string_to_rust(cf: CFStringRef) -> Option<String> {
-    if cf.is_null() {
+    if cf.is_null() || CFGetTypeID(cf) != CFStringGetTypeID() {
         return None;
     }
     let len = CFStringGetLength(cf);
@@ -477,24 +480,7 @@ unsafe fn cf_string_to_rust(cf: CFStringRef) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn ax_copy_string_attr(elem: AXUIElementRef, attr: &str) -> Option<String> {
-    let attr_cf = cf_string_from_str(attr);
-    if attr_cf.is_null() {
-        return None;
-    }
-    let mut val: CFTypeRef = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(elem, attr_cf, &mut val);
-    CFRelease(attr_cf);
-    if err != K_AX_ERROR_SUCCESS || val.is_null() {
-        return None;
-    }
-    let out = cf_string_to_rust(val);
-    CFRelease(val);
-    out
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn ax_copy_element_attr(elem: AXUIElementRef, attr: &str) -> Option<AXUIElementRef> {
+unsafe fn ax_copy_raw_attr(elem: AXUIElementRef, attr: &str) -> Option<CFTypeRef> {
     let attr_cf = cf_string_from_str(attr);
     if attr_cf.is_null() {
         return None;
@@ -509,30 +495,54 @@ unsafe fn ax_copy_element_attr(elem: AXUIElementRef, attr: &str) -> Option<AXUIE
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn ax_copy_children(elem: AXUIElementRef) -> Vec<AXUIElementRef> {
-    let attr_cf = cf_string_from_str("AXChildren");
-    if attr_cf.is_null() {
+unsafe fn cf_array_copy_ax_elements(owned_val: CFTypeRef, limit: isize) -> Vec<AXUIElementRef> {
+    if owned_val.is_null() {
         return Vec::new();
     }
-    let mut val: CFTypeRef = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(elem, attr_cf, &mut val);
-    CFRelease(attr_cf);
-    if err != K_AX_ERROR_SUCCESS || val.is_null() {
+    if CFGetTypeID(owned_val) != CFArrayGetTypeID() {
+        CFRelease(owned_val);
         return Vec::new();
     }
-    let count = CFArrayGetCount(val);
+    let ax_elem_type = AXUIElementGetTypeID();
+    let count = CFArrayGetCount(owned_val);
     let mut out = Vec::new();
     if count > 0 {
-        for i in 0..count.min(256) {
-            let item = CFArrayGetValueAtIndex(val, i);
-            if !item.is_null() {
+        for i in 0..count.min(limit) {
+            let item = CFArrayGetValueAtIndex(owned_val, i);
+            if !item.is_null() && CFGetTypeID(item) == ax_elem_type {
                 CFRetain(item);
                 out.push(item);
             }
         }
     }
+    CFRelease(owned_val);
+    out
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ax_copy_string_attr(elem: AXUIElementRef, attr: &str) -> Option<String> {
+    let val = ax_copy_raw_attr(elem, attr)?;
+    let out = cf_string_to_rust(val);
     CFRelease(val);
     out
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ax_copy_element_attr(elem: AXUIElementRef, attr: &str) -> Option<AXUIElementRef> {
+    let val = ax_copy_raw_attr(elem, attr)?;
+    if CFGetTypeID(val) != AXUIElementGetTypeID() {
+        CFRelease(val);
+        return None;
+    }
+    Some(val)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ax_copy_children(elem: AXUIElementRef) -> Vec<AXUIElementRef> {
+    match ax_copy_raw_attr(elem, "AXChildren") {
+        Some(val) => cf_array_copy_ax_elements(val, 256),
+        None => Vec::new(),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -792,17 +802,12 @@ impl HostActionReceipt {
     }
 
     pub fn append_to_audit_log(&self, path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let mut line = serde_json::to_string(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push('\n');
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(path)?;
+        let mut file =
+            crate::private_fs::open_private_file(path, crate::private_fs::PrivateOpenMode::Append)
+                .map_err(io::Error::other)?;
         file.write_all(line.as_bytes())
     }
 }
@@ -859,6 +864,9 @@ pub trait HostOsDriver: Send + Sync {
     fn post_apple_fn_flags(&self, key_down: bool) -> Result<(), String>;
     fn snapshot_clipboard(&self, max_bytes: usize) -> ClipboardSnapshot;
     fn write_clipboard_plain_text(&self, text: &str) -> u64;
+    fn write_clipboard_plain_text_checked(&self, text: &str) -> Result<u64, String> {
+        Ok(self.write_clipboard_plain_text(text))
+    }
     fn restore_clipboard(&self, snapshot: &ClipboardSnapshot, expected_change_count: u64) -> bool;
     fn open_url(&self, url: &str) -> Result<(), String>;
     fn focus_agent_input(&self, adapter: &str) -> Result<(), String>;
@@ -965,6 +973,7 @@ struct TapCallbackContext {
     active: AtomicBool,
     suppress_mouse_moved: AtomicBool,
     tap_port: AtomicUsize,
+    run_loop_addr: AtomicUsize,
     deltas: Arc<Mutex<Vec<(f64, f64)>>>,
 }
 
@@ -1012,10 +1021,95 @@ unsafe extern "C" fn model_picker_mouse_tap_callback(
 }
 
 #[cfg(target_os = "macos")]
+trait TapRuntime: Send + Sync + 'static {
+    unsafe fn create_tap(&self, options: u32, ctx: *mut std::ffi::c_void) -> CFMachPortRef;
+    unsafe fn create_source(&self, tap: CFMachPortRef) -> CFRunLoopSourceRef;
+    unsafe fn invalidate_port(&self, tap: CFMachPortRef);
+    unsafe fn current_run_loop(&self) -> CFRunLoopRef;
+    unsafe fn add_source(&self, rl: CFRunLoopRef, source: CFRunLoopSourceRef);
+    unsafe fn remove_source(&self, rl: CFRunLoopRef, source: CFRunLoopSourceRef);
+    unsafe fn enable_tap(&self, tap: CFMachPortRef, enable: bool);
+    unsafe fn run_loop_once(&self);
+    unsafe fn stop_run_loop(&self, rl: CFRunLoopRef);
+    unsafe fn retain_cf(&self, cf: CFTypeRef) -> CFTypeRef;
+    unsafe fn release_cf(&self, cf: CFTypeRef);
+}
+
+#[cfg(target_os = "macos")]
+struct LiveTapRuntime;
+
+#[cfg(target_os = "macos")]
+impl TapRuntime for LiveTapRuntime {
+    unsafe fn create_tap(&self, options: u32, ctx: *mut std::ffi::c_void) -> CFMachPortRef {
+        CGEventTapCreate(
+            CG_SESSION_EVENT_TAP,
+            CG_HEAD_INSERT_EVENT_TAP,
+            options,
+            1u64 << CG_EVENT_MOUSE_MOVED,
+            model_picker_mouse_tap_callback,
+            ctx,
+        )
+    }
+    unsafe fn create_source(&self, tap: CFMachPortRef) -> CFRunLoopSourceRef {
+        CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0)
+    }
+    unsafe fn invalidate_port(&self, tap: CFMachPortRef) {
+        CFMachPortInvalidate(tap);
+    }
+    unsafe fn current_run_loop(&self) -> CFRunLoopRef {
+        CFRunLoopGetCurrent()
+    }
+    unsafe fn add_source(&self, rl: CFRunLoopRef, source: CFRunLoopSourceRef) {
+        CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
+    }
+    unsafe fn remove_source(&self, rl: CFRunLoopRef, source: CFRunLoopSourceRef) {
+        CFRunLoopRemoveSource(rl, source, kCFRunLoopCommonModes);
+    }
+    unsafe fn enable_tap(&self, tap: CFMachPortRef, enable: bool) {
+        CGEventTapEnable(tap, enable);
+    }
+    unsafe fn run_loop_once(&self) {
+        let _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, 0);
+    }
+    unsafe fn stop_run_loop(&self, rl: CFRunLoopRef) {
+        CFRunLoopStop(rl);
+    }
+    unsafe fn retain_cf(&self, cf: CFTypeRef) -> CFTypeRef {
+        CFRetain(cf)
+    }
+    unsafe fn release_cf(&self, cf: CFTypeRef) {
+        CFRelease(cf);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn cleanup_mouse_tap(
+    ctx_ptr: *mut TapCallbackContext,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+    runtime: &dyn TapRuntime,
+) {
+    unsafe {
+        (*ctx_ptr).active.store(false, Ordering::SeqCst);
+        let rl_addr = (*ctx_ptr).run_loop_addr.load(Ordering::SeqCst);
+        if rl_addr != 0 {
+            runtime.stop_run_loop(rl_addr as CFRunLoopRef);
+        }
+        if let Some(handle) = join_handle {
+            let _ = handle.join();
+        }
+        let retained_rl = (*ctx_ptr).run_loop_addr.swap(0, Ordering::AcqRel);
+        if retained_rl != 0 {
+            runtime.release_cf(retained_rl as CFTypeRef);
+        }
+        drop(Box::from_raw(ctx_ptr));
+    }
+}
+
+#[cfg(target_os = "macos")]
 struct ModelPickerMouseTap {
     ctx_ptr: *mut TapCallbackContext,
-    run_loop_addr: usize,
     join_handle: Option<std::thread::JoinHandle<()>>,
+    runtime: Arc<dyn TapRuntime>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1024,6 +1118,14 @@ unsafe impl Send for ModelPickerMouseTap {}
 #[cfg(target_os = "macos")]
 impl ModelPickerMouseTap {
     fn start(deltas: Arc<Mutex<Vec<(f64, f64)>>>) -> Option<Self> {
+        Self::start_with_runtime(deltas, Arc::new(LiveTapRuntime), Duration::from_millis(500))
+    }
+
+    fn start_with_runtime(
+        deltas: Arc<Mutex<Vec<(f64, f64)>>>,
+        runtime: Arc<dyn TapRuntime>,
+        timeout: Duration,
+    ) -> Option<Self> {
         if let Ok(mut queue) = deltas.lock() {
             queue.clear();
         }
@@ -1031,103 +1133,86 @@ impl ModelPickerMouseTap {
             active: AtomicBool::new(true),
             suppress_mouse_moved: AtomicBool::new(true),
             tap_port: AtomicUsize::new(0),
+            run_loop_addr: AtomicUsize::new(0),
             deltas,
         }));
         let ctx_addr = ctx_ptr as usize;
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Option<usize>>(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<bool>(1);
+        let worker_runtime = Arc::clone(&runtime);
         let handle = std::thread::Builder::new()
             .name("mi-model-picker-mouse-tap".into())
             .spawn(move || unsafe {
                 let ctx = &*(ctx_addr as *const TapCallbackContext);
-                let mask: CGEventMask = 1u64 << CG_EVENT_MOUSE_MOVED;
-                let mut tap = CGEventTapCreate(
-                    CG_SESSION_EVENT_TAP,
-                    CG_HEAD_INSERT_EVENT_TAP,
+                if !ctx.active.load(Ordering::SeqCst) {
+                    let _ = ready_tx.send(false);
+                    return;
+                }
+                let mut tap = worker_runtime.create_tap(
                     CG_EVENT_TAP_OPTION_DEFAULT,
-                    mask,
-                    model_picker_mouse_tap_callback,
                     ctx_addr as *mut std::ffi::c_void,
                 );
                 if tap.is_null() {
                     ctx.suppress_mouse_moved.store(false, Ordering::Release);
-                    tap = CGEventTapCreate(
-                        CG_SESSION_EVENT_TAP,
-                        CG_HEAD_INSERT_EVENT_TAP,
+                    tap = worker_runtime.create_tap(
                         CG_EVENT_TAP_OPTION_LISTEN_ONLY,
-                        mask,
-                        model_picker_mouse_tap_callback,
                         ctx_addr as *mut std::ffi::c_void,
                     );
                 }
                 if tap.is_null() {
-                    let _ = ready_tx.send(None);
+                    let _ = ready_tx.send(false);
                     return;
                 }
-                let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+                let source = worker_runtime.create_source(tap);
                 if source.is_null() {
-                    CFMachPortInvalidate(tap);
-                    CFRelease(tap as CFTypeRef);
-                    let _ = ready_tx.send(None);
+                    worker_runtime.invalidate_port(tap);
+                    worker_runtime.release_cf(tap as CFTypeRef);
+                    let _ = ready_tx.send(false);
                     return;
                 }
                 ctx.tap_port.store(tap as usize, Ordering::Release);
-                let rl = CFRunLoopGetCurrent();
+                let rl = worker_runtime.current_run_loop();
                 if rl.is_null() {
-                    CFMachPortInvalidate(tap);
-                    CFRelease(source as CFTypeRef);
-                    CFRelease(tap as CFTypeRef);
-                    let _ = ready_tx.send(None);
+                    worker_runtime.invalidate_port(tap);
+                    worker_runtime.release_cf(source as CFTypeRef);
+                    worker_runtime.release_cf(tap as CFTypeRef);
+                    let _ = ready_tx.send(false);
                     return;
                 }
-                CFRetain(rl as CFTypeRef);
-                CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
-                CGEventTapEnable(tap, true);
-                if ready_tx.send(Some(rl as usize)).is_err() {
-                    CGEventTapEnable(tap, false);
-                    CFRunLoopRemoveSource(rl, source, kCFRunLoopCommonModes);
-                    CFMachPortInvalidate(tap);
-                    CFRelease(source as CFTypeRef);
-                    CFRelease(tap as CFTypeRef);
-                    CFRelease(rl as CFTypeRef);
+                worker_runtime.retain_cf(rl as CFTypeRef);
+                ctx.run_loop_addr.store(rl as usize, Ordering::SeqCst);
+                if !ctx.active.load(Ordering::SeqCst) {
+                    worker_runtime.invalidate_port(tap);
+                    worker_runtime.release_cf(source as CFTypeRef);
+                    worker_runtime.release_cf(tap as CFTypeRef);
+                    let _ = ready_tx.send(false);
                     return;
                 }
-                while ctx.active.load(Ordering::Acquire) {
-                    let _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, 0);
+                worker_runtime.add_source(rl, source);
+                worker_runtime.enable_tap(tap, true);
+                if ready_tx.send(true).is_ok() {
+                    while ctx.active.load(Ordering::Acquire) {
+                        worker_runtime.run_loop_once();
+                    }
                 }
-                CGEventTapEnable(tap, false);
-                CFRunLoopRemoveSource(rl, source, kCFRunLoopCommonModes);
-                CFMachPortInvalidate(tap);
-                CFRelease(source as CFTypeRef);
-                CFRelease(tap as CFTypeRef);
+                worker_runtime.enable_tap(tap, false);
+                worker_runtime.remove_source(rl, source);
+                worker_runtime.invalidate_port(tap);
+                worker_runtime.release_cf(source as CFTypeRef);
+                worker_runtime.release_cf(tap as CFTypeRef);
             })
             .ok();
         let Some(handle) = handle else {
-            unsafe {
-                drop(Box::from_raw(ctx_ptr));
-            }
+            cleanup_mouse_tap(ctx_ptr, None, runtime.as_ref());
             return None;
         };
-        match ready_rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(Some(rl_addr)) => Some(Self {
+        match ready_rx.recv_timeout(timeout) {
+            Ok(true) => Some(Self {
                 ctx_ptr,
-                run_loop_addr: rl_addr,
                 join_handle: Some(handle),
+                runtime,
             }),
-            Ok(None) => {
-                let _ = handle.join();
-                unsafe {
-                    drop(Box::from_raw(ctx_ptr));
-                }
-                None
-            }
-            Err(_) => {
-                unsafe {
-                    (*ctx_ptr).active.store(false, Ordering::SeqCst);
-                }
-                let _ = handle.join();
-                unsafe {
-                    drop(Box::from_raw(ctx_ptr));
-                }
+            Ok(false) | Err(_) => {
+                cleanup_mouse_tap(ctx_ptr, Some(handle), runtime.as_ref());
                 None
             }
         }
@@ -1137,30 +1222,624 @@ impl ModelPickerMouseTap {
 #[cfg(target_os = "macos")]
 impl Drop for ModelPickerMouseTap {
     fn drop(&mut self) {
-        unsafe {
-            (*self.ctx_ptr).active.store(false, Ordering::SeqCst);
-            if self.run_loop_addr != 0 {
-                CFRunLoopStop(self.run_loop_addr as CFRunLoopRef);
-            }
-        }
-        if let Some(handle) = self.join_handle.take() {
-            let _ = handle.join();
-        }
-        unsafe {
-            if self.run_loop_addr != 0 {
-                CFRelease(self.run_loop_addr as CFTypeRef);
-                self.run_loop_addr = 0;
-            }
-            drop(Box::from_raw(self.ctx_ptr));
-        }
+        cleanup_mouse_tap(self.ctx_ptr, self.join_handle.take(), self.runtime.as_ref());
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 struct ModelPickerMouseTap;
 
+pub(crate) fn is_sensitive_pasteboard_type(uti: &str) -> bool {
+    uti.eq_ignore_ascii_case("org.nspasteboard.ConcealedType")
+        || uti.eq_ignore_ascii_case("org.nspasteboard.TransientType")
+}
+
+#[cfg(target_os = "macos")]
+mod macos_pasteboard {
+    use super::{ClipboardItemSnapshot, ClipboardSnapshot};
+    use std::ffi::{c_char, c_void, CStr};
+
+    pub type Id = *mut c_void;
+    type Sel = *mut c_void;
+
+    #[link(name = "AppKit", kind = "framework")]
+    #[link(name = "Foundation", kind = "framework")]
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+
+    struct AutoreleasePool(*mut c_void);
+
+    impl AutoreleasePool {
+        unsafe fn push() -> Self {
+            Self(unsafe { objc_autoreleasePoolPush() })
+        }
+    }
+
+    impl Drop for AutoreleasePool {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { objc_autoreleasePoolPop(self.0) };
+            }
+        }
+    }
+
+    unsafe fn cls(name: &[u8]) -> Id {
+        unsafe { objc_getClass(name.as_ptr().cast::<c_char>()) }
+    }
+
+    unsafe fn sel(name: &[u8]) -> Sel {
+        unsafe { sel_registerName(name.as_ptr().cast::<c_char>()) }
+    }
+
+    unsafe fn msg_0(obj: Id, s: Sel) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_0_void(obj: Id, s: Sel) {
+        let f: unsafe extern "C" fn(Id, Sel) =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_0_isize(obj: Id, s: Sel) -> isize {
+        let f: unsafe extern "C" fn(Id, Sel) -> isize =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_0_usize(obj: Id, s: Sel) -> usize {
+        let f: unsafe extern "C" fn(Id, Sel) -> usize =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_0_cstr(obj: Id, s: Sel) -> *const c_char {
+        let f: unsafe extern "C" fn(Id, Sel) -> *const c_char =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_0_bytes(obj: Id, s: Sel) -> *const u8 {
+        let f: unsafe extern "C" fn(Id, Sel) -> *const u8 =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_1_usize(obj: Id, s: Sel, arg: usize) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, usize) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, arg) }
+    }
+
+    unsafe fn msg_1_id(obj: Id, s: Sel, arg: Id) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, arg) }
+    }
+
+    unsafe fn msg_1_id_void(obj: Id, s: Sel, arg: Id) {
+        let f: unsafe extern "C" fn(Id, Sel, Id) =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, arg) }
+    }
+
+    unsafe fn msg_1_id_bool(obj: Id, s: Sel, arg: Id) -> i8 {
+        let f: unsafe extern "C" fn(Id, Sel, Id) -> i8 =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, arg) }
+    }
+
+    unsafe fn msg_2_id_id_bool(obj: Id, s: Sel, a: Id, b: Id) -> i8 {
+        let f: unsafe extern "C" fn(Id, Sel, Id, Id) -> i8 =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, a, b) }
+    }
+
+    unsafe fn msg_2_ptr_usize(obj: Id, s: Sel, p: *const u8, n: usize) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, *const u8, usize) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, p, n) }
+    }
+
+    unsafe fn msg_3_ptr_usize_usize(obj: Id, s: Sel, p: *const u8, n: usize, enc: usize) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, *const u8, usize, usize) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, p, n, enc) }
+    }
+
+    #[derive(Debug)]
+    pub struct PasteboardRef {
+        unique_pb: Option<Id>,
+    }
+
+    unsafe impl Send for PasteboardRef {}
+    unsafe impl Sync for PasteboardRef {}
+
+    impl Drop for PasteboardRef {
+        fn drop(&mut self) {
+            if let Some(pb) = self.unique_pb.take() {
+                unsafe {
+                    let _pool = AutoreleasePool::push();
+                    msg_0_void(pb, sel(b"releaseGlobally\0"));
+                }
+            }
+        }
+    }
+
+    impl PasteboardRef {
+        pub fn general() -> Self {
+            Self { unique_pb: None }
+        }
+
+        #[allow(dead_code)]
+        pub fn unique_for_test() -> Option<Self> {
+            unsafe {
+                let _pool = AutoreleasePool::push();
+                let pb = msg_0(cls(b"NSPasteboard\0"), sel(b"pasteboardWithUniqueName\0"));
+                if pb.is_null() {
+                    return None;
+                }
+                let retained = msg_0(pb, sel(b"retain\0"));
+                Some(Self {
+                    unique_pb: Some(retained),
+                })
+            }
+        }
+
+        pub fn is_general(&self) -> bool {
+            self.unique_pb.is_none()
+        }
+
+        unsafe fn target(&self) -> Id {
+            match self.unique_pb {
+                Some(pb) => pb,
+                None => unsafe { msg_0(cls(b"NSPasteboard\0"), sel(b"generalPasteboard\0")) },
+            }
+        }
+
+        pub fn change_count(&self) -> u64 {
+            unsafe {
+                let _pool = AutoreleasePool::push();
+                let pb = self.target();
+                if pb.is_null() {
+                    return 0;
+                }
+                msg_0_isize(pb, sel(b"changeCount\0")).max(0) as u64
+            }
+        }
+
+        pub fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool) {
+            unsafe {
+                let _pool = AutoreleasePool::push();
+                let pb = self.target();
+                if pb.is_null() {
+                    return (
+                        ClipboardSnapshot {
+                            change_count: 0,
+                            items: Vec::new(),
+                        },
+                        true,
+                    );
+                }
+                let cc = msg_0_isize(pb, sel(b"changeCount\0")).max(0) as u64;
+                let items_arr = msg_0(pb, sel(b"pasteboardItems\0"));
+                if items_arr.is_null() {
+                    return (
+                        ClipboardSnapshot {
+                            change_count: cc,
+                            items: Vec::new(),
+                        },
+                        true,
+                    );
+                }
+                let item_count = msg_0_usize(items_arr, sel(b"count\0"));
+                let was_empty = item_count == 0;
+                let mut total = 0usize;
+                let mut items = Vec::new();
+                let sel_obj_at = sel(b"objectAtIndex:\0");
+                let sel_types = sel(b"types\0");
+                let sel_count = sel(b"count\0");
+                let sel_utf8 = sel(b"UTF8String\0");
+                let sel_data_for_type = sel(b"dataForType:\0");
+                let sel_length = sel(b"length\0");
+                let sel_bytes = sel(b"bytes\0");
+
+                for i in 0..item_count {
+                    let item = msg_1_usize(items_arr, sel_obj_at, i);
+                    if item.is_null() {
+                        continue;
+                    }
+                    let types_arr = msg_0(item, sel_types);
+                    if types_arr.is_null() {
+                        continue;
+                    }
+                    let type_count = msg_0_usize(types_arr, sel_count);
+                    for j in 0..type_count {
+                        let ns_type = msg_1_usize(types_arr, sel_obj_at, j);
+                        if ns_type.is_null() {
+                            continue;
+                        }
+                        let cstr = msg_0_cstr(ns_type, sel_utf8);
+                        if cstr.is_null() {
+                            continue;
+                        }
+                        let uti = CStr::from_ptr(cstr).to_string_lossy();
+                        if super::is_sensitive_pasteboard_type(&uti) {
+                            return (
+                                ClipboardSnapshot {
+                                    change_count: cc,
+                                    items: Vec::new(),
+                                },
+                                true,
+                            );
+                        }
+                    }
+                }
+
+                for i in 0..item_count {
+                    let item = msg_1_usize(items_arr, sel_obj_at, i);
+                    if item.is_null() {
+                        continue;
+                    }
+                    let types_arr = msg_0(item, sel_types);
+                    if types_arr.is_null() {
+                        continue;
+                    }
+                    let type_count = msg_0_usize(types_arr, sel_count);
+                    let mut item_bytes = 0usize;
+                    let mut types_and_bytes = Vec::new();
+                    let mut exceeded = false;
+                    for j in 0..type_count {
+                        let ns_type = msg_1_usize(types_arr, sel_obj_at, j);
+                        if ns_type.is_null() {
+                            continue;
+                        }
+                        let cstr = msg_0_cstr(ns_type, sel_utf8);
+                        if cstr.is_null() {
+                            continue;
+                        }
+                        let uti = CStr::from_ptr(cstr).to_string_lossy().into_owned();
+                        let ns_data = msg_1_id(item, sel_data_for_type, ns_type);
+                        if ns_data.is_null() {
+                            continue;
+                        }
+                        let len = msg_0_usize(ns_data, sel_length);
+                        if total.saturating_add(item_bytes).saturating_add(len) > max_bytes {
+                            exceeded = true;
+                            break;
+                        }
+                        let ptr = msg_0_bytes(ns_data, sel_bytes);
+                        let bytes = if len == 0 || ptr.is_null() {
+                            Vec::new()
+                        } else {
+                            std::slice::from_raw_parts(ptr, len).to_vec()
+                        };
+                        item_bytes += len;
+                        types_and_bytes.push((uti, bytes));
+                    }
+                    if exceeded {
+                        break;
+                    }
+                    if !types_and_bytes.is_empty() {
+                        total += item_bytes;
+                        items.push(ClipboardItemSnapshot { types_and_bytes });
+                    }
+                }
+                (
+                    ClipboardSnapshot {
+                        change_count: cc,
+                        items,
+                    },
+                    was_empty,
+                )
+            }
+        }
+
+        pub(crate) fn require_objc_object(
+            ptr: *mut std::ffi::c_void,
+            what: &str,
+        ) -> Result<*mut std::ffi::c_void, String> {
+            if ptr.is_null() {
+                Err(format!("{what} allocation failed"))
+            } else {
+                Ok(ptr)
+            }
+        }
+
+        pub fn clear_contents(&self) -> Result<(), String> {
+            unsafe {
+                let _pool = AutoreleasePool::push();
+                let pb = self.target();
+                if pb.is_null() {
+                    return Err("NSPasteboard unavailable".into());
+                }
+                let _ = msg_0_isize(pb, sel(b"clearContents\0"));
+                Ok(())
+            }
+        }
+
+        pub fn write_items(&self, items: &[ClipboardItemSnapshot]) -> Result<u64, String> {
+            unsafe {
+                let _pool = AutoreleasePool::push();
+                let pb = self.target();
+                if pb.is_null() {
+                    return Err("NSPasteboard unavailable".into());
+                }
+                let _ = msg_0_isize(pb, sel(b"clearContents\0"));
+                if items.is_empty() {
+                    return Ok(msg_0_isize(pb, sel(b"changeCount\0")).max(0) as u64);
+                }
+                let arr = Self::require_objc_object(
+                    msg_1_usize(
+                        cls(b"NSMutableArray\0"),
+                        sel(b"arrayWithCapacity:\0"),
+                        items.len(),
+                    ),
+                    "NSMutableArray",
+                )?;
+                let sel_alloc = sel(b"alloc\0");
+                let sel_new = sel(b"new\0");
+                let sel_autorelease = sel(b"autorelease\0");
+                let sel_init_utf8 = sel(b"initWithBytes:length:encoding:\0");
+                let sel_data_bytes = sel(b"dataWithBytes:length:\0");
+                let sel_set_data = sel(b"setData:forType:\0");
+                let sel_add_object = sel(b"addObject:\0");
+                let cls_pb_item = cls(b"NSPasteboardItem\0");
+                let cls_nsstring = cls(b"NSString\0");
+                let cls_nsdata = cls(b"NSData\0");
+
+                for snap_item in items {
+                    let pb_item =
+                        Self::require_objc_object(msg_0(cls_pb_item, sel_new), "NSPasteboardItem")?;
+                    let _ = msg_0(pb_item, sel_autorelease);
+                    for (uti, bytes) in &snap_item.types_and_bytes {
+                        let ns_type_alloc = msg_0(cls_nsstring, sel_alloc);
+                        let ns_type = msg_3_ptr_usize_usize(
+                            ns_type_alloc,
+                            sel_init_utf8,
+                            if uti.is_empty() {
+                                std::ptr::null()
+                            } else {
+                                uti.as_ptr()
+                            },
+                            uti.len(),
+                            4, // NSUTF8StringEncoding
+                        );
+                        if ns_type.is_null() {
+                            continue;
+                        }
+                        let _ = msg_0(ns_type, sel_autorelease);
+                        let ns_data = msg_2_ptr_usize(
+                            cls_nsdata,
+                            sel_data_bytes,
+                            if bytes.is_empty() {
+                                std::ptr::null()
+                            } else {
+                                bytes.as_ptr()
+                            },
+                            bytes.len(),
+                        );
+                        if ns_data.is_null() {
+                            continue;
+                        }
+                        let _ = msg_2_id_id_bool(pb_item, sel_set_data, ns_data, ns_type);
+                    }
+                    msg_1_id_void(arr, sel_add_object, pb_item);
+                }
+                let wrote = msg_1_id_bool(pb, sel(b"writeObjects:\0"), arr);
+                if wrote == 0 {
+                    return Err("NSPasteboard writeObjects failed".into());
+                }
+                Ok(msg_0_isize(pb, sel(b"changeCount\0")).max(0) as u64)
+            }
+        }
+    }
+}
+
+trait ClipboardBackend: Send + Sync + std::fmt::Debug {
+    fn change_count(&self) -> u64;
+    fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool);
+    fn write_plain_text(&self, text: &str) -> Result<u64, String>;
+    fn restore_items(&self, snapshot: &ClipboardSnapshot) -> Result<bool, String>;
+    fn clear_contents(&self) -> Result<(), String>;
+    fn restore_delay(&self) -> Duration;
+}
+
+fn pbcopy_plain_text_with_binary(program: &Path, text: &str) -> Result<(), String> {
+    let mut child = Command::new(program)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("clipboard write spawn failed: {e}"))?;
+    let write_res = if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "pbcopy stdin unavailable",
+        ))
+    };
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("clipboard write wait failed: {e}"))?;
+    if let Err(err) = write_res {
+        return Err(format!("clipboard write stdin failed: {err}"));
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("clipboard write failed with status {}", output.status)
+        } else {
+            format!("clipboard write failed ({}): {stderr}", output.status)
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct LiveMacOsClipboardBackend {
+    pasteboard: macos_pasteboard::PasteboardRef,
+}
+
+#[cfg(target_os = "macos")]
+impl LiveMacOsClipboardBackend {
+    fn general() -> Self {
+        Self {
+            pasteboard: macos_pasteboard::PasteboardRef::general(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn unique_for_test() -> Option<Self> {
+        macos_pasteboard::PasteboardRef::unique_for_test().map(|pasteboard| Self { pasteboard })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl ClipboardBackend for LiveMacOsClipboardBackend {
+    fn change_count(&self) -> u64 {
+        self.pasteboard.change_count()
+    }
+
+    fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool) {
+        self.pasteboard.snapshot(max_bytes)
+    }
+
+    fn write_plain_text(&self, text: &str) -> Result<u64, String> {
+        let before_cc = self.pasteboard.change_count();
+        if self.pasteboard.is_general() {
+            pbcopy_plain_text_with_binary(Path::new("/usr/bin/pbcopy"), text)?;
+            let after_cc = self.pasteboard.change_count();
+            if after_cc == before_cc {
+                return Err("clipboard changeCount did not advance after write".into());
+            }
+            Ok(after_cc)
+        } else {
+            let item = ClipboardItemSnapshot {
+                types_and_bytes: vec![(
+                    "public.utf8-plain-text".to_string(),
+                    text.as_bytes().to_vec(),
+                )],
+            };
+            self.pasteboard.write_items(&[item])
+        }
+    }
+
+    fn restore_items(&self, snapshot: &ClipboardSnapshot) -> Result<bool, String> {
+        self.pasteboard.write_items(&snapshot.items)?;
+        Ok(true)
+    }
+
+    fn clear_contents(&self) -> Result<(), String> {
+        self.pasteboard.clear_contents()
+    }
+
+    fn restore_delay(&self) -> Duration {
+        Duration::from_millis(80)
+    }
+}
+
+#[derive(Debug)]
+struct InMemoryClipboardBackend {
+    state: Mutex<ClipboardSnapshot>,
+}
+
+impl Default for InMemoryClipboardBackend {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(ClipboardSnapshot {
+                change_count: 1,
+                items: Vec::new(),
+            }),
+        }
+    }
+}
+
+impl ClipboardBackend for InMemoryClipboardBackend {
+    fn change_count(&self) -> u64 {
+        self.state.lock().unwrap().change_count
+    }
+
+    fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool) {
+        let st = self.state.lock().unwrap();
+        if st.items.iter().any(|item| {
+            item.types_and_bytes
+                .iter()
+                .any(|(uti, _)| is_sensitive_pasteboard_type(uti))
+        }) {
+            return (
+                ClipboardSnapshot {
+                    change_count: st.change_count,
+                    items: Vec::new(),
+                },
+                true,
+            );
+        }
+        let was_empty = st.items.is_empty();
+        let mut total = 0usize;
+        let mut items = Vec::new();
+        for item in &st.items {
+            let item_bytes = item.total_bytes();
+            if total.saturating_add(item_bytes) <= max_bytes {
+                total += item_bytes;
+                items.push(item.clone());
+            } else {
+                break;
+            }
+        }
+        (
+            ClipboardSnapshot {
+                change_count: st.change_count,
+                items,
+            },
+            was_empty,
+        )
+    }
+
+    fn write_plain_text(&self, text: &str) -> Result<u64, String> {
+        let mut st = self.state.lock().unwrap();
+        st.change_count += 1;
+        st.items = vec![ClipboardItemSnapshot {
+            types_and_bytes: vec![(
+                "public.utf8-plain-text".to_string(),
+                text.as_bytes().to_vec(),
+            )],
+        }];
+        Ok(st.change_count)
+    }
+
+    fn restore_items(&self, snapshot: &ClipboardSnapshot) -> Result<bool, String> {
+        let mut st = self.state.lock().unwrap();
+        st.change_count += 1;
+        st.items = snapshot.items.clone();
+        Ok(true)
+    }
+
+    fn clear_contents(&self) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        st.change_count += 1;
+        st.items.clear();
+        Ok(())
+    }
+
+    fn restore_delay(&self) -> Duration {
+        Duration::ZERO
+    }
+}
+
 pub struct MacOsSystemDriver {
-    clipboard_seq: Mutex<u64>,
+    clipboard_backend: Arc<dyn ClipboardBackend>,
+    snapshot_empty_flags: Mutex<HashMap<u64, bool>>,
     managed_controls: ManagedAxControls<NativeAxProvider>,
     isolated: AtomicBool,
     model_picker_mouse_deltas: Arc<Mutex<Vec<(f64, f64)>>>,
@@ -1178,8 +1857,15 @@ impl std::fmt::Debug for MacOsSystemDriver {
 
 impl Default for MacOsSystemDriver {
     fn default() -> Self {
+        #[cfg(target_os = "macos")]
+        let clipboard_backend: Arc<dyn ClipboardBackend> =
+            Arc::new(LiveMacOsClipboardBackend::general());
+        #[cfg(not(target_os = "macos"))]
+        let clipboard_backend: Arc<dyn ClipboardBackend> =
+            Arc::new(InMemoryClipboardBackend::default());
         Self {
-            clipboard_seq: Mutex::new(0),
+            clipboard_backend,
+            snapshot_empty_flags: Mutex::new(HashMap::new()),
             managed_controls: ManagedAxControls::default(),
             isolated: AtomicBool::new(false),
             model_picker_mouse_deltas: Arc::new(Mutex::new(Vec::new())),
@@ -1198,9 +1884,26 @@ impl Drop for MacOsSystemDriver {
 
 impl MacOsSystemDriver {
     pub fn new_isolated() -> Self {
-        let driver = Self::default();
-        driver.isolated.store(true, Ordering::Release);
-        driver
+        Self {
+            clipboard_backend: Arc::new(InMemoryClipboardBackend::default()),
+            snapshot_empty_flags: Mutex::new(HashMap::new()),
+            managed_controls: ManagedAxControls::default(),
+            isolated: AtomicBool::new(true),
+            model_picker_mouse_deltas: Arc::new(Mutex::new(Vec::new())),
+            model_picker_mouse_tap: Mutex::new(None),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn with_clipboard_backend(clipboard_backend: Arc<dyn ClipboardBackend>) -> Self {
+        Self {
+            clipboard_backend,
+            snapshot_empty_flags: Mutex::new(HashMap::new()),
+            managed_controls: ManagedAxControls::default(),
+            isolated: AtomicBool::new(true),
+            model_picker_mouse_deltas: Arc::new(Mutex::new(Vec::new())),
+            model_picker_mouse_tap: Mutex::new(None),
+        }
     }
 
     fn is_isolated_environment(&self) -> bool {
@@ -1220,6 +1923,77 @@ impl MacOsSystemDriver {
     pub fn inject_model_picker_mouse_delta(&self, dx: f64, dy: f64) {
         if let Ok(mut queue) = self.model_picker_mouse_deltas.lock() {
             queue.push((dx, dy));
+        }
+    }
+}
+
+fn open_url_command_args(url: &str) -> Result<[&str; 2], String> {
+    mi_model::host_router::validate_open_url(url)?;
+    Ok(["--", url])
+}
+
+fn redact_home_path_with_home(raw: &str, home: Option<&str>) -> String {
+    if let Some(home_dir) = home
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty() && *h != "/")
+    {
+        if raw == home_dir {
+            return "~".to_string();
+        }
+        if let Some(rest) = raw.strip_prefix(home_dir).filter(|r| r.starts_with('/')) {
+            return format!("~{rest}");
+        }
+    }
+    if let Some(after_users) = raw.strip_prefix("/Users/") {
+        let (user, rest) = match after_users.split_once('/') {
+            Some((u, r)) => (u, Some(r)),
+            None => (after_users, None),
+        };
+        if !user.is_empty() && user != "Shared" {
+            return match rest {
+                Some(r) => format!("/Users/[redacted]/{r}"),
+                None => "/Users/[redacted]".to_string(),
+            };
+        }
+    }
+    raw.to_string()
+}
+
+pub fn redact_home_path(raw: &str) -> String {
+    redact_home_path_with_home(raw, std::env::var("HOME").ok().as_deref())
+}
+
+fn wait_child_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    #[cfg(unix)]
+                    {
+                        let pid = child.id() as libc::pid_t;
+                        if pid > 0 {
+                            unsafe {
+                                libc::kill(-pid, libc::SIGKILL);
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill();
+                    }
+                    let _ = child.wait();
+                    return Err(format!("shell_timeout_{}ms", timeout.as_millis()));
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                std::thread::sleep(Duration::from_millis(5).min(remaining));
+            }
+            Err(err) => return Err(err.to_string()),
         }
     }
 }
@@ -1255,8 +2029,12 @@ impl HostOsDriver for MacOsSystemDriver {
     }
 
     fn open_application(&self, bundle_id: &str) -> Result<(), String> {
+        if !mi_model::host_router::is_valid_bundle_id(bundle_id) {
+            return Err("invalid_bundle_id".to_string());
+        }
         let status = Command::new("/usr/bin/open")
             .args(["-b", bundle_id])
+            .stdin(std::process::Stdio::null())
             .status()
             .map_err(|e| e.to_string())?;
         if status.success() {
@@ -1325,68 +2103,57 @@ impl HostOsDriver for MacOsSystemDriver {
     }
 
     fn snapshot_clipboard(&self, max_bytes: usize) -> ClipboardSnapshot {
-        let cc = *self.clipboard_seq.lock().unwrap();
-        let output = Command::new("/usr/bin/pbpaste").output().ok();
-        let mut items = Vec::new();
-        if let Some(out) = output {
-            if out.status.success() && !out.stdout.is_empty() && out.stdout.len() <= max_bytes {
-                items.push(ClipboardItemSnapshot {
-                    types_and_bytes: vec![("public.utf8-plain-text".to_string(), out.stdout)],
-                });
-            }
+        let (snapshot, was_empty) = self.clipboard_backend.snapshot(max_bytes);
+        let mut flags = self.snapshot_empty_flags.lock().unwrap();
+        if flags.len() > 32 {
+            flags.clear();
         }
-        ClipboardSnapshot {
-            change_count: cc,
-            items,
-        }
+        flags.insert(snapshot.change_count, was_empty);
+        snapshot
     }
 
     fn write_clipboard_plain_text(&self, text: &str) -> u64 {
-        let mut seq = self.clipboard_seq.lock().unwrap();
-        *seq += 1;
-        let next_cc = *seq;
-        if let Ok(mut child) = Command::new("/usr/bin/pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-        }
-        next_cc
+        self.write_clipboard_plain_text_checked(text).unwrap_or(0)
+    }
+
+    fn write_clipboard_plain_text_checked(&self, text: &str) -> Result<u64, String> {
+        self.clipboard_backend.write_plain_text(text)
     }
 
     fn restore_clipboard(&self, snapshot: &ClipboardSnapshot, expected_change_count: u64) -> bool {
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        let mut seq = self.clipboard_seq.lock().unwrap();
-        if *seq != expected_change_count {
+        let delay = self.clipboard_backend.restore_delay();
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+        let was_empty = self
+            .snapshot_empty_flags
+            .lock()
+            .unwrap()
+            .remove(&snapshot.change_count)
+            .unwrap_or(snapshot.items.is_empty());
+        if self.clipboard_backend.change_count() != expected_change_count {
             return false;
         }
-        *seq += 1;
-        if let Some(first) = snapshot.items.first() {
-            if let Some((_, bytes)) = first
-                .types_and_bytes
-                .iter()
-                .find(|(t, _)| t == "public.utf8-plain-text")
-            {
-                if let Ok(mut child) = Command::new("/usr/bin/pbcopy")
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = stdin.write_all(bytes);
-                    }
-                    let _ = child.wait();
-                }
+        if snapshot.items.is_empty() {
+            if was_empty {
+                self.clipboard_backend.clear_contents().is_ok()
+            } else {
+                false
             }
+        } else {
+            self.clipboard_backend
+                .restore_items(snapshot)
+                .unwrap_or(false)
         }
-        true
     }
 
     fn open_url(&self, url: &str) -> Result<(), String> {
+        let args = open_url_command_args(url)?;
         let status = Command::new("/usr/bin/open")
-            .arg(url)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map_err(|e| e.to_string())?;
         if status.success() {
@@ -1714,29 +2481,9 @@ impl HostOsDriver for MacOsSystemDriver {
                     let win_elem = ax_copy_element_attr(app_elem, "AXFocusedWindow")
                         .or_else(|| ax_copy_element_attr(app_elem, "AXMainWindow"))
                         .or_else(|| {
-                            let attr_cf = cf_string_from_str("AXWindows");
-                            if attr_cf.is_null() {
-                                return None;
-                            }
-                            let mut val: CFTypeRef = std::ptr::null();
-                            let err = AXUIElementCopyAttributeValue(app_elem, attr_cf, &mut val);
-                            CFRelease(attr_cf);
-                            if err != K_AX_ERROR_SUCCESS || val.is_null() {
-                                return None;
-                            }
-                            let first = if CFArrayGetCount(val) > 0 {
-                                let item = CFArrayGetValueAtIndex(val, 0);
-                                if !item.is_null() {
-                                    CFRetain(item);
-                                    Some(item)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-                            CFRelease(val);
-                            first
+                            ax_copy_raw_attr(app_elem, "AXWindows").and_then(|val| {
+                                cf_array_copy_ax_elements(val, 1).into_iter().next()
+                            })
                         });
                     CFRelease(app_elem);
                     if let Some(win) = win_elem {
@@ -1941,6 +2688,7 @@ pub enum RecordedOsEvent {
 struct RecordingState {
     dictation_active: bool,
     clipboard: ClipboardSnapshot,
+    clipboard_write_error: Option<String>,
     events: Vec<RecordedOsEvent>,
     model_picker_mouse_capture: bool,
     model_picker_mouse_deltas: Vec<(f64, f64)>,
@@ -1968,11 +2716,16 @@ impl RecordingOsDriver {
                     change_count: 1,
                     items: Vec::new(),
                 },
+                clipboard_write_error: None,
                 events: Vec::new(),
                 model_picker_mouse_capture: false,
                 model_picker_mouse_deltas: Vec::new(),
             })),
         }
+    }
+
+    pub fn set_clipboard_write_error(&self, err: Option<String>) {
+        self.state.lock().unwrap().clipboard_write_error = err;
     }
 
     pub fn push_model_picker_mouse_delta(&self, dx: f64, dy: f64) {
@@ -2095,7 +2848,14 @@ impl HostOsDriver for RecordingOsDriver {
     }
 
     fn write_clipboard_plain_text(&self, text: &str) -> u64 {
+        self.write_clipboard_plain_text_checked(text).unwrap_or(0)
+    }
+
+    fn write_clipboard_plain_text_checked(&self, text: &str) -> Result<u64, String> {
         let mut st = self.state.lock().unwrap();
+        if let Some(err) = st.clipboard_write_error.clone() {
+            return Err(err);
+        }
         st.events
             .push(RecordedOsEvent::WriteClipboardPlainText(text.to_string()));
         st.clipboard.change_count += 1;
@@ -2105,7 +2865,7 @@ impl HostOsDriver for RecordingOsDriver {
                 text.as_bytes().to_vec(),
             )],
         }];
-        st.clipboard.change_count
+        Ok(st.clipboard.change_count)
     }
 
     fn restore_clipboard(&self, snapshot: &ClipboardSnapshot, expected_change_count: u64) -> bool {
@@ -2328,7 +3088,7 @@ pub(crate) fn describe_resolved_action(action: &ResolvedHostAction) -> ActionDes
             working_directory,
         } => ActionDescriptor {
             action_type: "shell_command".to_string(),
-            target: working_directory.clone(),
+            target: redact_home_path(working_directory),
             detail: format!("sh ({}B)", command.len()),
             text_byte_len: Some(command.len()),
         },
@@ -2430,6 +3190,7 @@ pub struct LiveHostActionExecutor<D: HostOsDriver = MacOsSystemDriver> {
     execution_lock: Mutex<()>,
     held_apple_fn_bindings: Mutex<HashMap<FnHoldKey, FnOwner>>,
     mouse_speed_tier: AtomicU8,
+    shell_command_timeout: Duration,
 }
 
 impl<D: HostOsDriver> Drop for LiveHostActionExecutor<D> {
@@ -2447,7 +3208,13 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
             execution_lock: Mutex::new(()),
             held_apple_fn_bindings: Mutex::new(HashMap::new()),
             mouse_speed_tier: AtomicU8::new(1),
+            shell_command_timeout: DEFAULT_SHELL_COMMAND_TIMEOUT,
         }
+    }
+
+    pub fn with_shell_command_timeout(mut self, timeout: Duration) -> Self {
+        self.shell_command_timeout = timeout;
+        self
     }
 
     fn mouse_step_and_scroll(tier: u8) -> (f64, i32) {
@@ -2744,7 +3511,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
         action: &ResolvedHostAction,
         admitted: impl FnOnce() -> bool,
     ) -> HostActionReceipt {
-        let _execution = self.execution_lock.lock().unwrap();
+        let execution = self.execution_lock.lock().unwrap();
         let desc = describe_resolved_action(action);
         let make_receipt = |outcome: &str, detail: String| HostActionReceipt {
             action_type: desc.action_type.clone(),
@@ -2855,10 +3622,15 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     };
                 }
                 if let Some(bundle_id) = target_bundle_id {
-                    let _ = self.driver.open_application(bundle_id);
+                    if let Err(err) = self.driver.open_application(bundle_id) {
+                        return make_receipt("failed", err);
+                    }
                 }
                 let snapshot = self.driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
-                let written_cc = self.driver.write_clipboard_plain_text(sanitized);
+                let written_cc = match self.driver.write_clipboard_plain_text_checked(sanitized) {
+                    Ok(cc) => cc,
+                    Err(err) => return make_receipt("failed", err),
+                };
                 let cmd_mod = vec!["command".to_string()];
                 let paste_res = self
                     .driver
@@ -2887,10 +3659,15 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     Err(err) => make_receipt("failed", err),
                 }
             }
-            ResolvedHostAction::OpenUrl { url } => match self.driver.open_url(url) {
-                Ok(()) => make_receipt("executed", desc.detail),
-                Err(err) => make_receipt("failed", err),
-            },
+            ResolvedHostAction::OpenUrl { url } => {
+                if let Err(err) = mi_model::host_router::validate_open_url(url) {
+                    return make_receipt("failed", err);
+                }
+                match self.driver.open_url(url) {
+                    Ok(()) => make_receipt("executed", desc.detail),
+                    Err(err) => make_receipt("failed", err),
+                }
+            }
             ResolvedHostAction::ShellCommand {
                 command,
                 working_directory,
@@ -2899,19 +3676,38 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     && !working_directory.trim().is_empty()
                     && Path::new(working_directory).is_dir()
                 {
-                    let status = Command::new("/bin/sh")
-                        .args(["-c", command])
+                    let mut cmd = Command::new("/bin/sh");
+                    cmd.args(["-c", command])
                         .current_dir(working_directory)
+                        .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    match status {
-                        Ok(s) if s.success() => make_receipt("executed", desc.detail),
-                        Ok(s) => make_receipt("failed", format!("shell_exit_{s}")),
+                        .stderr(std::process::Stdio::null());
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        cmd.process_group(0);
+                    }
+                    let spawn_res = cmd.spawn();
+                    drop(execution);
+                    match spawn_res {
+                        Ok(mut child) => {
+                            match wait_child_with_timeout(&mut child, self.shell_command_timeout) {
+                                Ok(s) if s.success() => make_receipt("executed", desc.detail),
+                                Ok(s) => make_receipt("failed", format!("shell_exit_{s}")),
+                                Err(err) => make_receipt("failed", err),
+                            }
+                        }
                         Err(err) => make_receipt("failed", err.to_string()),
                     }
                 } else {
-                    make_receipt("executed", desc.detail)
+                    make_receipt(
+                        "failed",
+                        if command.trim().is_empty() {
+                            "empty_shell_command".into()
+                        } else {
+                            "invalid_working_directory".into()
+                        },
+                    )
                 }
             }
             ResolvedHostAction::AgentCommand { adapter, command } => {
@@ -3161,7 +3957,7 @@ fn legacy_submit_agent_input<D: HostOsDriver + ?Sized>(
     let submit_modifiers = submit_modifiers_for_adapter(adapter);
     if let Some(prompt) = prompt {
         let snapshot = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
-        let written = driver.write_clipboard_plain_text(prompt);
+        let written = driver.write_clipboard_plain_text_checked(prompt)?;
         let command = vec!["command".to_owned()];
         let result = driver
             .post_key_shortcut(KEY_CODE_V, &command, true)
@@ -3183,7 +3979,7 @@ fn legacy_insert_agent_prompt<D: HostOsDriver + ?Sized>(
 ) -> Result<(), String> {
     driver.focus_agent_input(adapter)?;
     let snapshot = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
-    let written = driver.write_clipboard_plain_text(prompt);
+    let written = driver.write_clipboard_plain_text_checked(prompt)?;
     let modifiers = vec!["command".to_owned()];
     let result = driver
         .post_key_shortcut(KEY_CODE_V, &modifiers, true)
@@ -3222,6 +4018,7 @@ fn managed_adapter_for_bundle(bundle: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod serialized_effect_tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn codex_managed_controls_do_not_redirect_official_shortcuts_through_the_composer() {
@@ -3465,5 +4262,827 @@ mod serialized_effect_tests {
             });
             assert_eq!(result, Some((1, true)));
         }
+    }
+
+    #[test]
+    fn open_url_command_args_adds_double_dash_and_validates_scheme() {
+        assert_eq!(
+            open_url_command_args("https://example.com/a?b=1").unwrap(),
+            ["--", "https://example.com/a?b=1"]
+        );
+        assert!(open_url_command_args("-open").is_err());
+        assert!(open_url_command_args("file:///etc/passwd").is_err());
+        assert!(open_url_command_args("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn redact_home_path_collapses_home_and_non_shared_users() {
+        assert_eq!(
+            redact_home_path_with_home("/Users/example", Some("/Users/example")),
+            "~"
+        );
+        assert_eq!(
+            redact_home_path_with_home("/Users/example/work/app", Some("/Users/example/")),
+            "~/work/app"
+        );
+        let sibling_home = ["/Users/example", "2/work"].concat();
+        assert_eq!(
+            redact_home_path_with_home(&sibling_home, Some("/Users/example")),
+            "/Users/[redacted]/work"
+        );
+        assert_eq!(
+            redact_home_path_with_home("/Users/test/work", Some("/Users/example")),
+            "/Users/[redacted]/work"
+        );
+        assert_eq!(
+            redact_home_path_with_home("/Users/Shared/repo", Some("/Users/example")),
+            "/Users/Shared/repo"
+        );
+        assert_eq!(
+            redact_home_path_with_home("/tmp/work", Some("/Users/example")),
+            "/tmp/work"
+        );
+    }
+
+    #[test]
+    fn shell_command_enforces_timeout_kills_child_and_nulls_stdin() {
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver)
+            .with_shell_command_timeout(Duration::from_millis(80));
+        let t0 = std::time::Instant::now();
+        let receipt = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: "sleep 5".into(),
+                working_directory: "/tmp".into(),
+            },
+        );
+        let elapsed = t0.elapsed();
+        assert_eq!(receipt.outcome, "failed");
+        assert!(
+            receipt.detail.contains("shell_timeout_80ms"),
+            "unexpected timeout detail: {}",
+            receipt.detail
+        );
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "timeout wait took too long: {elapsed:?}"
+        );
+
+        let stdin_receipt = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: "test ! -t 0 && [ \"$(head -c 1 | wc -c | tr -d ' ')\" = 0 ]".into(),
+                working_directory: "/tmp".into(),
+            },
+        );
+        assert_eq!(stdin_receipt.outcome, "executed");
+    }
+
+    #[test]
+    fn shell_command_timeout_kills_process_group_orphans() {
+        struct PidCleanup(Option<libc::pid_t>);
+        impl Drop for PidCleanup {
+            fn drop(&mut self) {
+                if let Some(pid) = self.0 {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("grandchild.pid");
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver)
+            .with_shell_command_timeout(Duration::from_millis(250));
+        let receipt = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: format!("sleep 10 & echo $! > {}; wait", pid_file.display()),
+                working_directory: "/tmp".into(),
+            },
+        );
+        assert_eq!(receipt.outcome, "failed");
+        assert!(receipt.detail.contains("shell_timeout_250ms"));
+
+        let grandchild_pid: libc::pid_t = fs::read_to_string(&pid_file)
+            .expect("grandchild pid written")
+            .trim()
+            .parse()
+            .expect("valid pid");
+        let mut guard = PidCleanup(Some(grandchild_pid));
+
+        let deadline = std::time::Instant::now() + Duration::from_millis(250);
+        let mut exited = false;
+        while std::time::Instant::now() < deadline {
+            let rc = unsafe { libc::kill(grandchild_pid, 0) };
+            if rc != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if exited {
+            guard.0 = None;
+        }
+        assert!(
+            exited,
+            "timed-out ShellCommand must kill entire process group including grandchild PID {grandchild_pid}"
+        );
+    }
+
+    #[test]
+    fn shell_command_empty_command_or_invalid_working_dir_reports_failed() {
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver);
+
+        let empty_cmd = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: "   \t\n ".into(),
+                working_directory: "/tmp".into(),
+            },
+        );
+        assert_eq!(empty_cmd.outcome, "failed");
+        assert_eq!(empty_cmd.detail, "empty_shell_command");
+
+        let bad_dir = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: "echo ok".into(),
+                working_directory: "/nonexistent/mi-shell-working-dir-404".into(),
+            },
+        );
+        assert_eq!(bad_dir.outcome, "failed");
+        assert_eq!(bad_dir.detail, "invalid_working_directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_append_refuses_symlinks_and_fifo_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        fs::write(&victim, b"SAFE").unwrap();
+        let link_log = dir.path().join("audit.jsonl");
+        std::os::unix::fs::symlink(&victim, &link_log).unwrap();
+
+        let receipt = HostActionReceipt {
+            action_type: "open_app".into(),
+            binding_id: "AG00".into(),
+            detail: "ok".into(),
+            outcome: "executed".into(),
+            profile_id: "p1".into(),
+            target: "t".into(),
+            text_byte_len: None,
+            timestamp_ms: 1,
+        };
+        assert!(
+            receipt.append_to_audit_log(&link_log).is_err(),
+            "append_to_audit_log must refuse symlink target"
+        );
+        assert_eq!(fs::read(&victim).unwrap(), b"SAFE");
+
+        let fifo = dir.path().join("audit.fifo");
+        let c_fifo = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo_clone = fifo.clone();
+        let receipt_clone = receipt.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = tx.send(receipt_clone.append_to_audit_log(&fifo_clone));
+        });
+        let recv_res = rx.recv_timeout(Duration::from_millis(200));
+        if recv_res.is_err() {
+            let drain_fd =
+                unsafe { libc::open(c_fifo.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+            let _ = handle.join();
+            if drain_fd >= 0 {
+                unsafe { libc::close(drain_fd) };
+            }
+            panic!("append_to_audit_log blocked on FIFO");
+        }
+        let _ = handle.join();
+        assert!(recv_res.unwrap().is_err());
+    }
+
+    #[test]
+    fn pbcopy_helper_propagates_non_zero_exit_and_spawn_errors() {
+        let missing = Path::new("/nonexistent/mi-pbcopy-missing");
+        assert!(pbcopy_plain_text_with_binary(missing, "hello").is_err());
+
+        let false_bin = Path::new("/usr/bin/false");
+        let err = pbcopy_plain_text_with_binary(false_bin, "hello").unwrap_err();
+        assert!(err.contains("clipboard write failed"), "err={err}");
+    }
+
+    #[test]
+    fn paste_text_aborts_before_paste_when_clipboard_write_fails() {
+        let driver = RecordingOsDriver::new(true);
+        driver.set_clipboard_write_error(Some("pbcopy exited 1".into()));
+        let executor = LiveHostActionExecutor::new(driver.clone());
+        let receipt = executor.execute(
+            "Notes",
+            "AG00",
+            &ResolvedHostAction::PasteText {
+                text: "secret-snippet".into(),
+                target_bundle_id: None,
+                adapter: None,
+                no_newline: false,
+                submit: false,
+            },
+        );
+        assert_eq!(receipt.outcome, "failed");
+        assert_eq!(receipt.detail, "pbcopy exited 1");
+        assert!(
+            !driver
+                .events()
+                .iter()
+                .any(|e| matches!(e, RecordedOsEvent::PostKeyShortcut { .. })),
+            "must never send Cmd+V after clipboard write failure"
+        );
+    }
+
+    #[derive(Debug)]
+    struct MockClipboardState {
+        change_count: u64,
+        items: Vec<ClipboardItemSnapshot>,
+        clear_calls: usize,
+        restore_calls: usize,
+        fail_next_write: Option<String>,
+    }
+
+    #[derive(Debug)]
+    struct MockClipboardBackend {
+        state: Mutex<MockClipboardState>,
+    }
+
+    impl MockClipboardBackend {
+        fn new(items: Vec<ClipboardItemSnapshot>, change_count: u64) -> Self {
+            Self {
+                state: Mutex::new(MockClipboardState {
+                    change_count,
+                    items,
+                    clear_calls: 0,
+                    restore_calls: 0,
+                    fail_next_write: None,
+                }),
+            }
+        }
+    }
+
+    impl ClipboardBackend for MockClipboardBackend {
+        fn change_count(&self) -> u64 {
+            self.state.lock().unwrap().change_count
+        }
+
+        fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool) {
+            let st = self.state.lock().unwrap();
+            let was_empty = st.items.is_empty();
+            let mut total = 0usize;
+            let mut items = Vec::new();
+            for item in &st.items {
+                if total + item.total_bytes() <= max_bytes {
+                    total += item.total_bytes();
+                    items.push(item.clone());
+                } else {
+                    break;
+                }
+            }
+            (
+                ClipboardSnapshot {
+                    change_count: st.change_count,
+                    items,
+                },
+                was_empty,
+            )
+        }
+
+        fn write_plain_text(&self, text: &str) -> Result<u64, String> {
+            let mut st = self.state.lock().unwrap();
+            if let Some(err) = st.fail_next_write.take() {
+                return Err(err);
+            }
+            st.change_count += 1;
+            st.items = vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), text.as_bytes().to_vec())],
+            }];
+            Ok(st.change_count)
+        }
+
+        fn restore_items(&self, snapshot: &ClipboardSnapshot) -> Result<bool, String> {
+            let mut st = self.state.lock().unwrap();
+            st.restore_calls += 1;
+            st.change_count += 1;
+            st.items = snapshot.items.clone();
+            Ok(true)
+        }
+
+        fn clear_contents(&self) -> Result<(), String> {
+            let mut st = self.state.lock().unwrap();
+            st.clear_calls += 1;
+            st.change_count += 1;
+            st.items.clear();
+            Ok(())
+        }
+
+        fn restore_delay(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+
+    #[test]
+    fn macos_driver_preserves_newer_clipboard_and_clears_when_originally_empty() {
+        let backend = Arc::new(MockClipboardBackend::new(Vec::new(), 5));
+        let driver = MacOsSystemDriver::with_clipboard_backend(Arc::clone(&backend) as _);
+
+        let snap = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
+        let written_cc = driver.write_clipboard_plain_text_checked("temp").unwrap();
+        assert_eq!(written_cc, 6);
+        assert!(driver.restore_clipboard(&snap, written_cc));
+        assert_eq!(backend.state.lock().unwrap().clear_calls, 1);
+        assert!(backend.state.lock().unwrap().items.is_empty());
+
+        let snap2 = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
+        let written_cc2 = driver.write_clipboard_plain_text_checked("temp2").unwrap();
+        {
+            let mut st = backend.state.lock().unwrap();
+            st.change_count += 1;
+            st.items = vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), b"user-newer".to_vec())],
+            }];
+        }
+        assert!(!driver.restore_clipboard(&snap2, written_cc2));
+        assert_eq!(
+            backend.state.lock().unwrap().items[0].types_and_bytes[0].1,
+            b"user-newer"
+        );
+        assert_eq!(backend.state.lock().unwrap().restore_calls, 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_appkit_pasteboard_snapshots_and_restores_multiple_items_and_types() {
+        let Some(backend) = LiveMacOsClipboardBackend::unique_for_test() else {
+            panic!("pasteboardWithUniqueName should succeed on macOS");
+        };
+        let backend = Arc::new(backend);
+        let original = vec![
+            ClipboardItemSnapshot {
+                types_and_bytes: vec![
+                    ("public.utf8-plain-text".into(), b"alpha".to_vec()),
+                    ("public.html".into(), b"<b>alpha</b>".to_vec()),
+                ],
+            },
+            ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.png".into(), vec![0x89, 0x50, 0x4E, 0x47])],
+            },
+        ];
+        backend.pasteboard.write_items(&original).unwrap();
+        let driver = MacOsSystemDriver::with_clipboard_backend(Arc::clone(&backend) as _);
+
+        let snap = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
+        assert_eq!(snap.items.len(), 2);
+        let cc_after_write = driver
+            .write_clipboard_plain_text_checked("ephemeral")
+            .unwrap();
+        assert!(cc_after_write > snap.change_count);
+        assert!(driver.restore_clipboard(&snap, cc_after_write));
+
+        let (restored, was_empty) = backend.snapshot(MAX_CLIPBOARD_STASH_BYTES);
+        assert!(!was_empty);
+        assert_eq!(restored.items.len(), 2);
+        assert!(restored.items[0]
+            .types_and_bytes
+            .iter()
+            .any(|(t, b)| t == "public.html" && b == b"<b>alpha</b>"));
+        assert!(restored.items[1]
+            .types_and_bytes
+            .iter()
+            .any(|(t, b)| t == "public.png" && b == &[0x89, 0x50, 0x4E, 0x47]));
+
+        backend.clear_contents().unwrap();
+        let (empty_snap, is_empty) = backend.snapshot(MAX_CLIPBOARD_STASH_BYTES);
+        assert!(is_empty);
+        assert!(empty_snap.items.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_appkit_pasteboard_skips_concealed_and_transient_types_and_clears_injected_text() {
+        let Some(backend) = LiveMacOsClipboardBackend::unique_for_test() else {
+            panic!("pasteboardWithUniqueName should succeed on macOS");
+        };
+        let backend = Arc::new(backend);
+        backend
+            .pasteboard
+            .write_items(&[ClipboardItemSnapshot {
+                types_and_bytes: vec![
+                    ("public.utf8-plain-text".into(), b"s3cr3t-pass".to_vec()),
+                    ("org.nspasteboard.ConcealedType".into(), b"1".to_vec()),
+                ],
+            }])
+            .unwrap();
+        let driver = MacOsSystemDriver::with_clipboard_backend(Arc::clone(&backend) as _);
+
+        let snapshot = driver.snapshot_clipboard(65536);
+        assert!(snapshot.items.is_empty());
+        let new_cc = driver
+            .write_clipboard_plain_text_checked("injected")
+            .unwrap();
+        assert!(driver.restore_clipboard(&snapshot, new_cc));
+
+        let (after, was_empty) = backend.snapshot(65536);
+        assert!(was_empty);
+        assert!(after.items.is_empty());
+
+        backend
+            .pasteboard
+            .write_items(&[
+                ClipboardItemSnapshot {
+                    types_and_bytes: vec![(
+                        "public.utf8-plain-text".into(),
+                        b"first-item".to_vec(),
+                    )],
+                },
+                ClipboardItemSnapshot {
+                    types_and_bytes: vec![("ORG.NSPASTEBOARD.TRANSIENTTYPE".into(), b"1".to_vec())],
+                },
+            ])
+            .unwrap();
+        let (transient_snap, transient_empty) = backend.snapshot(65536);
+        assert!(transient_empty);
+        assert!(transient_snap.items.is_empty());
+
+        let snap2 = driver.snapshot_clipboard(65536);
+        let written_cc2 = driver
+            .write_clipboard_plain_text_checked("injected-2")
+            .unwrap();
+        backend
+            .pasteboard
+            .write_items(&[ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), b"user-newer".to_vec())],
+            }])
+            .unwrap();
+        assert!(!driver.restore_clipboard(&snap2, written_cc2));
+        let (newer, newer_empty) = backend.snapshot(65536);
+        assert!(!newer_empty);
+        assert_eq!(newer.items[0].types_and_bytes[0].1, b"user-newer");
+    }
+
+    #[test]
+    fn in_memory_clipboard_skips_transient_and_concealed_types_case_insensitively() {
+        let backend = Arc::new(InMemoryClipboardBackend::default());
+        {
+            let mut st = backend.state.lock().unwrap();
+            st.change_count = 10;
+            st.items = vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![
+                    ("public.utf8-plain-text".into(), b"secret".to_vec()),
+                    ("ORG.NSPASTEBOARD.TRANSIENTTYPE".into(), b"1".to_vec()),
+                ],
+            }];
+        }
+        let (snap, was_empty) = backend.snapshot(65536);
+        assert!(was_empty);
+        assert!(snap.items.is_empty());
+        assert_eq!(snap.change_count, 10);
+
+        let driver = MacOsSystemDriver::with_clipboard_backend(Arc::clone(&backend) as _);
+        let driver_snap = driver.snapshot_clipboard(65536);
+        assert!(driver_snap.items.is_empty());
+        let written_cc = driver
+            .write_clipboard_plain_text_checked("injected")
+            .unwrap();
+        {
+            let mut st = backend.state.lock().unwrap();
+            st.change_count += 1;
+            st.items = vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), b"newer-user".to_vec())],
+            }];
+        }
+        assert!(!driver.restore_clipboard(&driver_snap, written_cc));
+        assert_eq!(
+            backend.state.lock().unwrap().items[0].types_and_bytes[0].1,
+            b"newer-user"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cf_string_to_rust_rejects_mismatched_cf_type() {
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            fn CFArrayCreate(
+                allocator: CFTypeRef,
+                values: *const CFTypeRef,
+                num_values: CFIndex,
+                call_backs: CFTypeRef,
+            ) -> CFArrayRef;
+        }
+        if std::env::var_os("MI_MACOS_CF_PROBE").is_some() {
+            unsafe {
+                let empty = CFArrayCreate(std::ptr::null(), std::ptr::null(), 0, std::ptr::null());
+                assert!(!empty.is_null());
+                let decoded = cf_string_to_rust(empty);
+                CFRelease(empty);
+                assert!(decoded.is_none());
+            }
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "executor::serialized_effect_tests::cf_string_to_rust_rejects_mismatched_cf_type",
+            ])
+            .env("MI_MACOS_CF_PROBE", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "cf_string_to_rust on mismatched CFArray crashed or returned Some (status={:?}, stdout={stdout})",
+            output.status
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cf_array_copy_ax_elements_releases_mismatched_ref_and_skips_non_ax_items() {
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            fn CFArrayCreate(
+                allocator: CFTypeRef,
+                values: *const CFTypeRef,
+                num_values: CFIndex,
+                call_backs: CFTypeRef,
+            ) -> CFArrayRef;
+            fn CFGetRetainCount(cf: CFTypeRef) -> CFIndex;
+        }
+        unsafe {
+            let cf_str = cf_string_from_str("not-an-array");
+            assert!(!cf_str.is_null());
+            CFRetain(cf_str);
+            let before = CFGetRetainCount(cf_str);
+            let elems = cf_array_copy_ax_elements(cf_str, 16);
+            assert!(elems.is_empty());
+            assert_eq!(CFGetRetainCount(cf_str), before - 1);
+
+            let values = [cf_str];
+            let arr = CFArrayCreate(std::ptr::null(), values.as_ptr(), 1, std::ptr::null());
+            assert!(!arr.is_null());
+            let items = cf_array_copy_ax_elements(arr, 16);
+            assert!(
+                items.is_empty(),
+                "non-AXUIElement CFString item inside CFArray must be skipped"
+            );
+            CFRelease(cf_str);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pasteboard_require_objc_object_rejects_null_mutable_array() {
+        let err = macos_pasteboard::PasteboardRef::require_objc_object(
+            std::ptr::null_mut(),
+            "NSMutableArray",
+        )
+        .unwrap_err();
+        assert!(err.contains("NSMutableArray"));
+    }
+
+    #[test]
+    fn open_application_rejects_malformed_and_option_injection_bundle_ids() {
+        let driver = MacOsSystemDriver::new_isolated();
+        for bad in [
+            "",
+            "-a.evil",
+            "com.apple.Safari' || kMDItemFSName == '*'",
+            "singleword",
+            "com.example..app",
+        ] {
+            assert_eq!(
+                driver.open_application(bad).unwrap_err(),
+                "invalid_bundle_id"
+            );
+        }
+    }
+
+    #[test]
+    fn paste_text_with_invalid_target_bundle_id_fails_without_touching_clipboard_or_cmd_v() {
+        struct TrustedMacOpenDriver {
+            system: MacOsSystemDriver,
+            recording: RecordingOsDriver,
+        }
+
+        impl HostOsDriver for TrustedMacOpenDriver {
+            fn is_accessibility_trusted(&self) -> bool {
+                self.recording.is_accessibility_trusted()
+            }
+            fn open_application(&self, bundle_id: &str) -> Result<(), String> {
+                self.system.open_application(bundle_id)
+            }
+            fn post_key_shortcut(
+                &self,
+                key_code: u16,
+                modifiers: &[String],
+                key_down: bool,
+            ) -> Result<(), String> {
+                self.recording
+                    .post_key_shortcut(key_code, modifiers, key_down)
+            }
+            fn post_apple_fn_flags(&self, key_down: bool) -> Result<(), String> {
+                self.recording.post_apple_fn_flags(key_down)
+            }
+            fn snapshot_clipboard(&self, max_bytes: usize) -> ClipboardSnapshot {
+                self.recording.snapshot_clipboard(max_bytes)
+            }
+            fn write_clipboard_plain_text(&self, text: &str) -> u64 {
+                self.recording.write_clipboard_plain_text(text)
+            }
+            fn write_clipboard_plain_text_checked(&self, text: &str) -> Result<u64, String> {
+                self.recording.write_clipboard_plain_text_checked(text)
+            }
+            fn restore_clipboard(&self, snapshot: &ClipboardSnapshot, expected: u64) -> bool {
+                self.recording.restore_clipboard(snapshot, expected)
+            }
+            fn open_url(&self, url: &str) -> Result<(), String> {
+                self.recording.open_url(url)
+            }
+            fn focus_agent_input(&self, adapter: &str) -> Result<(), String> {
+                self.recording.focus_agent_input(adapter)
+            }
+            fn stop_active_dictation(&self, adapter: &str) -> Result<bool, String> {
+                self.recording.stop_active_dictation(adapter)
+            }
+            fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String> {
+                self.recording.scroll_window(req)
+            }
+            fn move_cursor_by(&self, dx: f64, dy: f64) -> Result<(), String> {
+                self.recording.move_cursor_by(dx, dy)
+            }
+            fn click_mouse_button(&self, button: MouseButtonKind) -> Result<(), String> {
+                self.recording.click_mouse_button(button)
+            }
+            fn scroll_cursor_wheel(&self, dx: i32, dy: i32) -> Result<(), String> {
+                self.recording.scroll_cursor_wheel(dx, dy)
+            }
+            fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String> {
+                self.recording.new_conversation_in_project(adapter)
+            }
+            fn toggle_live_voice(&self, adapter: &str) -> Result<(), String> {
+                self.recording.toggle_live_voice(adapter)
+            }
+        }
+
+        let recording = RecordingOsDriver::new(true);
+        recording.seed_clipboard(
+            vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), b"keep-me".to_vec())],
+            }],
+            7,
+        );
+        let driver = TrustedMacOpenDriver {
+            system: MacOsSystemDriver::new_isolated(),
+            recording: recording.clone(),
+        };
+        let executor = LiveHostActionExecutor::new(driver);
+        let receipt = executor.execute(
+            "Notes",
+            "AG00",
+            &ResolvedHostAction::PasteText {
+                text: "secret-snippet".into(),
+                target_bundle_id: Some("-a.evil".into()),
+                adapter: None,
+                no_newline: false,
+                submit: false,
+            },
+        );
+        assert_eq!(receipt.outcome, "failed");
+        assert_eq!(receipt.detail, "invalid_bundle_id");
+        assert_eq!(recording.current_clipboard().change_count, 7);
+        assert_eq!(
+            recording.current_clipboard().items,
+            vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), b"keep-me".to_vec())],
+            }]
+        );
+        assert!(!recording.events().iter().any(|e| matches!(
+            e,
+            RecordedOsEvent::SnapshotClipboard { .. }
+                | RecordedOsEvent::WriteClipboardPlainText(_)
+                | RecordedOsEvent::RestoreClipboard { .. }
+                | RecordedOsEvent::PostKeyShortcut { .. }
+        )));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn model_picker_mouse_tap_timeout_and_drop_balance_run_loop_retains() {
+        struct MockTapRuntime {
+            delay_before_run_loop: Duration,
+            retains: AtomicUsize,
+            releases: AtomicUsize,
+            stops: AtomicUsize,
+            tap_releases: AtomicUsize,
+            source_releases: AtomicUsize,
+        }
+
+        impl MockTapRuntime {
+            fn new(delay_before_run_loop: Duration) -> Self {
+                Self {
+                    delay_before_run_loop,
+                    retains: AtomicUsize::new(0),
+                    releases: AtomicUsize::new(0),
+                    stops: AtomicUsize::new(0),
+                    tap_releases: AtomicUsize::new(0),
+                    source_releases: AtomicUsize::new(0),
+                }
+            }
+        }
+
+        impl TapRuntime for MockTapRuntime {
+            unsafe fn create_tap(
+                &self,
+                _options: u32,
+                _ctx: *mut std::ffi::c_void,
+            ) -> CFMachPortRef {
+                0x1001 as CFMachPortRef
+            }
+            unsafe fn create_source(&self, _tap: CFMachPortRef) -> CFRunLoopSourceRef {
+                0x2002 as CFRunLoopSourceRef
+            }
+            unsafe fn invalidate_port(&self, _tap: CFMachPortRef) {}
+            unsafe fn current_run_loop(&self) -> CFRunLoopRef {
+                if !self.delay_before_run_loop.is_zero() {
+                    std::thread::sleep(self.delay_before_run_loop);
+                }
+                0x3003 as CFRunLoopRef
+            }
+            unsafe fn add_source(&self, _rl: CFRunLoopRef, _source: CFRunLoopSourceRef) {}
+            unsafe fn remove_source(&self, _rl: CFRunLoopRef, _source: CFRunLoopSourceRef) {}
+            unsafe fn enable_tap(&self, _tap: CFMachPortRef, _enable: bool) {}
+            unsafe fn run_loop_once(&self) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            unsafe fn stop_run_loop(&self, _rl: CFRunLoopRef) {
+                self.stops.fetch_add(1, Ordering::SeqCst);
+            }
+            unsafe fn retain_cf(&self, cf: CFTypeRef) -> CFTypeRef {
+                self.retains.fetch_add(1, Ordering::SeqCst);
+                cf
+            }
+            unsafe fn release_cf(&self, cf: CFTypeRef) {
+                match cf as usize {
+                    0x1001 => {
+                        self.tap_releases.fetch_add(1, Ordering::SeqCst);
+                    }
+                    0x2002 => {
+                        self.source_releases.fetch_add(1, Ordering::SeqCst);
+                    }
+                    0x3003 => {
+                        self.releases.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let deltas = Arc::new(Mutex::new(Vec::new()));
+        let timeout_rt = Arc::new(MockTapRuntime::new(Duration::from_millis(30)));
+        assert!(ModelPickerMouseTap::start_with_runtime(
+            Arc::clone(&deltas),
+            Arc::clone(&timeout_rt) as Arc<dyn TapRuntime>,
+            Duration::from_millis(1),
+        )
+        .is_none());
+        assert_eq!(
+            timeout_rt.retains.load(Ordering::SeqCst),
+            timeout_rt.releases.load(Ordering::SeqCst),
+            "timed-out tap setup must balance CFRetain/CFRelease on CFRunLoopRef"
+        );
+        assert_eq!(timeout_rt.tap_releases.load(Ordering::SeqCst), 1);
+        assert_eq!(timeout_rt.source_releases.load(Ordering::SeqCst), 1);
+
+        let live_rt = Arc::new(MockTapRuntime::new(Duration::ZERO));
+        let tap = ModelPickerMouseTap::start_with_runtime(
+            Arc::clone(&deltas),
+            Arc::clone(&live_rt) as Arc<dyn TapRuntime>,
+            Duration::from_millis(200),
+        )
+        .expect("live mock tap should start");
+        assert_eq!(live_rt.retains.load(Ordering::SeqCst), 1);
+        drop(tap);
+        assert_eq!(live_rt.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(live_rt.releases.load(Ordering::SeqCst), 1);
+        assert_eq!(live_rt.tap_releases.load(Ordering::SeqCst), 1);
+        assert_eq!(live_rt.source_releases.load(Ordering::SeqCst), 1);
     }
 }

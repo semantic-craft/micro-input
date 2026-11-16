@@ -187,6 +187,12 @@ use test_support::*;
 #[test]
 fn fails_closed_when_sqlite_databases_are_missing() {
     let dir = TempDir::new().unwrap();
+    let missing_dir_err = observe_codex_threads(dir.path(), 6).unwrap_err();
+    assert!(
+        missing_dir_err.starts_with("blocked:codex_home_missing:"),
+        "{missing_dir_err}"
+    );
+    std::fs::create_dir_all(dir.path().join("sqlite")).unwrap();
     let err = observe_codex_threads(dir.path(), 6).unwrap_err();
     assert!(err.starts_with("blocked:codex_sqlite_missing:"), "{err}");
 }
@@ -352,15 +358,17 @@ fn fingerprint_extracts_disjoint_sibling_snippets_and_readback_verifies_strictly
 
     let mut wrong_title = good_snap.clone();
     wrong_title.window_title = "ChatGPT".into();
-    assert!(verify_codex_window_readback(&fp, &wrong_title)
-        .unwrap_err()
-        .contains("codex_title_mismatch"));
+    let title_err = verify_codex_window_readback(&fp, &wrong_title).unwrap_err();
+    assert_eq!(title_err, "unconfirmed:codex_title_mismatch");
+    assert!(!title_err.contains("Same Title"));
+    assert!(!title_err.contains("ChatGPT"));
 
     let mut wrong_project = good_snap.clone();
     wrong_project.toolbar_project = Some("other-repo".into());
-    assert!(verify_codex_window_readback(&fp, &wrong_project)
-        .unwrap_err()
-        .contains("codex_project_mismatch"));
+    let project_err = verify_codex_window_readback(&fp, &wrong_project).unwrap_err();
+    assert_eq!(project_err, "unconfirmed:codex_project_mismatch");
+    assert!(!project_err.contains("micro-input"));
+    assert!(!project_err.contains("other-repo"));
 
     let mut wrong_sibling = good_snap.clone();
     wrong_sibling.main_pane_texts = vec!["Beta conflicting sibling reply".into()];
@@ -539,4 +547,251 @@ fn deeplink_builder_validates_uuid_and_encodes_non_local_host() {
     );
     assert!(build_codex_thread_deeplink("not-a-uuid", "local").is_err());
     assert!(build_codex_thread_deeplink(UUID_A, "").is_err());
+}
+
+#[test]
+fn checked_sqlite_text_len_rejects_lengths_exceeding_c_int_max() {
+    assert_eq!(checked_sqlite_text_len(0).unwrap(), 0);
+    assert_eq!(checked_sqlite_text_len(128).unwrap(), 128);
+    assert_eq!(
+        checked_sqlite_text_len(c_int::MAX as usize).unwrap(),
+        c_int::MAX
+    );
+    let err = checked_sqlite_text_len((c_int::MAX as usize).saturating_add(1)).unwrap_err();
+    assert!(err.contains("i32 length limit"));
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlinked_codex_home_and_sqlite_and_redacts_error_paths() {
+    use std::os::unix::fs::symlink;
+
+    let real_dir = TempDir::new().unwrap();
+    create_codex_fixture(real_dir.path());
+
+    let link_parent = TempDir::new().unwrap();
+    let linked_home = link_parent.path().join("linked-codex-home");
+    symlink(real_dir.path(), &linked_home).unwrap();
+    let home_err = observe_codex_threads(&linked_home, 6).unwrap_err();
+    assert!(
+        home_err.starts_with("blocked:codex_home_unsafe:"),
+        "{home_err}"
+    );
+
+    let sqlite_symlink_root = TempDir::new().unwrap();
+    create_codex_fixture(sqlite_symlink_root.path());
+    let sqlite_dir = sqlite_symlink_root.path().join("sqlite");
+    let moved_sqlite_dir = sqlite_symlink_root.path().join("moved-sqlite");
+    std::fs::rename(&sqlite_dir, &moved_sqlite_dir).unwrap();
+    symlink(&moved_sqlite_dir, &sqlite_dir).unwrap();
+    let sqlite_dir_err = observe_codex_threads(sqlite_symlink_root.path(), 6).unwrap_err();
+    assert!(
+        sqlite_dir_err.starts_with("blocked:codex_home_unsafe:"),
+        "{sqlite_dir_err}"
+    );
+    let sqlite_parent_err = SqliteDb::open_readonly(&sqlite_dir.join("codex.db"))
+        .err()
+        .unwrap();
+    assert!(
+        sqlite_parent_err.starts_with("blocked:codex_sqlite_unsafe:"),
+        "{sqlite_parent_err}"
+    );
+
+    let db_symlink_root = TempDir::new().unwrap();
+    create_codex_fixture(db_symlink_root.path());
+    let codex_db = db_symlink_root.path().join("sqlite").join("codex.db");
+    let moved_db = db_symlink_root.path().join("moved-codex.db");
+    std::fs::rename(&codex_db, &moved_db).unwrap();
+    symlink(&moved_db, &codex_db).unwrap();
+    let db_err = observe_codex_threads(db_symlink_root.path(), 6).unwrap_err();
+    assert!(
+        db_err.starts_with("blocked:codex_sqlite_unsafe:"),
+        "{db_err}"
+    );
+
+    let missing_home = Path::new("/Users/private/.codex");
+    let missing_home_err = observe_codex_threads(missing_home, 6).unwrap_err();
+    assert!(
+        missing_home_err.starts_with("blocked:codex_home_missing:/Users/[redacted]/.codex"),
+        "{missing_home_err}"
+    );
+    assert!(!missing_home_err.contains("private"));
+
+    let missing_db = Path::new("/Users/private/.codex/sqlite/codex.db");
+    let missing_db_err = SqliteDb::open_readonly(missing_db).err().unwrap();
+    assert!(
+        missing_db_err
+            .starts_with("blocked:codex_sqlite_missing:/Users/[redacted]/.codex/sqlite/codex.db"),
+        "{missing_db_err}"
+    );
+    assert!(!missing_db_err.contains("private"));
+}
+
+#[test]
+fn skips_oversized_item_json_caps_utf8_corpus_and_bounds_sibling_scan() {
+    let dir = TempDir::new().unwrap();
+    create_codex_fixture(dir.path());
+
+    let giant_text = "x".repeat(MAX_ITEM_JSON_BYTES + 1024);
+    let unicode_chunk = "中".repeat(12_000);
+    let unicode_chunk_2 = "界".repeat(12_000);
+    let mut history_sql = String::from("DELETE FROM thread_items;\n");
+    history_sql.push_str(&format!(
+        "INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item_json, item_type) VALUES \
+         ('{UUID_A}', 'turn-a1', 'i-giant', 4, 4000, '{{\"type\":\"agentMessage\",\"text\":\"{giant_text}\"}}', 'agentMessage'), \
+         ('{UUID_A}', 'turn-a1', 'i-utf8-1', 3, 3000, '{{\"type\":\"agentMessage\",\"text\":\"{unicode_chunk}\"}}', 'agentMessage'), \
+         ('{UUID_A}', 'turn-a1', 'i-utf8-2', 2, 2000, '{{\"type\":\"agentMessage\",\"text\":\"{unicode_chunk_2}\"}}', 'agentMessage'), \
+         ('{UUID_A}', 'turn-a1', 'i-normal', 1, 1000, '{{\"type\":\"agentMessage\",\"text\":\"Normal unique reply after giant item\"}}', 'agentMessage');\n"
+    ));
+
+    let mut codex_sql = String::new();
+    let mut state_sql = String::new();
+    for i in 0..32u32 {
+        let sib_id = format!("01a1c5b2-d0fd-7001-96e4-99000000{i:04x}");
+        let ts = 1_700_000_000.0 + f64::from(32 - i);
+        codex_sql.push_str(&format!(
+            "INSERT INTO local_thread_catalog VALUES ('local', '{sib_id}', 'Same Title', 100.0, {ts}, '/tmp/ws/sib-{i}', 'vscode', 0, {ts});\n"
+        ));
+        state_sql.push_str(&format!(
+            "INSERT INTO threads (id, archived) VALUES ('{sib_id}', 0);\n"
+        ));
+        history_sql.push_str(&format!(
+            "INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item_json, item_type) VALUES \
+             ('{sib_id}', 'turn-sib-{i}', 'i1', 1, 1000, '{{\"type\":\"agentMessage\",\"text\":\"Sibling reply #{i:02}\"}}', 'agentMessage');\n"
+        ));
+    }
+    exec_sql(&dir.path().join("sqlite").join("codex.db"), &codex_sql);
+    exec_sql(&dir.path().join("state_5.sqlite"), &state_sql);
+    exec_sql(&dir.path().join("thread_history_1.sqlite"), &history_sql);
+
+    let dbs = CodexDbs::open(dir.path()).unwrap();
+    let idx = dbs.thread_snippets(UUID_A, 256).unwrap();
+    assert!(idx.corpus.len() <= MAX_THREAD_CORPUS_BYTES);
+    assert!(idx.corpus.len() > 65_000);
+    assert!(idx
+        .snippets
+        .contains(&"Normal unique reply after giant item".to_string()));
+    assert!(!idx.snippets.iter().any(|s| s.starts_with("xxxx")));
+
+    let fp = read_codex_thread_fingerprint(dir.path(), UUID_A, "local").unwrap();
+    assert!(fp
+        .target_snippets
+        .contains(&"Normal unique reply after giant item".to_string()));
+    assert!(fp
+        .conflicting_sibling_snippets
+        .contains(&"Sibling reply #00".to_string()));
+    assert!(!fp
+        .conflicting_sibling_snippets
+        .contains(&"Sibling reply #31".to_string()));
+    assert!(fp.conflicting_sibling_snippets.len() <= 24);
+}
+
+#[cfg(unix)]
+#[test]
+fn open_readonly_flags_symlinked_parent_even_when_target_lacks_db() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let real_empty = dir.path().join("real-empty");
+    std::fs::create_dir_all(&real_empty).unwrap();
+    let linked_parent = dir.path().join("linked-sqlite");
+    symlink(&real_empty, &linked_parent).unwrap();
+
+    let err = SqliteDb::open_readonly(&linked_parent.join("codex.db"))
+        .err()
+        .unwrap();
+    assert!(err.starts_with("blocked:codex_sqlite_unsafe:"), "{err}");
+}
+
+#[test]
+fn noisy_thread_turns_do_not_evict_older_failed_or_in_progress_threads_and_snippets_are_capped() {
+    let dir = TempDir::new().unwrap();
+    create_codex_fixture(dir.path());
+
+    let older_failed = "01a1c5b2-d0fd-7001-96e4-aaaa00000001";
+    let older_working = "01a1c5b2-d0fd-7001-96e4-aaaa00000002";
+    let noisy_failed = "01a1c5b2-d0fd-7001-96e4-bbbb00000001";
+    let noisy_working = "01a1c5b2-d0fd-7001-96e4-bbbb00000002";
+
+    let mut codex_sql = String::from(
+        "DELETE FROM local_thread_catalog; DELETE FROM active_chat_turns; DELETE FROM automation_runs;\n",
+    );
+    let mut state_sql = String::from("DELETE FROM threads; DELETE FROM thread_read_receipts;\n");
+    let mut history_sql = String::from("DELETE FROM thread_turns; DELETE FROM thread_items;\n");
+
+    for (idx, (id, title)) in [
+        (older_failed, "Older Failed"),
+        (older_working, "Older InProgress"),
+        (noisy_failed, "Noisy Failed"),
+        (noisy_working, "Noisy InProgress"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ts = 1_700_000_000.0 + (idx as f64);
+        codex_sql.push_str(&format!(
+            "INSERT INTO local_thread_catalog VALUES ('local', '{id}', '{title}', 100.0, {ts}, '/tmp/ws/{idx}', 'vscode', 0, {ts});\n"
+        ));
+        state_sql.push_str(&format!(
+            "INSERT INTO threads (id, archived) VALUES ('{id}', 0);\n"
+        ));
+    }
+
+    for i in 0..8u32 {
+        let idle_id = format!("01a1c5b2-d0fd-7001-96e4-cccc0000{i:04x}");
+        let ts = 1_700_001_000.0 + f64::from(i);
+        codex_sql.push_str(&format!(
+            "INSERT INTO local_thread_catalog VALUES ('local', '{idle_id}', 'Idle {i}', 100.0, {ts}, '/tmp/ws/idle-{i}', 'vscode', 0, {ts});\n"
+        ));
+        state_sql.push_str(&format!(
+            "INSERT INTO threads (id, archived) VALUES ('{idle_id}', 0);\n"
+        ));
+        history_sql.push_str(&format!(
+            "INSERT INTO thread_turns VALUES ('{idle_id}', 'turn-idle-{i}', 1, 'completed', NULL);\n"
+        ));
+    }
+
+    history_sql.push_str(&format!(
+        "INSERT INTO thread_turns VALUES ('{older_failed}', 'turn-of-1', 1, 'failed', '{{\"message\":\"old\"}}');\n"
+    ));
+    history_sql.push_str(&format!(
+        "INSERT INTO thread_turns VALUES ('{older_working}', 'turn-ow-1', 1, 'inProgress', NULL);\n"
+    ));
+    for i in 0..70u32 {
+        history_sql.push_str(&format!(
+            "INSERT INTO thread_turns VALUES ('{noisy_failed}', 'turn-nf-{i}', {i}, 'failed', '{{\"message\":\"noisy\"}}');\n"
+        ));
+    }
+    for i in 0..260u32 {
+        history_sql.push_str(&format!(
+            "INSERT INTO thread_turns VALUES ('{noisy_working}', 'turn-nw-{i}', {i}, 'inProgress', NULL);\n"
+        ));
+    }
+
+    for i in 0..(MAX_THREAD_SNIPPETS + 48) {
+        history_sql.push_str(&format!(
+            "INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item_json, item_type) VALUES \
+             ('{older_working}', 'turn-ow-1', 'item-{i}', {i}, 1000, '{{\"type\":\"agentMessage\",\"text\":\"Unique snippet line number {i:04}\"}}', 'agentMessage');\n"
+        ));
+    }
+
+    exec_sql(&dir.path().join("sqlite").join("codex.db"), &codex_sql);
+    exec_sql(&dir.path().join("state_5.sqlite"), &state_sql);
+    exec_sql(&dir.path().join("thread_history_1.sqlite"), &history_sql);
+
+    let dbs = CodexDbs::open(dir.path()).unwrap();
+    let priority_ids = dbs.load_priority_turn_ids().unwrap();
+    assert!(priority_ids.contains(older_failed));
+    assert!(priority_ids.contains(older_working));
+    assert!(priority_ids.contains(noisy_failed));
+    assert!(priority_ids.contains(noisy_working));
+
+    let observed = observe_codex_threads(dir.path(), 4).unwrap();
+    let observed_ids: BTreeSet<&str> = observed.iter().map(|o| o.thread_id.as_str()).collect();
+    assert!(observed_ids.contains(older_failed));
+    assert!(observed_ids.contains(older_working));
+
+    let idx = dbs.thread_snippets(older_working, 1024).unwrap();
+    assert_eq!(idx.snippets.len(), MAX_THREAD_SNIPPETS);
+    assert!(idx.snippets.len() <= MAX_THREAD_SNIPPETS);
 }

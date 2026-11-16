@@ -523,18 +523,26 @@ impl DeviceSession {
                 false
             }
         };
+        let is_native_mutation_method = matches!(
+            method,
+            "fs.writebin"
+                | "fs.txbegin"
+                | "fs.txcommit"
+                | "lights.preview"
+                | "v.oai.thstatus"
+                | "v.oai.rgbcfg"
+                | "sys.bootloader"
+        );
         let native_mutation = mutation == Some(method)
-            && matches!(
-                method,
-                "fs.writebin"
-                    | "fs.txbegin"
-                    | "fs.txcommit"
-                    | "lights.preview"
-                    | "v.oai.thstatus"
-                    | "v.oai.rgbcfg"
-                    | "sys.bootloader"
+            && is_native_mutation_method
+            && self.link.backend() == mi_transport::LinkBackend::MacHidapi267Numbered
+            && self.link.is_exclusive_vendor();
+        if !synthetic && mutation == Some(method) && is_native_mutation_method && !native_mutation {
+            return Err(ProtoError::Unverified(
+                "native mutations require exclusive 267-byte vendor link",
             )
-            && self.link.backend() == mi_transport::LinkBackend::MacHidapi267Numbered;
+            .into());
+        }
         let is_v070_method = matches!(
             method,
             "mouse.config"

@@ -4,8 +4,9 @@ pub mod codex_sessions;
 pub mod executor;
 pub mod instance_lock;
 pub mod managed_controls;
-mod native_ax;
+pub mod native_ax;
 pub mod passive_panel;
+pub mod private_fs;
 pub mod scenarios;
 pub mod session_navigation;
 pub mod status_item;
@@ -19,7 +20,7 @@ pub use codex_sessions::{
 };
 pub use executor::{
     is_antigravity_new_conversation_control, is_bundle_running, parse_pid_from_lsappinfo_output,
-    select_antigravity_new_conversation_target, submit_modifiers_for_adapter,
+    redact_home_path, select_antigravity_new_conversation_target, submit_modifiers_for_adapter,
     AntigravityNewConversationTarget, AntigravitySidebarAxNode, ClipboardItemSnapshot,
     ClipboardSnapshot, DialScrollRequest, HeldInputId, HostActionReceipt, HostOsDriver,
     LiveHostActionExecutor, MacOsSystemDriver, MouseButtonKind, RecordedOsEvent, RecordingOsDriver,
@@ -33,9 +34,13 @@ pub use passive_panel::{
     PassivePanelStyleSpec, RecordingPassivePanelHost, RecordingPassivePanelState, ScreenGeometry,
     ScreenPoint, ScreenRect, ScreenSize,
 };
+pub use private_fs::{
+    ensure_private_dir, open_private_file, open_verified_readonly_file,
+    verify_existing_private_dir, PrivateDirError, PrivateOpenMode,
+};
 pub use scenarios::{
     run_config_write_scenario, run_diagnostic_export_scenario, run_host_execution_scenario,
-    run_lighting_control_scenario, DiagnosticRedactor, ScenarioResultSummary,
+    run_lighting_control_scenario, write_private_json, DiagnosticRedactor, ScenarioResultSummary,
 };
 pub use session_navigation::{
     codex_process_id, default_codex_home, navigate_codex_session,

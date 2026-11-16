@@ -1372,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_antigravity_trajectories_matches_jetski_web_pk_rk_and_qcb_rules() {
+    fn classify_antigravity_trajectories_matches_frontend_status_predicates() {
         let payload = json!({
             "busy-status": {
                 "summary": "Busy Run",

@@ -54,6 +54,10 @@ pub enum PresetExportScope {
 pub struct PendingPresetImportPreview {
     pub raw_text: String,
     pub name: String,
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub contains_complete_archive: bool,
     pub profile_count: usize,
     pub layer_count: usize,
     pub action_count: usize,

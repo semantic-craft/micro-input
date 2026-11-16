@@ -1960,6 +1960,40 @@ fn diagnostics_export_reports_failure_when_destination_cannot_be_written() {
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["connected"], false);
     assert!(store.status_message().contains("已导出诊断报告"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let mode = std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "exported diagnostic-report.json must use 0600 permissions"
+        );
+        let dir_str = temp.path().display().to_string();
+        assert!(
+            !store.status_message().contains(&dir_str),
+            "status_message must redact host directory path: {}",
+            store.status_message()
+        );
+
+        let victim = temp.path().join("victim.txt");
+        std::fs::write(&victim, b"ORIGINAL").unwrap();
+        std::fs::remove_file(&destination).unwrap();
+        symlink(&victim, &destination).unwrap();
+        let sym_err = store
+            .dispatch_device_workflow_action(mi_core::DeviceWorkflowAction::ExportDiagnostics)
+            .unwrap_err();
+        assert!(matches!(sym_err, mi_core::WorkbenchError::Storage(_)));
+        assert_eq!(std::fs::read(&victim).unwrap(), b"ORIGINAL");
+        assert!(
+            !sym_err.to_string().contains(&dir_str),
+            "ExportDiagnostics error must redact host paths: {sym_err}"
+        );
+    }
 }
 
 #[test]
@@ -2580,4 +2614,70 @@ fn open_migrates_on_disk_six_layer_runtime_in_memory_and_persisted() {
             command: "search".into(),
         })
     );
+}
+
+#[test]
+fn command_execution_enabled_defaults_fail_closed_across_store_and_inspector() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    match &store.projection().inspector.body {
+        mi_core::InspectorBodyProjection::Editable(edit) => {
+            assert!(
+                !edit.command_execution_enabled,
+                "command_execution_enabled must default to false"
+            );
+        }
+        other => panic!("expected Editable inspector, got {other:?}"),
+    }
+    assert!(
+        !mi_core::EditableSlotInspectorProjection::default().command_execution_enabled,
+        "EditableSlotInspectorProjection::default() must fail closed"
+    );
+}
+
+#[test]
+fn set_command_execution_enabled_persists_across_return_to_host_and_reopen() {
+    let temp = TempDir::new().unwrap();
+    let seed = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    std::fs::write(
+        temp.path().join("workbench.json"),
+        serde_json::to_vec(&seed.document_store.draft.document).unwrap(),
+    )
+    .unwrap();
+    drop(seed);
+
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert!(!store.document_store.command_execution_enabled());
+
+    store
+        .dispatch_inspector_action(mi_core::InspectorAction::SetCommandExecutionEnabled(true))
+        .expect("enable command execution");
+    assert!(store.document_store.command_execution_enabled());
+
+    store
+        .apply_backup_command(BackupCommand::ReturnToHostDocument)
+        .expect("return to host document");
+    assert!(
+        store.document_store.command_execution_enabled(),
+        "command_execution_enabled must survive ReturnToHostDocument"
+    );
+    match &store.projection().inspector.body {
+        mi_core::InspectorBodyProjection::Editable(edit) => {
+            assert!(edit.command_execution_enabled);
+        }
+        other => panic!("expected Editable inspector, got {other:?}"),
+    }
+
+    drop(store);
+    let reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert!(
+        reopened.document_store.command_execution_enabled(),
+        "command_execution_enabled must survive store reopen"
+    );
+    match &reopened.projection().inspector.body {
+        mi_core::InspectorBodyProjection::Editable(edit) => {
+            assert!(edit.command_execution_enabled);
+        }
+        other => panic!("expected Editable inspector, got {other:?}"),
+    }
 }

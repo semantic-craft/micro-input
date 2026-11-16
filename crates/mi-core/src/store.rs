@@ -573,8 +573,7 @@ fn choose_usb_candidate<'a>(
 impl WorkbenchStore {
     pub fn open(config: WorkbenchStoreConfig) -> Result<Self, WorkbenchError> {
         let now = Instant::now();
-        fs::create_dir_all(&config.document_dir)
-            .map_err(|e| WorkbenchError::Storage(e.to_string()))?;
+        ensure_private_document_dir(&config.document_dir)?;
         let mut document_store = DocumentStore::default();
         let workbench_path = config.workbench_json_path();
         if !config.isolated || workbench_path.exists() {
@@ -716,7 +715,7 @@ impl WorkbenchStore {
             favorites_only: false,
             favorite_action_ids: BTreeSet::new(),
             open_drawers: Vec::new(),
-            command_execution_enabled: true,
+            command_execution_enabled: false,
             lighting_apply_to_all_layers: false,
             lighting_preview_active: false,
             lighting_preview_remaining_secs: 0,
@@ -1198,15 +1197,18 @@ impl WorkbenchStore {
                     "host_revision": self.document_store.host_revision(),
                     "execution_enabled": self.document_store.host_execution_enabled(),
                 });
-                let bytes = serde_json::to_vec_pretty(&report).map_err(|error| {
-                    WorkbenchError::Storage(format!("无法生成诊断报告：{error}"))
-                })?;
-                fs::write(&diag_path, bytes).map_err(|error| {
-                    WorkbenchError::Storage(format!("无法保存诊断报告：{error}"))
+                mi_macos::write_private_json(&diag_path, &report).map_err(|error| {
+                    WorkbenchError::Storage(format!(
+                        "无法保存诊断报告：{}",
+                        mi_macos::DiagnosticRedactor::sanitize(&error)
+                    ))
                 })?;
                 let exported_path = diag_path.display().to_string();
-                self.last_exported_diagnostics_path = Some(exported_path.clone());
-                self.status_message = format!("已导出诊断报告：{exported_path}");
+                let safe_display_path = mi_macos::DiagnosticRedactor::sanitize(
+                    &mi_macos::redact_home_path(&exported_path),
+                );
+                self.last_exported_diagnostics_path = Some(exported_path);
+                self.status_message = format!("已导出诊断报告：{safe_display_path}");
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -4918,6 +4920,7 @@ impl WorkbenchStore {
                 let envelope = match PresetFileEnvelope::from_bytes(&bytes) {
                     Ok(env) => env,
                     Err(msg) => {
+                        self.status_message = msg.clone();
                         self.preset_transfer_error = Some(msg.clone());
                         self.pending_preset_import = None;
                         self.commit_runtime_update();
@@ -4927,6 +4930,7 @@ impl WorkbenchStore {
                 let parsed = match mi_model::preset::import(&envelope.raw_utf8) {
                     Ok(draft) => draft,
                     Err(msg) => {
+                        self.status_message = msg.clone();
                         self.preset_transfer_error = Some(msg.clone());
                         self.pending_preset_import = None;
                         self.commit_runtime_update();
@@ -4940,9 +4944,25 @@ impl WorkbenchStore {
                     .and_then(|pid| graph.profiles.get(pid))
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| "预设方案".to_string());
+                let scope = parsed
+                    .document
+                    .origin
+                    .get("preset_scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("document")
+                    .to_string();
+                let contains_complete_archive = parsed
+                    .document
+                    .origin
+                    .get("preset_metadata")
+                    .and_then(|m| m.get("source_archive"))
+                    .and_then(|v| v.as_str())
+                    == Some("complete");
                 self.pending_preset_import = Some(PendingPresetImportPreview {
                     raw_text: envelope.raw_utf8,
                     name,
+                    scope,
+                    contains_complete_archive,
                     profile_count: graph.profiles.len(),
                     layer_count: graph.layers.len(),
                     action_count: graph.actions.len(),
@@ -5948,14 +5968,8 @@ impl WorkbenchStore {
                 Ok(())
             }
             InspectorAction::SetCommandExecutionEnabled(enabled) => {
-                self.command_execution_enabled = enabled;
-                if let Some(running) = &self.six_layer_running {
-                    running.set_execution_policy(
-                        self.document_store.host_execution_enabled(),
-                        enabled,
-                        self.update_now,
-                    );
-                }
+                self.apply_routing_operation(RoutingOperation::CommandExecution { enabled })?;
+                self.sync_routing_snapshot();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -8276,10 +8290,137 @@ fn parse_iso8601_utc_ms(raw: &str) -> u64 {
     (days as u64) * 86_400_000 + (hh * 3600 + mm * 60 + ss) * 1000 + frac_ms
 }
 
-fn find_freshest_antigravity_hub() -> Option<(u16, String, AntigravityInstance)> {
+const ANTIGRAVITY_HUB_MAX_BYTES: usize = 65_536;
+const MAX_ANTIGRAVITY_HTTP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    extern "C" {
+        fn getuid() -> u32;
+    }
+    unsafe { getuid() }
+}
+
+#[cfg(unix)]
+fn antigravity_hub_open_flags() -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        0x0100 | 0x0004
+    }
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        0o400000 | 0o4000
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        0o100000 | 0o4000
+    }
+}
+
+fn ensure_private_document_dir(dir: &Path) -> Result<(), WorkbenchError> {
+    mi_macos::ensure_private_dir(dir).map_err(WorkbenchError::Storage)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CsrfToken(String);
+
+impl CsrfToken {
+    fn parse(raw: &str) -> Option<Self> {
+        if raw.is_empty()
+            || raw.trim() != raw
+            || raw
+                .chars()
+                .any(|ch| ch.is_ascii_control() || matches!(ch, '\r' | '\n' | '\0'))
+        {
+            return None;
+        }
+        Some(Self(raw.to_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+struct ParsedAntigravityHub {
+    port: u16,
+    csrf: CsrfToken,
+    ui_port: u16,
+    hub: String,
+}
+
+fn read_antigravity_hub_file(path: &Path) -> Option<ParsedAntigravityHub> {
+    use std::hash::{Hash, Hasher};
+    use std::io::Read;
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(antigravity_hub_open_flags());
+    }
+    let file = options.open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != current_uid() || (meta.mode() & 0o077) != 0 {
+            return None;
+        }
+    }
+    if meta.len() == 0 || meta.len() > ANTIGRAVITY_HUB_MAX_BYTES as u64 {
+        return None;
+    }
+    let mut raw_bytes = Vec::with_capacity(meta.len() as usize);
+    file.take((ANTIGRAVITY_HUB_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut raw_bytes)
+        .ok()?;
+    if raw_bytes.is_empty() || raw_bytes.len() > ANTIGRAVITY_HUB_MAX_BYTES {
+        return None;
+    }
+    let raw = String::from_utf8(raw_bytes).ok()?;
+    let val = serde_json::from_str::<Value>(&raw).ok()?;
+    let port_u64 = val.get("httpPort").and_then(Value::as_u64)?;
+    let port = u16::try_from(port_u64).ok().filter(|&p| p != 0)?;
+    let csrf = val
+        .get("csrfToken")
+        .and_then(Value::as_str)
+        .and_then(CsrfToken::parse)?;
+    let ui_port = u16::try_from(val.get("httpsPort")?.as_u64()?).ok()?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hash);
+    raw.hash(&mut hash);
+    Some(ParsedAntigravityHub {
+        port,
+        csrf,
+        ui_port,
+        hub: format!("{:x}", hash.finish()),
+    })
+}
+
+fn find_freshest_antigravity_hub() -> Option<(u16, CsrfToken, AntigravityInstance)> {
     let home = env::var_os("HOME").map(PathBuf::from)?;
     let daemon_dir = home.join(".gemini/antigravity/daemon");
-    let entries = fs::read_dir(daemon_dir).ok()?;
+    let parsed = find_freshest_antigravity_hub_in(&daemon_dir)?;
+    let pid = mi_macos::session_navigation::antigravity_process_id()?;
+    Some((
+        parsed.port,
+        parsed.csrf,
+        AntigravityInstance {
+            hub: parsed.hub,
+            pid,
+            ui_port: parsed.ui_port,
+        },
+    ))
+}
+
+fn find_freshest_antigravity_hub_in(daemon_dir: &Path) -> Option<ParsedAntigravityHub> {
+    let verified_dir = mi_macos::verify_existing_private_dir(daemon_dir).ok()?;
+    let entries = fs::read_dir(&verified_dir).ok()?;
     let mut hubs: Vec<(std::time::SystemTime, PathBuf)> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
@@ -8288,47 +8429,53 @@ fn find_freshest_antigravity_hub() -> Option<(u16, String, AntigravityInstance)>
             if !name.starts_with("hub_") || !name.ends_with(".json") {
                 return None;
             }
-            let modified = e.metadata().ok()?.modified().ok()?;
+            let entry_meta = fs::symlink_metadata(&path).ok()?;
+            if entry_meta.file_type().is_symlink() || !entry_meta.file_type().is_file() {
+                return None;
+            }
+            let modified = entry_meta.modified().ok()?;
             Some((modified, path))
         })
         .collect();
     hubs.sort_by(|a, b| b.0.cmp(&a.0));
     for (_, path) in hubs {
-        let Ok(raw) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(val) = serde_json::from_str::<Value>(&raw) else {
-            continue;
-        };
-        let Some(port_u64) = val.get("httpPort").and_then(Value::as_u64) else {
-            continue;
-        };
-        let Ok(port) = u16::try_from(port_u64) else {
-            continue;
-        };
-        let Some(csrf) = val
-            .get("csrfToken")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        else {
-            continue;
-        };
-        use std::hash::{Hash, Hasher};
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        path.hash(&mut hash);
-        raw.hash(&mut hash);
-        let pid = mi_macos::session_navigation::antigravity_process_id()?;
-        return Some((
-            port,
-            csrf.to_string(),
-            AntigravityInstance {
-                hub: format!("{:x}", hash.finish()),
-                pid,
-                ui_port: u16::try_from(val.get("httpsPort")?.as_u64()?).ok()?,
-            },
-        ));
+        if let Some(parsed) = read_antigravity_hub_file(&path) {
+            return Some(parsed);
+        }
     }
     None
+}
+
+fn build_antigravity_trajectories_request(port: u16, csrf: &CsrfToken, body_len: usize) -> String {
+    format!(
+        "POST /exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories HTTP/1.0\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Content-Type: application/json\r\n\
+         Connect-Protocol-Version: 1\r\n\
+         x-codeium-csrf-token: {}\r\n\
+         Connection: close\r\n\
+         Content-Length: {body_len}\r\n\r\n",
+        csrf.as_str()
+    )
+}
+
+fn parse_antigravity_http_200_body(raw_resp: &[u8]) -> Option<&[u8]> {
+    let sep = b"\r\n\r\n";
+    let header_end = raw_resp.windows(sep.len()).position(|w| w == sep)?;
+    let headers = &raw_resp[..header_end];
+    let status_line = headers
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|pos| &headers[..pos])
+        .unwrap_or(headers);
+    let is_ok = status_line == b"HTTP/1.1 200"
+        || status_line.starts_with(b"HTTP/1.1 200 ")
+        || status_line == b"HTTP/1.0 200"
+        || status_line.starts_with(b"HTTP/1.0 200 ");
+    if !is_ok {
+        return None;
+    }
+    Some(&raw_resp[header_end + sep.len()..])
 }
 
 pub(crate) fn classify_antigravity_trajectory_summaries(
@@ -8577,16 +8724,7 @@ fn poll_antigravity_daemon_candidates_with_frontmost(
 
     let (port, csrf, instance) = find_freshest_antigravity_hub()?;
     let body = b"{\"metadata\":{}}";
-    let request = format!(
-        "POST /exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories HTTP/1.0\r\n\
-         Host: 127.0.0.1:{port}\r\n\
-         Content-Type: application/json\r\n\
-         Connect-Protocol-Version: 1\r\n\
-         x-codeium-csrf-token: {csrf}\r\n\
-         Connection: close\r\n\
-         Content-Length: {}\r\n\r\n",
-        body.len()
-    );
+    let request = build_antigravity_trajectories_request(port, &csrf, body.len());
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(2000)).ok()?;
     let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
@@ -8596,13 +8734,18 @@ fn poll_antigravity_daemon_candidates_with_frontmost(
     let mut raw_resp = Vec::with_capacity(65536);
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        if Instant::now() >= deadline || raw_resp.len() > 4 * 1024 * 1024 {
+        if Instant::now() >= deadline {
             return None;
         }
         let mut chunk = [0u8; 16384];
         match stream.read(&mut chunk) {
             Ok(0) => break,
-            Ok(count) => raw_resp.extend_from_slice(&chunk[..count]),
+            Ok(count) => {
+                if raw_resp.len().saturating_add(count) > MAX_ANTIGRAVITY_HTTP_RESPONSE_BYTES {
+                    return None;
+                }
+                raw_resp.extend_from_slice(&chunk[..count]);
+            }
             Err(e)
                 if matches!(
                     e.kind(),
@@ -8614,18 +8757,11 @@ fn poll_antigravity_daemon_candidates_with_frontmost(
             Err(_) => return None,
         }
     }
-    if !raw_resp.starts_with(b"HTTP/1.1 200") && !raw_resp.starts_with(b"HTTP/1.0 200") {
-        return None;
-    }
+    let body_bytes = parse_antigravity_http_200_body(&raw_resp)?;
     if find_freshest_antigravity_hub()?.2 != instance {
         return None;
     }
-    let sep = b"\r\n\r\n";
-    let body_start = raw_resp
-        .windows(sep.len())
-        .position(|w| w == sep)
-        .map(|pos| pos + sep.len())?;
-    let parsed: Value = serde_json::from_slice(&raw_resp[body_start..]).ok()?;
+    let parsed: Value = serde_json::from_slice(body_bytes).ok()?;
     let summaries = parsed.get("trajectorySummaries")?.as_object()?;
     let active_frontmost_cid = suppress_frontmost
         .then(|| {
@@ -8817,5 +8953,228 @@ mod tests {
             "未选择方案"
         );
         assert!(store.projection().status_menu.cheat_sheet_preview.is_none());
+    }
+
+    #[test]
+    fn antigravity_hub_discovery_rejects_crlf_csrf_zero_port_symlink_and_public_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let hub_path = dir.path().join("hub_bad.json");
+
+        fs::write(
+            &hub_path,
+            r#"{"httpPort":9001,"httpsPort":9443,"csrfToken":"tok\r\nX-Injected: 1"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            find_freshest_antigravity_hub_in(dir.path()).is_none(),
+            "CRLF in csrfToken must be rejected"
+        );
+
+        fs::write(
+            &hub_path,
+            r#"{"httpPort":9001,"httpsPort":9443,"csrfToken":" valid-tok "}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            find_freshest_antigravity_hub_in(dir.path()).is_none(),
+            "leading/trailing whitespace in csrfToken must be rejected"
+        );
+
+        fs::write(
+            &hub_path,
+            r#"{"httpPort":0,"httpsPort":9443,"csrfToken":"valid-token"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            find_freshest_antigravity_hub_in(dir.path()).is_none(),
+            "port == 0 must be rejected"
+        );
+
+        fs::write(
+            &hub_path,
+            r#"{"httpPort":9001,"httpsPort":9443,"csrfToken":"valid-token"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            find_freshest_antigravity_hub_in(dir.path()).is_none(),
+            "0o644 hub file must be rejected"
+        );
+
+        fs::remove_file(&hub_path).unwrap();
+        let outside = dir.path().join("outside.json");
+        fs::write(
+            &outside,
+            r#"{"httpPort":9001,"httpsPort":9443,"csrfToken":"valid-token"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&outside, &hub_path).unwrap();
+        assert!(
+            find_freshest_antigravity_hub_in(dir.path()).is_none(),
+            "symlinked hub file must be rejected"
+        );
+        fs::remove_file(&hub_path).unwrap();
+
+        fs::write(&hub_path, "").unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(dir.path()).is_none());
+        fs::remove_file(&hub_path).unwrap();
+
+        {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+            extern "C" {
+                #[cfg(target_os = "macos")]
+                fn mkfifo(path: *const std::ffi::c_char, mode: u16) -> std::ffi::c_int;
+                #[cfg(not(target_os = "macos"))]
+                fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> std::ffi::c_int;
+            }
+            let c_fifo = CString::new(hub_path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+            assert!(find_freshest_antigravity_hub_in(dir.path()).is_none());
+            fs::remove_file(&hub_path).unwrap();
+        }
+
+        let pad = "a".repeat(ANTIGRAVITY_HUB_MAX_BYTES + 64);
+        fs::write(
+            &hub_path,
+            format!(
+                r#"{{"httpPort":9001,"httpsPort":9443,"csrfToken":"valid-token","pad":"{pad}"}}"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(dir.path()).is_none());
+
+        assert!(CsrfToken::parse("").is_none());
+        assert!(CsrfToken::parse("tok\0en").is_none());
+        assert!(CsrfToken::parse("tok\x07en").is_none());
+        assert!(CsrfToken::parse("tok\ten").is_none());
+        let valid_tok = CsrfToken::parse("valid-token-123").expect("valid csrf token");
+        let req = build_antigravity_trajectories_request(9001, &valid_tok, 15);
+        assert!(req.contains("x-codeium-csrf-token: valid-token-123\r\n"));
+
+        fs::write(
+            &hub_path,
+            r#"{"httpPort":9001,"httpsPort":9443,"csrfToken":"valid-token-123"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let parsed = find_freshest_antigravity_hub_in(dir.path()).expect("valid 0o600 hub");
+        assert_eq!(parsed.port, 9001);
+        assert_eq!(parsed.ui_port, 9443);
+        assert_eq!(parsed.csrf.as_str(), "valid-token-123");
+
+        assert!(parse_antigravity_http_200_body(b"HTTP/1.1 2000 OK\r\n\r\n{}").is_none());
+        assert!(parse_antigravity_http_200_body(b"HTTP/1.1 401 Unauthorized\r\n\r\n{}").is_none());
+        assert_eq!(
+            parse_antigravity_http_200_body(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}"),
+            Some(b"{}".as_slice())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_hub_discovery_rejects_symlinked_and_world_or_group_writable_daemon_dir() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let parent = tempfile::tempdir().unwrap();
+        let real_dir = parent.path().join("real_daemon");
+        fs::create_dir_all(&real_dir).unwrap();
+        fs::set_permissions(&real_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let hub_path = real_dir.join("hub_live.json");
+        fs::write(
+            &hub_path,
+            r#"{"httpPort":9001,"httpsPort":9443,"csrfToken":"valid-token-123"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let symlink_dir = parent.path().join("linked_daemon");
+        symlink(&real_dir, &symlink_dir).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&symlink_dir).is_none());
+
+        fs::set_permissions(&real_dir, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&real_dir).is_none());
+
+        fs::set_permissions(&real_dir, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&real_dir).is_none());
+
+        fs::set_permissions(&real_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&real_dir).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_hub_discovery_rejects_symlinked_and_writable_ancestor_dir() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let ancestor = root.path().join("ancestor");
+        let daemon_dir = ancestor.join("daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::set_permissions(&daemon_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let hub_path = daemon_dir.join("hub_live.json");
+        fs::write(
+            &hub_path,
+            r#"{"httpPort":9001,"httpsPort":9443,"csrfToken":"valid-token-123"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let symlink_ancestor = root.path().join("linked_ancestor");
+        symlink(&ancestor, &symlink_ancestor).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&symlink_ancestor.join("daemon")).is_none());
+
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&daemon_dir).is_none());
+
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&daemon_dir).is_none());
+
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&daemon_dir).is_some());
+
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&daemon_dir).is_some());
+    }
+
+    #[test]
+    fn workbench_store_open_tightens_document_dir_permissions_to_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let doc_dir = dir.path().join("nested").join("micro-input-doc");
+        let cfg = WorkbenchStoreConfig::isolated(&doc_dir);
+        let _store = WorkbenchStore::open(cfg).expect("open store");
+        let mode = fs::metadata(&doc_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "document_dir must be tightened to 0o700");
+        let parent_mode = fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            parent_mode, 0o755,
+            "ancestor directory permissions must be untouched"
+        );
+
+        let loose_doc_dir = dir.path().join("existing-loose");
+        fs::create_dir_all(&loose_doc_dir).unwrap();
+        fs::set_permissions(&loose_doc_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let _store2 =
+            WorkbenchStore::open(WorkbenchStoreConfig::isolated(&loose_doc_dir)).expect("open");
+        assert_eq!(
+            fs::metadata(&loose_doc_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let link_doc_dir = dir.path().join("symlink-doc-dir");
+        std::os::unix::fs::symlink(&loose_doc_dir, &link_doc_dir).unwrap();
+        assert!(WorkbenchStore::open(WorkbenchStoreConfig::isolated(&link_doc_dir)).is_err());
     }
 }

@@ -32,8 +32,46 @@ def redact_sensitive(text: str, extra_secrets: list[str] | None = None) -> str:
     cleaned = re.sub(r'Developer ID Application:[^\n"]+', 'Developer ID Application: <REDACTED>', cleaned)
     cleaned = re.sub(r'\b[0-9A-F]{40}\b', '<REDACTED_SHA1>', cleaned)
     cleaned = re.sub(r'\([A-Z0-9]{10}\)', '(<REDACTED_TEAM>)', cleaned)
+    cleaned = re.sub(
+        r'(["\']?(?i:team[_-]?id|teamidentifier|team\s+id|ascprovider)["\']?\s*[:=]\s*["\']?|--team-id(?:=|\s+)["\']?)[A-Z0-9]{10}\b',
+        r'\1<REDACTED_TEAM>',
+        cleaned,
+    )
+    cleaned = re.sub(
+        r'(<key>(?:TeamIdentifier|com\.apple\.developer\.team-identifier)</key>\s*(?:<array>\s*)?<string>)[A-Z0-9]{10}(</string>)',
+        r'\1<REDACTED_TEAM>\2',
+        cleaned,
+    )
+    cleaned = re.sub(
+        r'(<(?i:team_?id|teamidentifier)>)[A-Z0-9]{10}(</(?i:team_?id|teamidentifier)>)',
+        r'\1<REDACTED_TEAM>\2',
+        cleaned,
+    )
+    cleaned = re.sub(
+        r'(["\']?(?i:key[_-]?id|issuer(?:[_-]?id)?)["\']?\s*[:=]\s*["\']?|--(?:key-id|issuer)(?:=|\s+)["\']?)[A-Za-z0-9_-]{6,64}',
+        r'\1<REDACTED_ID>',
+        cleaned,
+    )
+    cleaned = re.sub(r'\bAuthKey_[A-Za-z0-9]{6,20}\b', '<REDACTED_KEY_ID>', cleaned)
+    cleaned = re.sub(
+        r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b',
+        '<REDACTED_UUID>',
+        cleaned,
+    )
+    cleaned = re.sub(r'(?:~|/[^\s"\'=<>]*)\.private_keys(?:/[^\s"\'=<>]*)?', '<REDACTED_PATH>', cleaned)
+    cleaned = re.sub(r'/Users/[A-Za-z0-9._-]+(?:/[^\s"\'=<>]*)*', '<REDACTED_PATH>', cleaned)
+    cleaned = re.sub(r'(?:~/|/)?[^\s"\'=<>]*\.(?:p8|p12)\b', '<REDACTED_PATH>', cleaned)
     cleaned = re.sub(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', '<REDACTED_EMAIL>', cleaned)
     return cleaned
+
+
+def format_notary_failure_log(
+    stdout: str | None,
+    stderr: str | None,
+    extra_secrets: list[str] | None = None,
+) -> str:
+    raw = stdout if (stdout or '').strip() else (stderr or '')
+    return redact_sensitive(raw, extra_secrets)[:2000]
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -237,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         run_checked(['gh', 'auth', 'status'], cwd=root)
 
     sign_identity = resolve_release_signing_identity()
-    notary_profile = os.environ.get('MI_NOTARY_PROFILE', 'xw-notary').strip() or 'xw-notary'
+    notary_profile = os.environ.get('MI_NOTARY_PROFILE', 'micro-input-notary').strip() or 'micro-input-notary'
     secrets = [sign_identity, notary_profile]
     print('Pre-flight metadata and signing credentials check: OK', flush=True)
 
@@ -399,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
                     capture_output=True,
                     text=True,
                 )
-                redacted_log = redact_sensitive((log_proc.stdout or log_proc.stderr or '')[:2000], secrets)
+                redacted_log = format_notary_failure_log(log_proc.stdout, log_proc.stderr, secrets)
                 raise RuntimeError(f'Notarization failed with status={notary_status} (id={submission_id}): {redacted_log}')
             time.sleep(15)
         if notary_status != 'Accepted':

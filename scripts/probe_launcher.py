@@ -29,7 +29,7 @@ def main(probe, ROOT):
 
     # Persist supervisor metadata before the child can touch hardware. The native
     # harness journals the exact generated target and stage before every mutation.
-    private = ROOT / '.scratch' / 'input-study' / (f'probe-{probe}-supervisor-' + str(uuid.uuid4()))
+    private = ROOT / '.scratch' / 'hardware-probes' / (f'probe-{probe}-supervisor-' + str(uuid.uuid4()))
     private.mkdir(parents=True, mode=0o700)
     env = dict(os.environ)
     env.pop('MI_PROBE_A_OPERATOR', None)
@@ -42,7 +42,7 @@ def main(probe, ROOT):
         with open(path, 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as f:
             json.dump({'stage': stage, 'pid': child.pid if child else None, 'returncode': child.poll() if child else None, 'time': time.time(),
                        'state_if_interrupted': 'UNKNOWN; do not retry or auto-clean',
-                       'private_harness_journals': f'.scratch/input-study/probe-{probe}-*/stage-*.json'}, f)
+                       'private_harness_journals': f'.scratch/hardware-probes/probe-{probe}-*/stage-*.json'}, f)
             f.flush()
             os.fsync(f.fileno())
 

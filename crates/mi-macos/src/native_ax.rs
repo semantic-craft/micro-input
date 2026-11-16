@@ -303,16 +303,27 @@ mod macos {
                 Some(Self(value))
             }
         }
-        fn text(value: &str) -> Self {
-            unsafe {
-                Self(CFStringCreateWithBytes(
+        fn text_with(
+            value: &str,
+            create: unsafe extern "C" fn(Ref, *const u8, isize, u32, u8) -> Ref,
+        ) -> Option<Self> {
+            let cf_str = unsafe {
+                create(
                     std::ptr::null(),
                     value.as_ptr(),
                     value.len() as isize,
                     UTF8,
                     0,
-                ))
+                )
+            };
+            if cf_str.is_null() {
+                None
+            } else {
+                unsafe { Self::from_create(cf_str) }
             }
+        }
+        fn text(value: &str) -> Option<Self> {
+            Self::text_with(value, CFStringCreateWithBytes)
         }
         fn attributes(
             &self,
@@ -326,7 +337,11 @@ mod macos {
             if unsafe { AXUIElementSetMessagingTimeout(self.0, timeout) } != 0 {
                 return Err(blocked("ax_timeout_unavailable"));
             }
-            let names: Vec<_> = names.iter().map(|name| Self::text(name)).collect();
+            let names: Vec<_> = names
+                .iter()
+                .map(|name| Self::text(name))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| blocked("ax_attribute_names_unavailable"))?;
             let refs: Vec<_> = names.iter().map(|name| name.0).collect();
             let attributes = unsafe {
                 Self::from_create(CFArrayCreate(
@@ -453,13 +468,14 @@ mod macos {
                 .collect()
         }
         fn settable(&self, name: &str) -> Result<bool, String> {
-            let name = Self::text(name);
+            let name = Self::text(name).ok_or_else(|| blocked("ax_attribute_name_unavailable"))?;
             let mut value = 0u8;
             let status = unsafe { AXUIElementIsAttributeSettable(self.0, name.0, &mut value) };
             Ok(attribute_error(status)?.is_some() && value != 0)
         }
         fn set(&self, name: &str, value: Ref) -> Result<(), String> {
-            let name = Self::text(name);
+            let name = Self::text(name)
+                .ok_or_else(|| "unconfirmed:ax_set_attr_unavailable".to_string())?;
             let code = unsafe { AXUIElementSetAttributeValue(self.0, name.0, value) };
             if code == 0 {
                 Ok(())
@@ -468,7 +484,8 @@ mod macos {
             }
         }
         fn action(&self, action: &str) -> Result<(), String> {
-            let action = Self::text(action);
+            let action = Self::text(action)
+                .ok_or_else(|| "unconfirmed:ax_action_name_unavailable".to_string())?;
             let code = unsafe { AXUIElementPerformAction(self.0, action.0) };
             if code == 0 {
                 Ok(())
@@ -937,7 +954,9 @@ mod macos {
             |name| application.settable(name),
             |name| application.bool_attr(name),
             |name| {
-                let attr = Owned::text(name);
+                let Some(attr) = Owned::text(name) else {
+                    return -25200;
+                };
                 unsafe { AXUIElementSetAttributeValue(application.0, attr.0, kCFBooleanTrue) }
             },
         )
@@ -3191,7 +3210,8 @@ mod macos {
             if replacement.len() >= 4096 {
                 return Err(blocked("input_value_too_large"));
             }
-            let value = Owned::text(&replacement);
+            let value =
+                Owned::text(&replacement).ok_or_else(|| blocked("input_value_unavailable"))?;
             self.validate(target)?;
             write_with_readback(
                 || element.set("AXValue", value.0),
@@ -3403,7 +3423,7 @@ mod macos {
             pressable: bool,
         ) -> ObservedNode {
             ObservedNode {
-                element: Owned::text(id),
+                element: Owned::text(id).unwrap(),
                 parent,
                 data: NodeData {
                     role: role.into(),
@@ -3634,8 +3654,8 @@ mod macos {
 
         #[test]
         fn direct_sidebar_link_verification_rejects_spoofed_urls_and_window_changes() {
-            let window = Owned::text("window-1");
-            let link = Owned::text("link-target");
+            let window = Owned::text("window-1").unwrap();
+            let link = Owned::text("link-target").unwrap();
             for (scenario, win_id, role, enabled, live_url, should_succeed) in [
                 (
                     "valid",
@@ -3712,8 +3732,8 @@ mod macos {
                         Ok(names
                             .iter()
                             .map(|name| match *name {
-                                "AXWindow" => Some(Owned::text(win_id)),
-                                "AXRole" => Some(Owned::text(role)),
+                                "AXWindow" => Owned::text(win_id),
+                                "AXRole" => Owned::text(role),
                                 "AXEnabled" => unsafe {
                                     Some(Owned(CFRetain(if enabled {
                                         kCFBooleanTrue
@@ -3721,7 +3741,7 @@ mod macos {
                                         kCFBooleanFalse
                                     })))
                                 },
-                                "AXURL" => Some(Owned::text(live_url)),
+                                "AXURL" => Owned::text(live_url),
                                 _ => None,
                             })
                             .collect())
@@ -3771,7 +3791,7 @@ mod macos {
                 unsafe { Owned::from_create(AXValueCreate(5, (&code as *const i32).cast())) }
                     .unwrap();
             assert!(decode_attribute_slot(value).is_err());
-            let value = decode_attribute_slot(Owned::text("AXLink"))
+            let value = decode_attribute_slot(Owned::text("AXLink").unwrap())
                 .unwrap()
                 .unwrap();
             assert_eq!(value.string().as_deref(), Some("AXLink"));
@@ -3805,13 +3825,16 @@ mod macos {
         fn a_partial_tree_never_publishes_a_unique_candidate() {
             let mut visited = 0;
             let observation = observe_tree(
-                Owned::text("root"),
+                Owned::text("root").unwrap(),
                 Instant::now() + Duration::from_secs(1),
                 |element| {
                     visited += 1;
                     match element.string().as_deref() {
                         Some("root") => Ok(Some(NodeData {
-                            children: vec![Owned::text("candidate"), Owned::text("unreadable")],
+                            children: vec![
+                                Owned::text("candidate").unwrap(),
+                                Owned::text("unreadable").unwrap(),
+                            ],
                             ..Default::default()
                         })),
                         Some("candidate") => Ok(Some(NodeData {
@@ -3828,7 +3851,7 @@ mod macos {
             assert_eq!(visited, 3);
             assert!(observation.is_err());
             let complete = observe_tree(
-                Owned::text("leaf"),
+                Owned::text("leaf").unwrap(),
                 Instant::now() + Duration::from_secs(1),
                 |_| Ok(Some(NodeData::default())),
             )
@@ -3840,15 +3863,18 @@ mod macos {
         fn transient_rebuild_discards_the_entire_incomplete_attempt() {
             let mut attempt = 0;
             let observation = observe_tree(
-                Owned::text("window"),
+                Owned::text("window").unwrap(),
                 Instant::now() + Duration::from_millis(300),
                 |element| match element.string().as_deref() {
                     Some("window") => {
                         attempt += 1;
                         let children = if attempt == 1 {
-                            vec![Owned::text("old-candidate"), Owned::text("retired-node")]
+                            vec![
+                                Owned::text("old-candidate").unwrap(),
+                                Owned::text("retired-node").unwrap(),
+                            ]
                         } else {
-                            vec![Owned::text("new-candidate")]
+                            vec![Owned::text("new-candidate").unwrap()]
                         };
                         Ok(Some(NodeData {
                             children,
@@ -3870,7 +3896,7 @@ mod macos {
                 Some("new-candidate")
             );
             assert!(observe_tree(
-                Owned::text("retired-window"),
+                Owned::text("retired-window").unwrap(),
                 Instant::now() + Duration::from_millis(20),
                 |_| Err("blocked:ax_batch_-25202".into())
             )
@@ -3880,7 +3906,7 @@ mod macos {
         #[test]
         fn traversal_refuses_cycles_deadlines_and_oversized_frontiers() {
             assert!(observe_tree(
-                Owned::text("cycle"),
+                Owned::text("cycle").unwrap(),
                 Instant::now() + Duration::from_secs(1),
                 |element| Ok(Some(NodeData {
                     children: vec![element.clone()],
@@ -3889,14 +3915,14 @@ mod macos {
             )
             .is_err());
             assert!(observe_tree(
-                Owned::text("expired"),
+                Owned::text("expired").unwrap(),
                 Instant::now() - Duration::from_millis(1),
                 |_| panic!("expired reads must not start")
             )
             .is_err());
-            let leaf = Owned::text("leaf");
+            let leaf = Owned::text("leaf").unwrap();
             assert!(observe_tree(
-                Owned::text("wide"),
+                Owned::text("wide").unwrap(),
                 Instant::now() + Duration::from_secs(1),
                 |_| Ok(Some(NodeData {
                     children: vec![leaf.clone(); MAX_NODES],
@@ -3941,11 +3967,11 @@ mod macos {
                 window: CapturedWindow {
                     bundle_id: bundle.into(),
                     pid: 123,
-                    application: Owned::text(&format!("app-{bundle}")),
-                    element: Owned::text(&format!("window-{id}")),
+                    application: Owned::text(&format!("app-{bundle}")).unwrap(),
+                    element: Owned::text(&format!("window-{id}")).unwrap(),
                     title: format!("window-{id}"),
                 },
-                scope: Owned::text(&format!("window-{id}")),
+                scope: Owned::text(&format!("window-{id}")).unwrap(),
             };
             let original = target("com.google.antigravity", 1);
             let identity = original.identity.clone();
@@ -3976,7 +4002,7 @@ mod macos {
 
         #[test]
         fn retained_scope_survives_switching_panes_in_the_same_window() {
-            let window = Owned::text("window");
+            let window = Owned::text("window").unwrap();
             let target = Target {
                 identity: ManagedWindowIdentity {
                     bundle_id: "com.google.antigravity".into(),
@@ -3988,11 +4014,11 @@ mod macos {
                 window: CapturedWindow {
                     bundle_id: "com.google.antigravity".into(),
                     pid: 123,
-                    application: Owned::text("app"),
+                    application: Owned::text("app").unwrap(),
                     element: window,
                     title: "window".into(),
                 },
-                scope: Owned::text("left-pane"),
+                scope: Owned::text("left-pane").unwrap(),
             };
             let original = target.identity.clone();
             let original_scope = target.scope.clone();
@@ -4003,7 +4029,7 @@ mod macos {
             provider.retain_target(&original).unwrap();
             let mut right = target;
             right.identity.scope_id = 11;
-            right.scope = Owned::text("right-pane");
+            right.scope = Owned::text("right-pane").unwrap();
             provider.target = Some(right);
             assert_eq!(
                 provider.checked_exact_control(&original, 1).unwrap_err(),
@@ -4022,7 +4048,7 @@ mod macos {
             let mut provider = NativeAxProvider::default();
             let mut last = 0;
             for index in 0..256 {
-                let scope = Owned::text(&format!("pane-{index}"));
+                let scope = Owned::text(&format!("pane-{index}")).unwrap();
                 let id = provider.scope_identity(123, 1, &scope, None).unwrap();
                 assert!(id > last);
                 last = id;
@@ -4230,7 +4256,10 @@ mod macos {
         }
 
         fn ax_array(items: &[&str]) -> Option<Owned> {
-            let owned: Vec<_> = items.iter().map(|item| Owned::text(item)).collect();
+            let owned: Vec<_> = items
+                .iter()
+                .map(|item| Owned::text(item).unwrap())
+                .collect();
             let refs: Vec<_> = owned.iter().map(|item| item.0).collect();
             unsafe {
                 Owned::from_create(CFArrayCreate(
@@ -4246,7 +4275,7 @@ mod macos {
         fn session_documents_prunes_non_empty_web_areas_after_traversing_wrappers() {
             let mut container_batches = 0;
             let observation = observe_tree_once(
-                Owned::text("window"),
+                Owned::text("window").unwrap(),
                 Instant::now() + Duration::from_secs(1),
                 |element| {
                     let id = element.string().unwrap();
@@ -4256,7 +4285,7 @@ mod macos {
                             ("window", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
                                 container_batches += 1;
                                 Ok(vec![
-                                    Some(Owned::text("AXWindow")),
+                                    Owned::text("AXWindow"),
                                     None,
                                     None,
                                     ax_array(&["split"]),
@@ -4265,7 +4294,7 @@ mod macos {
                             ("split", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
                                 container_batches += 1;
                                 Ok(vec![
-                                    Some(Owned::text("AXSplitGroup")),
+                                    Owned::text("AXSplitGroup"),
                                     None,
                                     None,
                                     ax_array(&["empty-wrapper", "none-wrapper"]),
@@ -4275,26 +4304,26 @@ mod macos {
                                 "empty-wrapper",
                                 ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
                             ) => Ok(vec![
-                                Some(Owned::text("AXWebArea")),
+                                Owned::text("AXWebArea"),
                                 None,
                                 None,
                                 ax_array(&["conversation"]),
                             ]),
-                            ("empty-wrapper", ["AXURL"]) => Ok(vec![Some(Owned::text(""))]),
+                            ("empty-wrapper", ["AXURL"]) => Ok(vec![Owned::text("")]),
                             ("conversation", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
                                 Ok(vec![
-                                    Some(Owned::text("AXWebArea")),
+                                    Owned::text("AXWebArea"),
                                     None,
                                     None,
                                     ax_array(&["conversation-dom"]),
                                 ])
                             }
                             ("conversation", ["AXURL"]) => {
-                                Ok(vec![Some(Owned::text("https://127.0.0.1:4321/c/target"))])
+                                Ok(vec![Owned::text("https://127.0.0.1:4321/c/target")])
                             }
                             ("none-wrapper", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
                                 Ok(vec![
-                                    Some(Owned::text("AXWebArea")),
+                                    Owned::text("AXWebArea"),
                                     None,
                                     None,
                                     ax_array(&["background"]),
@@ -4303,14 +4332,14 @@ mod macos {
                             ("none-wrapper", ["AXURL"]) => Ok(vec![None]),
                             ("background", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
                                 Ok(vec![
-                                    Some(Owned::text("AXWebArea")),
+                                    Owned::text("AXWebArea"),
                                     None,
                                     None,
                                     ax_array(&["background-dom"]),
                                 ])
                             }
                             ("background", ["AXURL"]) => {
-                                Ok(vec![Some(Owned::text("data:text/html,background"))])
+                                Ok(vec![Owned::text("data:text/html,background")])
                             }
                             (other, batch) => {
                                 panic!("unexpected read on {other}: {batch:?}")
@@ -4336,7 +4365,7 @@ mod macos {
         fn sessions_purpose_batches_links_buttons_and_timestamps_without_extra_action_ipc() {
             let mut action_queries = Vec::new();
             let observation = observe_tree_once(
-                Owned::text("window"),
+                Owned::text("window").unwrap(),
                 Instant::now() + Duration::from_secs(1),
                 |element| {
                     let id = element.string().unwrap();
@@ -4345,7 +4374,7 @@ mod macos {
                         |names| match (id.as_str(), names) {
                             ("window", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
                                 Ok(vec![
-                                    Some(Owned::text("AXWindow")),
+                                    Owned::text("AXWindow"),
                                     None,
                                     None,
                                     ax_array(&[
@@ -4359,82 +4388,77 @@ mod macos {
                                 ])
                             }
                             ("project-btn", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
-                                Ok(vec![
-                                    Some(Owned::text("AXButton")),
-                                    None,
-                                    None,
-                                    ax_array(&[]),
-                                ])
+                                Ok(vec![Owned::text("AXButton"), None, None, ax_array(&[])])
                             }
                             (
                                 "project-btn",
                                 ["AXDescription", "AXTitle", "AXEnabled", "AXExpanded"],
                             ) => Ok(vec![
                                 None,
-                                Some(Owned::text("micro-input")),
+                                Owned::text("micro-input"),
                                 unsafe { Some(Owned(CFRetain(kCFBooleanTrue))) },
                                 unsafe { Some(Owned(CFRetain(kCFBooleanFalse))) },
                             ]),
                             ("local-link", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
-                                Ok(vec![Some(Owned::text("AXLink")), None, None, ax_array(&[])])
+                                Ok(vec![Owned::text("AXLink"), None, None, ax_array(&[])])
                             }
                             ("local-link", ["AXDescription", "AXTitle", "AXEnabled", "AXURL"]) => {
                                 Ok(vec![
-                                    Some(Owned::text("Fix sidebar")),
-                                    Some(Owned::text("Fallback")),
+                                    Owned::text("Fix sidebar"),
+                                    Owned::text("Fallback"),
                                     unsafe { Some(Owned(CFRetain(kCFBooleanTrue))) },
-                                    Some(Owned::text("https://127.0.0.1:4321/c/c1")),
+                                    Owned::text("https://127.0.0.1:4321/c/c1"),
                                 ])
                             }
                             (
                                 "external-link",
                                 ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
-                            ) => Ok(vec![Some(Owned::text("AXLink")), None, None, ax_array(&[])]),
+                            ) => Ok(vec![Owned::text("AXLink"), None, None, ax_array(&[])]),
                             (
                                 "external-link",
                                 ["AXDescription", "AXTitle", "AXEnabled", "AXURL"],
                             ) => Ok(vec![
-                                Some(Owned::text("Docs")),
+                                Owned::text("Docs"),
                                 None,
                                 unsafe { Some(Owned(CFRetain(kCFBooleanTrue))) },
-                                Some(Owned::text("https://example.com/docs")),
+                                Owned::text("https://example.com/docs"),
                             ]),
                             (
                                 "disabled-link",
                                 ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
-                            ) => Ok(vec![Some(Owned::text("AXLink")), None, None, ax_array(&[])]),
+                            ) => Ok(vec![Owned::text("AXLink"), None, None, ax_array(&[])]),
                             (
                                 "disabled-link",
                                 ["AXDescription", "AXTitle", "AXEnabled", "AXURL"],
                             ) => Ok(vec![
-                                Some(Owned::text("Disabled")),
+                                Owned::text("Disabled"),
                                 None,
                                 unsafe { Some(Owned(CFRetain(kCFBooleanFalse))) },
-                                Some(Owned::text("https://127.0.0.1:4321/c/c2")),
+                                Owned::text("https://127.0.0.1:4321/c/c2"),
                             ]),
                             ("age-text", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
                                 Ok(vec![
-                                    Some(Owned::text("AXStaticText")),
+                                    Owned::text("AXStaticText"),
                                     None,
                                     None,
                                     ax_array(&["inline-box-never-visited"]),
                                 ])
                             }
                             ("age-text", ["AXValue", "AXEnabled"]) => {
-                                Ok(vec![Some(Owned::text("10m")), unsafe {
+                                Ok(vec![Owned::text("10m"), unsafe {
                                     Some(Owned(CFRetain(kCFBooleanTrue)))
                                 }])
                             }
                             ("conv-turns", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
                                 Ok(vec![
-                                    Some(Owned::text("AXGroup")),
+                                    Owned::text("AXGroup"),
                                     None,
                                     None,
                                     ax_array(&["turn-body-never-visited"]),
                                 ])
                             }
                             ("conv-turns", ["AXDescription", "AXTitle"]) => {
-                                Ok(vec![Some(Owned::text("Conversation turns")), None])
+                                Ok(vec![Owned::text("Conversation turns"), None])
                             }
                             (other, batch) => panic!("unexpected read on {other}: {batch:?}"),
                         },
@@ -5245,10 +5269,10 @@ mod macos {
                         pass += 1;
                         if pass == 1 {
                             assert_eq!(names, &["AXRole", "AXSubrole", "AXHidden", "AXChildren"]);
-                            Ok(vec![Some(Owned::text(role)), None, None, None])
+                            Ok(vec![Owned::text(role), None, None, None])
                         } else {
                             assert_eq!(names, &["AXDescription", "AXTitle", "AXEnabled"]);
-                            Ok(vec![None, Some(Owned::text(label)), None])
+                            Ok(vec![None, Owned::text(label), None])
                         }
                     },
                     |_| Ok(false),
@@ -5265,9 +5289,9 @@ mod macos {
 
         #[test]
         fn codex_ax_traversal_enforces_depth_and_node_caps() {
-            let leaf = Owned::text("leaf");
+            let leaf = Owned::text("leaf").unwrap();
             assert!(collect_codex_nodes(
-                Owned::text("wide"),
+                Owned::text("wide").unwrap(),
                 Instant::now() + Duration::from_secs(1),
                 |_| Ok(Some(CodexAxNodeData {
                     role: "AXGroup".into(),
@@ -5276,6 +5300,21 @@ mod macos {
                 }))
             )
             .is_err());
+        }
+
+        #[test]
+        fn owned_text_returns_none_when_cfstring_create_returns_null() {
+            unsafe extern "C" fn null_cfstring(
+                _: Ref,
+                _: *const u8,
+                _: isize,
+                _: u32,
+                _: u8,
+            ) -> Ref {
+                std::ptr::null()
+            }
+            assert!(Owned::text_with("hello", null_cfstring).is_none());
+            assert!(Owned::text("hello").is_some());
         }
     }
 }

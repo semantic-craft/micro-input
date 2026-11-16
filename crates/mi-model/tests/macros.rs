@@ -120,3 +120,26 @@ fn shared_macro_references_survive_restart_and_guard_deletion() {
     re.undo(false).unwrap();
     assert_eq!(re.macros()[0].references.len(), 1);
 }
+
+#[test]
+fn local_macro_rejects_excessive_event_count_and_delay() {
+    let mut many_events = Vec::new();
+    for _ in 0..257 {
+        many_events.push(json!({"type": "press", "key": "a"}));
+        many_events.push(json!({"type": "release", "key": "a"}));
+    }
+    assert!(
+        action(Value::Array(many_events)).validate().is_err(),
+        "LocalMacro with >512 events must be rejected"
+    );
+
+    let excessive_delay = action(json!([
+        {"type": "press", "key": "a"},
+        {"type": "delay", "ms": 60_001},
+        {"type": "release", "key": "a"}
+    ]));
+    assert!(
+        excessive_delay.validate().is_err(),
+        "LocalMacro with single delay > 60000 ms must be rejected"
+    );
+}

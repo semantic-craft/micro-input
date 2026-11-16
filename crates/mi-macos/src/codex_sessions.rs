@@ -10,11 +10,14 @@ const SQLITE_ROW: c_int = 100;
 const SQLITE_DONE: c_int = 101;
 const SQLITE_NULL: c_int = 5;
 const SQLITE_OPEN_READONLY: c_int = 0x0000_0001;
-const SQLITE_OPEN_URI: c_int = 0x0000_0040;
+const SQLITE_OPEN_NOFOLLOW: c_int = 0x0100_0000;
 const SQLITE_TRANSIENT: isize = -1;
 const MAX_SNIPPETS: usize = 8;
 const MAX_SNIPPET_CHARS: usize = 80;
 const MIN_SUBSTRING_SNIPPET_CHARS: usize = 12;
+const MAX_ITEM_JSON_BYTES: usize = 262_144;
+const MAX_THREAD_CORPUS_BYTES: usize = 65_536;
+const MAX_THREAD_SNIPPETS: usize = 512;
 
 #[repr(C)]
 struct sqlite3 {
@@ -129,25 +132,43 @@ impl Drop for SqliteDb {
 
 impl SqliteDb {
     fn open_readonly(path: &Path) -> Result<Self, String> {
-        if !path.is_file() {
-            return Err(format!("blocked:codex_sqlite_missing:{}", path.display()));
+        let redacted = crate::redact_home_path(&path.display().to_string());
+        let open_path = resolve_nofollow_sqlite_path(path, &redacted)?;
+        let meta = match std::fs::symlink_metadata(&open_path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!("blocked:codex_sqlite_missing:{redacted}"));
+            }
+            Err(_) => return Err(format!("blocked:codex_sqlite_unsafe:{redacted}")),
+        };
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return Err(format!("blocked:codex_sqlite_unsafe:{redacted}"));
         }
-        let c_uri = CString::new(file_uri_for_path(path)?)
-            .map_err(|e| format!("blocked:codex_sqlite_path:{e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if meta.uid() != unsafe { libc::getuid() } {
+                return Err(format!("blocked:codex_sqlite_owner_mismatch:{redacted}"));
+            }
+        }
+        let raw_path = open_path
+            .to_str()
+            .ok_or_else(|| "blocked:codex_sqlite_non_utf8_path".to_owned())?;
+        let c_path =
+            CString::new(raw_path).map_err(|e| format!("blocked:codex_sqlite_path:{e}"))?;
         let mut raw_db: *mut sqlite3 = std::ptr::null_mut();
         let rc = unsafe {
             sqlite3_open_v2(
-                c_uri.as_ptr(),
+                c_path.as_ptr(),
                 &mut raw_db,
-                SQLITE_OPEN_READONLY | SQLITE_OPEN_URI,
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_NOFOLLOW,
                 std::ptr::null(),
             )
         };
         let db = Self { ptr: raw_db };
         if rc != SQLITE_OK {
             return Err(format!(
-                "blocked:codex_sqlite_open:{}:{rc}:{}",
-                path.display(),
+                "blocked:codex_sqlite_open:{redacted}:{rc}:{}",
                 db.last_error()
             ));
         }
@@ -232,14 +253,19 @@ impl Drop for SqliteStmt<'_> {
     }
 }
 
+fn checked_sqlite_text_len(len: usize) -> Result<c_int, String> {
+    c_int::try_from(len).map_err(|_| "sqlite3 text binding exceeds i32 length limit".to_string())
+}
+
 impl SqliteStmt<'_> {
     fn bind_text(&mut self, index: c_int, value: &str) -> Result<(), String> {
+        let len = checked_sqlite_text_len(value.len())?;
         let rc = unsafe {
             sqlite3_bind_text(
                 self.ptr,
                 index,
                 value.as_ptr().cast::<c_char>(),
-                value.len() as c_int,
+                len,
                 SQLITE_TRANSIENT,
             )
         };
@@ -275,6 +301,25 @@ impl SqliteStmt<'_> {
             .map_err(|e| format!("blocked:codex_sqlite_utf8:{e}"))
     }
 
+    fn col_bounded_text(&self, col: c_int, max_bytes: usize) -> Result<Option<String>, String> {
+        if unsafe { sqlite3_column_type(self.ptr, col) } == SQLITE_NULL {
+            return Ok(None);
+        }
+        let len = unsafe { sqlite3_column_bytes(self.ptr, col) };
+        if len < 0 || len as usize > max_bytes {
+            return Ok(None);
+        }
+        let ptr = unsafe { sqlite3_column_text(self.ptr, col) };
+        let len = unsafe { sqlite3_column_bytes(self.ptr, col) };
+        if ptr.is_null() || len <= 0 {
+            return Ok(Some(String::new()));
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+        std::str::from_utf8(bytes)
+            .map(|s| Some(s.to_owned()))
+            .map_err(|e| format!("blocked:codex_sqlite_utf8:{e}"))
+    }
+
     fn col_text(&self, col: c_int) -> Result<String, String> {
         Ok(self.col_opt_text(col)?.unwrap_or_default())
     }
@@ -288,21 +333,64 @@ impl SqliteStmt<'_> {
     }
 }
 
-fn file_uri_for_path(path: &Path) -> Result<String, String> {
-    let raw = path
-        .to_str()
-        .ok_or_else(|| "blocked:codex_sqlite_non_utf8_path".to_owned())?;
-    let mut out = String::with_capacity(raw.len() + 16);
-    out.push_str("file:");
-    for byte in raw.as_bytes() {
-        match byte {
-            b'%' => out.push_str("%25"),
-            b'?' => out.push_str("%3F"),
-            b'#' => out.push_str("%23"),
-            b => out.push(*b as char),
-        }
+fn map_private_dir_error(
+    err: crate::private_fs::PrivateDirError,
+    prefix: &str,
+    redacted: &str,
+) -> String {
+    let tag = match err {
+        crate::private_fs::PrivateDirError::Missing => "missing",
+        crate::private_fs::PrivateDirError::Unsafe => "unsafe",
+        crate::private_fs::PrivateDirError::OwnerMismatch => "owner_mismatch",
+    };
+    format!("{prefix}_{tag}:{redacted}")
+}
+
+fn resolve_nofollow_sqlite_path(path: &Path, redacted: &str) -> Result<std::path::PathBuf, String> {
+    let Some(file_name) = path.file_name() else {
+        return Err(format!("blocked:codex_sqlite_unsafe:{redacted}"));
+    };
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let verified_parent = crate::private_fs::verify_existing_private_dir(parent)
+        .map_err(|err| map_private_dir_error(err, "blocked:codex_sqlite", redacted))?;
+    Ok(verified_parent.join(file_name))
+}
+
+fn validate_codex_dir(dir: &Path) -> Result<(), String> {
+    let redacted = crate::redact_home_path(&dir.display().to_string());
+    crate::private_fs::verify_existing_private_dir(dir)
+        .map(|_| ())
+        .map_err(|err| map_private_dir_error(err, "blocked:codex_home", &redacted))
+}
+
+fn push_bounded_corpus(corpus: &mut String, addition: &str, max_bytes: usize) -> bool {
+    if corpus.len() >= max_bytes {
+        return false;
     }
-    Ok(out)
+    if addition.is_empty() {
+        return true;
+    }
+    if !corpus.is_empty() {
+        if corpus.len() + 1 >= max_bytes {
+            return false;
+        }
+        corpus.push('\n');
+    }
+    let remaining = max_bytes - corpus.len();
+    if addition.len() <= remaining {
+        corpus.push_str(addition);
+        corpus.len() < max_bytes
+    } else {
+        let mut end = remaining.min(addition.len());
+        while end > 0 && !addition.is_char_boundary(end) {
+            end -= 1;
+        }
+        corpus.push_str(&addition[..end]);
+        false
+    }
 }
 
 fn is_valid_uuid(id: &str) -> bool {
@@ -343,8 +431,11 @@ struct ThreadTextIndex {
 
 impl CodexDbs {
     fn open(codex_home: &Path) -> Result<Self, String> {
+        validate_codex_dir(codex_home)?;
+        let sqlite_dir = codex_home.join("sqlite");
+        validate_codex_dir(&sqlite_dir)?;
         Ok(Self {
-            codex: SqliteDb::open_readonly(&codex_home.join("sqlite").join("codex.db"))?,
+            codex: SqliteDb::open_readonly(&sqlite_dir.join("codex.db"))?,
             state: SqliteDb::open_readonly(&codex_home.join("state_5.sqlite"))?,
             history: SqliteDb::open_readonly(&codex_home.join("thread_history_1.sqlite"))?,
         })
@@ -360,7 +451,7 @@ impl CodexDbs {
 
     fn load_unread_receipts(&self) -> Result<BTreeMap<String, String>, String> {
         let mut stmt = self.state.prepare(
-            "SELECT thread_id, first_unread_turn FROM thread_read_receipts WHERE first_unread_turn IS NOT NULL AND first_unread_turn != ''",
+            "SELECT thread_id, first_unread_turn FROM thread_read_receipts WHERE first_unread_turn IS NOT NULL AND first_unread_turn != '' ORDER BY rowid DESC LIMIT 4096",
         )?;
         let mut map = BTreeMap::new();
         while stmt.step()? {
@@ -374,10 +465,10 @@ impl CodexDbs {
 
     fn load_priority_turn_ids(&self) -> Result<BTreeSet<String>, String> {
         let mut ids = self.history.query_text_set(
-            "SELECT DISTINCT thread_id FROM thread_turns WHERE status = 'inProgress'",
+            "SELECT thread_id FROM thread_turns WHERE status = 'inProgress' GROUP BY thread_id ORDER BY MAX(rowid) DESC LIMIT 256",
         )?;
         ids.extend(self.history.query_text_set(
-            "SELECT DISTINCT thread_id FROM thread_turns WHERE status = 'failed' ORDER BY rowid DESC LIMIT 64",
+            "SELECT thread_id FROM thread_turns WHERE status = 'failed' GROUP BY thread_id ORDER BY MAX(rowid) DESC LIMIT 64",
         )?);
         Ok(ids)
     }
@@ -415,16 +506,33 @@ impl CodexDbs {
         let mut seen = BTreeSet::new();
         let mut corpus = String::new();
         while stmt.step()? {
-            let raw_json = stmt.col_text(0)?;
-            for line in extract_normalized_texts_from_item_json(&raw_json) {
-                if !corpus.is_empty() {
-                    corpus.push('\n');
-                }
-                corpus.push_str(&line);
+            if corpus.len() >= MAX_THREAD_CORPUS_BYTES && snippets.len() >= MAX_THREAD_SNIPPETS {
+                break;
             }
-            for snippet in extract_snippets_from_item_json(&raw_json) {
-                if seen.insert(snippet.clone()) {
-                    snippets.push(snippet);
+            let Some(raw_json) = stmt.col_bounded_text(0, MAX_ITEM_JSON_BYTES)? else {
+                continue;
+            };
+            let Ok(parsed) = serde_json::from_str::<Value>(&raw_json) else {
+                continue;
+            };
+            let lines = extract_normalized_lines_from_value(&parsed);
+            if corpus.len() < MAX_THREAD_CORPUS_BYTES {
+                for line in &lines {
+                    if !push_bounded_corpus(&mut corpus, line, MAX_THREAD_CORPUS_BYTES) {
+                        break;
+                    }
+                }
+            }
+            if snippets.len() < MAX_THREAD_SNIPPETS {
+                for line in &lines {
+                    if let Some(snippet) = line_to_snippet(line) {
+                        if seen.insert(snippet.clone()) {
+                            snippets.push(snippet);
+                            if snippets.len() >= MAX_THREAD_SNIPPETS {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -474,14 +582,14 @@ pub fn observe_codex_threads(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let archived_ids = dbs
-        .state
-        .query_text_set("SELECT id FROM threads WHERE archived != 0")?;
-    let active_turn_ids = dbs
-        .codex
-        .query_text_set("SELECT DISTINCT thread_id FROM active_chat_turns")?;
+    let archived_ids = dbs.state.query_text_set(
+        "SELECT id FROM threads WHERE archived != 0 ORDER BY rowid DESC LIMIT 4096",
+    )?;
+    let active_turn_ids = dbs.codex.query_text_set(
+        "SELECT thread_id FROM active_chat_turns GROUP BY thread_id ORDER BY MAX(rowid) DESC LIMIT 256",
+    )?;
     let pending_automation_ids = dbs.codex.query_text_set(
-        "SELECT DISTINCT thread_id FROM automation_runs WHERE status = 'PENDING_REVIEW' AND read_at IS NULL",
+        "SELECT thread_id FROM automation_runs WHERE status = 'PENDING_REVIEW' AND read_at IS NULL GROUP BY thread_id ORDER BY MAX(rowid) DESC LIMIT 256",
     )?;
     let unread_receipts = dbs.load_unread_receipts()?;
     let priority_turn_ids = dbs.load_priority_turn_ids()?;
@@ -494,7 +602,7 @@ pub fn observe_codex_threads(
          WHERE c.missing_candidate = 0 \
            AND COALESCE(h.host_kind, '') != 'chatgpt' \
            AND COALESCE(c.source_kind, '') != 'chatgpt' \
-         ORDER BY COALESCE(c.source_updated_at, c.source_recency_at, 0) DESC",
+         ORDER BY COALESCE(c.source_updated_at, c.source_recency_at, 0) DESC LIMIT 512",
     )?;
 
     let mut observations = Vec::with_capacity(limit.min(64));
@@ -600,10 +708,7 @@ fn strip_inline_markdown(raw: &str) -> String {
     collapse_whitespace(cleaned.trim_end().trim_end_matches('\\'))
 }
 
-fn extract_normalized_texts_from_item_json(raw_json: &str) -> Vec<String> {
-    let Ok(parsed) = serde_json::from_str::<Value>(raw_json) else {
-        return Vec::new();
-    };
+fn extract_normalized_lines_from_value(parsed: &Value) -> Vec<String> {
     let mut lines = Vec::new();
     let texts = parsed
         .get("text")
@@ -636,24 +741,14 @@ fn extract_normalized_texts_from_item_json(raw_json: &str) -> Vec<String> {
     lines
 }
 
-fn extract_snippets_from_item_json(raw_json: &str) -> Vec<String> {
-    let mut snippets = Vec::new();
-    let mut seen = BTreeSet::new();
-    for normalized in extract_normalized_texts_from_item_json(raw_json) {
-        let snippet = normalized
-            .chars()
-            .take(MAX_SNIPPET_CHARS)
-            .collect::<String>()
-            .trim_end()
-            .to_owned();
-        if snippet.chars().count() >= 2
-            && snippet.chars().any(char::is_alphanumeric)
-            && seen.insert(snippet.clone())
-        {
-            snippets.push(snippet);
-        }
-    }
-    snippets
+fn line_to_snippet(normalized: &str) -> Option<String> {
+    let snippet = normalized
+        .chars()
+        .take(MAX_SNIPPET_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_owned();
+    (snippet.chars().count() >= 2 && snippet.chars().any(char::is_alphanumeric)).then_some(snippet)
 }
 
 fn snippet_overlaps_peer(snippet: &str, peer_set: &BTreeSet<&str>, peer_corpus: &str) -> bool {
@@ -714,7 +809,8 @@ pub fn read_codex_thread_fingerprint(
            AND c.missing_candidate = 0 \
            AND COALESCE(h.host_kind, '') != 'chatgpt' \
            AND COALESCE(c.source_kind, '') != 'chatgpt' \
-           AND NOT (c.thread_id = ?2 AND c.host_id = ?3)",
+           AND NOT (c.thread_id = ?2 AND c.host_id = ?3) \
+         ORDER BY COALESCE(c.source_updated_at, c.source_recency_at, 0) DESC LIMIT 24",
     )?;
     sibling_stmt.bind_text(1, &display_title)?;
     sibling_stmt.bind_text(2, thread_id)?;
@@ -722,6 +818,7 @@ pub fn read_codex_thread_fingerprint(
 
     let mut sibling_candidates = Vec::new();
     let mut sibling_corpus = String::new();
+    let max_sibling_corpus_bytes = MAX_THREAD_CORPUS_BYTES * 4;
     while sibling_stmt.step()? {
         let sib_id = sibling_stmt.col_text(0)?;
         if !is_valid_uuid(&sib_id) || dbs.is_thread_archived(&sib_id)? {
@@ -729,11 +826,12 @@ pub fn read_codex_thread_fingerprint(
         }
         let sib_index = dbs.thread_snippets(&sib_id, 256)?;
         sibling_candidates.extend(sib_index.snippets);
-        if !sib_index.corpus.is_empty() {
-            if !sibling_corpus.is_empty() {
-                sibling_corpus.push('\n');
-            }
-            sibling_corpus.push_str(&sib_index.corpus);
+        if sibling_corpus.len() < max_sibling_corpus_bytes && !sib_index.corpus.is_empty() {
+            let _ = push_bounded_corpus(
+                &mut sibling_corpus,
+                &sib_index.corpus,
+                max_sibling_corpus_bytes,
+            );
         }
     }
 
@@ -848,10 +946,7 @@ pub fn verify_codex_window_readback(
     }
     let expected_title = fp.display_title.trim();
     if !expected_title.is_empty() && snap.window_title.trim() != expected_title {
-        return Err(format!(
-            "unconfirmed:codex_title_mismatch:expected={expected_title}:actual={}",
-            snap.window_title.trim()
-        ));
+        return Err("unconfirmed:codex_title_mismatch".into());
     }
     if let Some(expected_project) = fp
         .project_name
@@ -864,10 +959,7 @@ pub fn verify_codex_window_readback(
             .as_deref()
             .is_some_and(|actual| actual.trim().eq_ignore_ascii_case(expected_project))
         {
-            return Err(format!(
-                "unconfirmed:codex_project_mismatch:expected={expected_project}:actual={:?}",
-                snap.toolbar_project
-            ));
+            return Err("unconfirmed:codex_project_mismatch".into());
         }
     }
     let snap_ctx = SnapshotTextIndex::new(snap);

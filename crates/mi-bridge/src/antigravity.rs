@@ -1,10 +1,10 @@
+use crate::ipc::{UnixJsonTransport, UnixTransportError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1234,8 +1234,13 @@ impl AntigravityGrant {
             return Err(AntigravityFailure::Grant);
         }
         let mut bytes = Vec::with_capacity(meta.len() as usize);
-        file.read_to_end(&mut bytes)
+        file.by_ref()
+            .take(65_537)
+            .read_to_end(&mut bytes)
             .map_err(|_| AntigravityFailure::Grant)?;
+        if bytes.is_empty() || bytes.len() > 65_536 {
+            return Err(AntigravityFailure::Grant);
+        }
         let grant: Self = serde_json::from_slice(&bytes).map_err(|_| AntigravityFailure::Grant)?;
         let unique_ws: HashSet<&str> = grant
             .allowed_workspaces
@@ -1628,28 +1633,18 @@ impl AntigravityStatusClient {
         request: &Value,
         timeout: Duration,
     ) -> Result<Vec<u8>, AntigravityFailure> {
-        let mut encoded =
-            serde_json::to_vec(request).map_err(|_| AntigravityFailure::InvalidReply)?;
-        if encoded.len() > 65536 {
-            return Err(AntigravityFailure::InvalidReply);
-        }
-        encoded.push(b'\n');
-        let mut stream =
-            UnixStream::connect(socket_path).map_err(|_| AntigravityFailure::Unavailable)?;
-        let _ = stream.set_read_timeout(Some(timeout));
-        let _ = stream.set_write_timeout(Some(timeout));
-        stream
-            .write_all(&encoded)
-            .map_err(|_| AntigravityFailure::Unavailable)?;
-        let mut reader = BufReader::new(stream.take(1_048_576));
-        let mut line = Vec::new();
-        let n = reader
-            .read_until(b'\n', &mut line)
-            .map_err(|_| AntigravityFailure::Unavailable)?;
-        if n == 0 {
-            return Err(AntigravityFailure::Unavailable);
-        }
-        Ok(line)
+        let encoded = serde_json::to_vec(request).map_err(|_| AntigravityFailure::InvalidReply)?;
+        let transport = UnixJsonTransport {
+            path: PathBuf::from(socket_path),
+            request_limit: 65_536,
+            response_limit: 1_048_576,
+            timeout,
+        };
+        transport.exchange_blocking(&encoded).map_err(|e| match e {
+            UnixTransportError::Unavailable => AntigravityFailure::Unavailable,
+            UnixTransportError::InvalidPeer => AntigravityFailure::Denied,
+            UnixTransportError::InvalidReply => AntigravityFailure::InvalidReply,
+        })
     }
 
     fn map_failure(status: &str) -> AntigravityFailure {

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -96,7 +97,7 @@ def wait_for_single_usb_candidate(wait_for_plug: bool, timeout_secs: float):
         time.sleep(1.0)
 
 
-def _competing_hid_readers_running() -> bool:
+def _find_applications_bundle_pids() -> list[int]:
     ps_proc = subprocess.run(
         ["ps", "-ax", "-o", "pid=,command="],
         cwd=ROOT,
@@ -104,19 +105,27 @@ def _competing_hid_readers_running() -> bool:
         text=True,
         check=False,
     )
-    if ps_proc.returncode == 0:
-        self_pid = os.getpid()
-        installed_prefix = "/Applications/Micro Input.app/Contents/MacOS/"
-        for line in ps_proc.stdout.splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) < 2:
-                continue
-            try:
-                pid = int(parts[0])
-            except ValueError:
-                continue
-            if pid != self_pid and parts[1].startswith(installed_prefix):
-                return True
+    if ps_proc.returncode != 0:
+        return []
+    self_pid = os.getpid()
+    applications_prefix = "/Applications/Micro Input.app/Contents/MacOS/"
+    pids: list[int] = []
+    for line in ps_proc.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid != self_pid and parts[1].startswith(applications_prefix):
+            pids.append(pid)
+    return pids
+
+
+def _competing_hid_readers_running() -> bool:
+    if _find_applications_bundle_pids():
+        return True
     list_proc = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "run"), "--list"],
         cwd=ROOT,
@@ -135,13 +144,11 @@ def quiesce_competing_hid_readers():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    subprocess.run(
-        ["pkill", "-f", "/Applications/Micro Input.app/Contents/MacOS/MicroInput"],
-        cwd=ROOT,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    for pid in _find_applications_bundle_pids():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
         if not _competing_hid_readers_running():
@@ -397,7 +404,7 @@ def verify_live_app_usb_auto_acceptance(expected_device_path: str, expected_keym
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    scratch_root = ROOT / ".scratch" / "input-study"
+    scratch_root = ROOT / ".scratch" / "hardware-probes"
     scratch_root.mkdir(parents=True, exist_ok=True)
 
     candidate = wait_for_single_usb_candidate(args.wait, args.timeout)
