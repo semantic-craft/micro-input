@@ -22,6 +22,7 @@ pub struct ManagedControl {
     pub pressable: bool,
     pub editable: bool,
     pub focused: bool,
+    pub expanded: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,9 @@ pub trait ManagedAxProvider: Send {
         Ok(())
     }
     fn release_target(&mut self, _target: &ManagedWindowIdentity) {}
+    fn activate_window(&mut self, _target: &ManagedWindowIdentity) -> Result<(), String> {
+        Ok(())
+    }
 
     fn process_has_exited(&self, _pid: i32) -> bool {
         false
@@ -107,6 +111,14 @@ pub enum CodexReasoningAction {
     IncreaseEffort,
     ToggleFastMode,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelPickerConfirmResult {
+    Confirmed,
+    PopupAlreadyClosed,
+}
+
+const MODEL_PICKER_FALLBACK_TTL: Duration = Duration::from_secs(12);
 
 fn is_codex_trigger_excluded(label: &str) -> bool {
     let lower = label.trim().to_lowercase();
@@ -254,6 +266,223 @@ pub(crate) fn is_dsh_model_picker_trigger(label: &str) -> bool {
     prefixes.iter().any(|prefix| lower.starts_with(prefix))
 }
 
+pub(crate) fn is_antigravity_model_picker_trigger(label: &str) -> bool {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    let excluded = [
+        "actions",
+        "options",
+        "menu",
+        "switch mode",
+        "agent permissions",
+        "add context",
+        "customize sections",
+        "notifications",
+        "extensions",
+    ];
+    if excluded.iter().any(|ex| lower.contains(ex)) {
+        return false;
+    }
+    trimmed.eq_ignore_ascii_case("model")
+        || lower.starts_with("select model")
+        || lower.starts_with("choose model")
+        || lower.starts_with("switch model")
+        || trimmed == "模型"
+        || trimmed.starts_with("选择模型")
+        || trimmed.starts_with("切换模型")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservedModelPickerPopupState {
+    Open,
+    Closed,
+    Unknown,
+}
+
+fn select_unique_model_trigger<'a>(
+    window: &'a ManagedWindow,
+    matches_label: fn(&str) -> bool,
+) -> Result<Option<&'a ManagedControl>, String> {
+    let popup_candidates: Vec<&ManagedControl> = window
+        .controls
+        .iter()
+        .filter(|c| {
+            c.enabled && c.pressable && c.role == "AXPopUpButton" && matches_label(&c.label)
+        })
+        .collect();
+    if let [trigger] = popup_candidates.as_slice() {
+        return Ok(Some(*trigger));
+    }
+    if popup_candidates.len() > 1 {
+        return Err(blocked("ambiguous_model_picker_control"));
+    }
+    let button_candidates: Vec<&ManagedControl> = window
+        .controls
+        .iter()
+        .filter(|c| c.enabled && c.pressable && c.role == "AXButton" && matches_label(&c.label))
+        .collect();
+    if let [trigger] = button_candidates.as_slice() {
+        return Ok(Some(*trigger));
+    }
+    if button_candidates.len() > 1 {
+        return Err(blocked("ambiguous_model_picker_control"));
+    }
+    Ok(None)
+}
+
+fn has_codex_popover_menu_items(window: &ManagedWindow) -> bool {
+    window
+        .controls
+        .iter()
+        .any(|c| c.role == "AXMenuItem" && is_codex_popover_menu_item(&c.label))
+}
+
+fn unique_codex_model_trigger(window: &ManagedWindow) -> Option<&ManagedControl> {
+    let popup_candidates: Vec<&ManagedControl> = window
+        .controls
+        .iter()
+        .filter(|c| {
+            c.enabled
+                && c.pressable
+                && c.role == "AXPopUpButton"
+                && is_codex_model_picker_trigger(&c.label)
+        })
+        .collect();
+    if let [only] = popup_candidates.as_slice() {
+        return Some(*only);
+    }
+    if !popup_candidates.is_empty() {
+        return None;
+    }
+    let button_candidates: Vec<&ManagedControl> = window
+        .controls
+        .iter()
+        .filter(|c| {
+            c.enabled
+                && c.pressable
+                && c.role == "AXButton"
+                && is_codex_model_picker_trigger(&c.label)
+        })
+        .collect();
+    if let [only] = button_candidates.as_slice() {
+        return Some(*only);
+    }
+    if !button_candidates.is_empty() {
+        return None;
+    }
+    let fallback_reasoning: Vec<&ManagedControl> = window
+        .controls
+        .iter()
+        .filter(|c| {
+            c.enabled
+                && c.pressable
+                && c.role == "AXPopUpButton"
+                && is_codex_reasoning_trigger(&c.label)
+        })
+        .collect();
+    if let [only] = fallback_reasoning.as_slice() {
+        Some(*only)
+    } else {
+        None
+    }
+}
+
+fn is_codex_model_popover_visible(window: &ManagedWindow) -> bool {
+    has_codex_popover_menu_items(window)
+        || unique_codex_model_trigger(window).is_some_and(|c| c.expanded == Some(true))
+}
+
+fn observe_model_picker_popup_state(
+    window: &ManagedWindow,
+    adapter: DictationAdapter,
+) -> Result<ObservedModelPickerPopupState, String> {
+    match adapter {
+        DictationAdapter::Antigravity => {
+            let trigger = select_unique_model_trigger(window, is_antigravity_model_picker_trigger)?;
+            Ok(match trigger.and_then(|c| c.expanded) {
+                Some(true) => ObservedModelPickerPopupState::Open,
+                Some(false) => ObservedModelPickerPopupState::Closed,
+                None => ObservedModelPickerPopupState::Unknown,
+            })
+        }
+        DictationAdapter::Dsh => {
+            let trigger = select_unique_model_trigger(window, is_dsh_model_picker_trigger)?;
+            Ok(match trigger.and_then(|c| c.expanded) {
+                Some(true) => ObservedModelPickerPopupState::Open,
+                Some(false) => ObservedModelPickerPopupState::Closed,
+                None => ObservedModelPickerPopupState::Unknown,
+            })
+        }
+        DictationAdapter::Codex => {
+            if is_codex_model_popover_visible(window) {
+                return Ok(ObservedModelPickerPopupState::Open);
+            }
+            if unique_codex_model_trigger(window).and_then(|c| c.expanded) == Some(false) {
+                return Ok(ObservedModelPickerPopupState::Closed);
+            }
+            Ok(ObservedModelPickerPopupState::Unknown)
+        }
+    }
+}
+
+fn confirm_popup_expansion<P: ManagedAxProvider>(
+    provider: &mut P,
+    target: &ManagedWindowIdentity,
+    control_id: u64,
+    timeout: Duration,
+) -> Result<bool, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let ctrl = provider
+            .read_control(target, control_id)
+            .map_err(|error| format!("unconfirmed:{error}"))?;
+        match ctrl.expanded {
+            Some(true) => return Ok(true),
+            None => return Ok(false),
+            Some(false) => {
+                if Instant::now() >= deadline {
+                    return Err("unconfirmed:model_picker_open_readback".into());
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }
+    }
+}
+
+fn poll_optional_popup_expansion<P: ManagedAxProvider>(
+    provider: &mut P,
+    target: &ManagedWindowIdentity,
+    control_id: u64,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let Ok(ctrl) = provider.read_control(target, control_id) else {
+            return false;
+        };
+        match ctrl.expanded {
+            Some(true) => return true,
+            None => return false,
+            Some(false) => {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }
+    }
+}
+
+struct ActivePickerTarget {
+    adapter: DictationAdapter,
+    identity: ManagedWindowIdentity,
+    updated_at: Instant,
+    ax_open_confirmed: bool,
+}
+
 struct DismissRequest {
     target: Option<ManagedWindowIdentity>,
     generation: u64,
@@ -272,6 +501,7 @@ pub struct ManagedAxControls<P: 'static> {
     readback_timeout: Duration,
     auto_dismiss_delay: Duration,
     uncleared_targets: Mutex<BTreeMap<String, ManagedWindowIdentity>>,
+    active_picker_target: Mutex<Option<ActivePickerTarget>>,
     dismiss_state: Arc<DismissState>,
     worker_handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -407,6 +637,7 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             readback_timeout,
             auto_dismiss_delay,
             uncleared_targets: Mutex::new(BTreeMap::new()),
+            active_picker_target: Mutex::new(None),
             dismiss_state,
             worker_handle: Some(worker_handle),
         }
@@ -726,89 +957,174 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         provider.insert_text(&window.identity, control, prompt)
     }
 
-    pub fn open_model_picker(&self, adapter: &str) -> Result<(), String> {
-        let adapter = managed_adapter(adapter)?;
-        if adapter == DictationAdapter::Codex {
-            let _ = self.begin_codex_reasoning_turn();
+    fn active_picker_state(
+        &self,
+        adapter: DictationAdapter,
+        identity: &ManagedWindowIdentity,
+    ) -> Option<bool> {
+        let Ok(mut guard) = self.active_picker_target.lock() else {
+            return None;
+        };
+        let active = guard.as_ref()?;
+        if active.updated_at.elapsed() >= MODEL_PICKER_FALLBACK_TTL {
+            *guard = None;
+            return None;
         }
-        let mut provider = self
-            .provider
+        (active.adapter == adapter && &active.identity == identity)
+            .then_some(active.ax_open_confirmed)
+    }
+
+    fn effective_popup_state(
+        &self,
+        window: &ManagedWindow,
+        adapter: DictationAdapter,
+    ) -> Result<ObservedModelPickerPopupState, String> {
+        match observe_model_picker_popup_state(window, adapter)? {
+            ObservedModelPickerPopupState::Open => Ok(ObservedModelPickerPopupState::Open),
+            ObservedModelPickerPopupState::Closed => {
+                let has_focused_editable = window.controls.iter().any(|c| c.editable && c.focused);
+                if adapter == DictationAdapter::Codex
+                    && self.active_picker_state(adapter, &window.identity) == Some(false)
+                    && !has_focused_editable
+                {
+                    Ok(ObservedModelPickerPopupState::Unknown)
+                } else {
+                    Ok(ObservedModelPickerPopupState::Closed)
+                }
+            }
+            ObservedModelPickerPopupState::Unknown => Ok(ObservedModelPickerPopupState::Unknown),
+        }
+    }
+
+    fn record_active_picker_target(
+        &self,
+        adapter: DictationAdapter,
+        identity: &ManagedWindowIdentity,
+        ax_open_confirmed: bool,
+    ) {
+        if let Ok(mut guard) = self.active_picker_target.lock() {
+            *guard = Some(ActivePickerTarget {
+                adapter,
+                identity: identity.clone(),
+                updated_at: Instant::now(),
+                ax_open_confirmed,
+            });
+        }
+    }
+
+    fn clear_active_picker_target(&self) {
+        if let Ok(mut guard) = self.active_picker_target.lock() {
+            *guard = None;
+        }
+    }
+
+    fn capture_window_for_key(
+        &self,
+        provider: &mut P,
+        adapter: DictationAdapter,
+    ) -> Result<ManagedWindow, String> {
+        let bundle = adapter_bundle(adapter);
+        let window = provider.capture_for_window_key(bundle)?;
+        validate_target(&window.identity, bundle)?;
+        let mut targets = self
+            .uncleared_targets
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
+        validate_uncleared_target(provider, &mut targets, &window.identity)?;
+        Ok(window)
+    }
+
+    fn open_model_picker_in_window(
+        &self,
+        provider: &mut P,
+        adapter: DictationAdapter,
+        window: ManagedWindow,
+    ) -> Result<(ManagedWindowIdentity, bool), String> {
         match adapter {
             DictationAdapter::Antigravity => {
-                let window = capture(&mut *provider, adapter)?;
+                if let Some(trigger) =
+                    select_unique_model_trigger(&window, is_antigravity_model_picker_trigger)?
+                {
+                    let trigger_id = trigger.id;
+                    let initial_expanded = trigger.expanded;
+                    provider.activate_window(&window.identity)?;
+                    let confirmed = if initial_expanded == Some(true) {
+                        true
+                    } else {
+                        provider.press(&window.identity, trigger_id)?;
+                        if initial_expanded == Some(false) {
+                            confirm_popup_expansion(
+                                provider,
+                                &window.identity,
+                                trigger_id,
+                                Duration::from_millis(250),
+                            )?
+                        } else {
+                            false
+                        }
+                    };
+                    return Ok((window.identity, confirmed));
+                }
+                let fallback_window = capture(provider, adapter)?;
                 {
                     let mut targets = self
                         .uncleared_targets
                         .lock()
                         .map_err(|_| blocked("ax_lock_poisoned"))?;
-                    validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
+                    validate_uncleared_target(provider, &mut targets, &fallback_window.identity)?;
                 }
                 let control =
-                    focus_in_window(&mut *provider, &window.identity, self.readback_timeout)?;
+                    focus_in_window(provider, &fallback_window.identity, self.readback_timeout)?;
                 let cmd = vec!["command".to_string()];
-                provider.shortcut(&window.identity, control, 0x2C, &cmd)
+                provider.shortcut(&fallback_window.identity, control, 0x2C, &cmd)?;
+                Ok((fallback_window.identity, false))
             }
             DictationAdapter::Codex => {
-                let bundle = adapter_bundle(adapter);
-                let window = provider.capture_for_window_key(bundle)?;
-                validate_target(&window.identity, bundle)?;
-                {
-                    let mut targets = self
-                        .uncleared_targets
-                        .lock()
-                        .map_err(|_| blocked("ax_lock_poisoned"))?;
-                    validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
+                provider.activate_window(&window.identity)?;
+                if is_codex_model_popover_visible(&window) {
+                    return Ok((window.identity, true));
                 }
+                let observable_popup_id = unique_codex_model_trigger(&window)
+                    .filter(|c| c.role == "AXPopUpButton" && c.expanded == Some(false))
+                    .map(|c| c.id);
                 let ctrl_shift = vec!["control".to_string(), "shift".to_string()];
                 if provider
                     .send_window_key(&window.identity, 0x2E, &ctrl_shift)
                     .is_ok()
                 {
-                    return Ok(());
+                    let confirmed = if let Some(trigger_id) = observable_popup_id {
+                        poll_optional_popup_expansion(
+                            provider,
+                            &window.identity,
+                            trigger_id,
+                            Duration::from_millis(60),
+                        ) || read(provider, &window.identity)
+                            .is_ok_and(|updated| is_codex_model_popover_visible(&updated))
+                    } else {
+                        false
+                    };
+                    return Ok((window.identity, confirmed));
                 }
-                let popup_candidates: Vec<&ManagedControl> = window
-                    .controls
-                    .iter()
-                    .filter(|c| {
-                        c.enabled
-                            && c.pressable
-                            && c.role == "AXPopUpButton"
-                            && is_codex_model_picker_trigger(&c.label)
-                    })
-                    .collect();
-                let button_candidates: Vec<&ManagedControl> = window
-                    .controls
-                    .iter()
-                    .filter(|c| {
-                        c.enabled
-                            && c.pressable
-                            && c.role == "AXButton"
-                            && is_codex_model_picker_trigger(&c.label)
-                    })
-                    .collect();
-                let fallback_reasoning: Vec<&ManagedControl> = window
-                    .controls
-                    .iter()
-                    .filter(|c| {
-                        c.enabled
-                            && c.pressable
-                            && c.role == "AXPopUpButton"
-                            && is_codex_reasoning_trigger(&c.label)
-                    })
-                    .collect();
-                let trigger = if let [only] = popup_candidates.as_slice() {
-                    *only
-                } else if let [only] = button_candidates.as_slice() {
-                    *only
-                } else if let [only] = fallback_reasoning.as_slice() {
-                    *only
+                let trigger = unique_codex_model_trigger(&window)
+                    .ok_or_else(|| blocked("model_picker_control_unavailable"))?;
+                let trigger_id = trigger.id;
+                let was_collapsed_popup =
+                    trigger.role == "AXPopUpButton" && trigger.expanded == Some(false);
+                provider.press(&window.identity, trigger_id)?;
+                let mut confirmed = if was_collapsed_popup {
+                    poll_optional_popup_expansion(
+                        provider,
+                        &window.identity,
+                        trigger_id,
+                        Duration::from_millis(60),
+                    )
                 } else {
-                    return Err(blocked("model_picker_control_unavailable"));
+                    false
                 };
-                provider.press(&window.identity, trigger.id)?;
-                if let Ok(updated) = read(&mut *provider, &window.identity) {
+                if let Ok(updated) = read(provider, &window.identity) {
+                    if is_codex_model_popover_visible(&updated) {
+                        confirmed = true;
+                    }
                     let select_model_items: Vec<&ManagedControl> = updated
                         .controls
                         .iter()
@@ -823,56 +1139,111 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                         let _ = provider.press(&window.identity, item.id);
                     }
                 }
-                Ok(())
+                Ok((window.identity, confirmed))
             }
             DictationAdapter::Dsh => {
-                let window = capture(&mut *provider, adapter)?;
+                provider.activate_window(&window.identity)?;
+                if let Some(trigger) =
+                    select_unique_model_trigger(&window, is_dsh_model_picker_trigger)?
                 {
-                    let mut targets = self
-                        .uncleared_targets
-                        .lock()
-                        .map_err(|_| blocked("ax_lock_poisoned"))?;
-                    validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
-                }
-                let popup_candidates: Vec<&ManagedControl> = window
-                    .controls
-                    .iter()
-                    .filter(|c| {
-                        c.enabled
-                            && c.pressable
-                            && c.role == "AXPopUpButton"
-                            && is_dsh_model_picker_trigger(&c.label)
-                    })
-                    .collect();
-                let button_candidates: Vec<&ManagedControl> = window
-                    .controls
-                    .iter()
-                    .filter(|c| {
-                        c.enabled
-                            && c.pressable
-                            && c.role == "AXButton"
-                            && is_dsh_model_picker_trigger(&c.label)
-                    })
-                    .collect();
-                if let [trigger] = popup_candidates.as_slice() {
-                    return provider.press(&window.identity, trigger.id);
-                }
-                if popup_candidates.is_empty() {
-                    if let [trigger] = button_candidates.as_slice() {
-                        return provider.press(&window.identity, trigger.id);
-                    }
-                }
-                if popup_candidates.len() > 1 || button_candidates.len() > 1 {
-                    return Err(blocked("ambiguous_model_picker_control"));
+                    let trigger_id = trigger.id;
+                    let initial_expanded = trigger.expanded;
+                    let confirmed = if initial_expanded == Some(true) {
+                        true
+                    } else {
+                        provider.press(&window.identity, trigger_id)?;
+                        if initial_expanded == Some(false) {
+                            confirm_popup_expansion(
+                                provider,
+                                &window.identity,
+                                trigger_id,
+                                Duration::from_millis(250),
+                            )?
+                        } else {
+                            false
+                        }
+                    };
+                    return Ok((window.identity, confirmed));
                 }
                 let cmd = vec!["command".to_string()];
                 if let Ok(control) =
-                    focus_in_window(&mut *provider, &window.identity, self.readback_timeout)
+                    focus_in_window(provider, &window.identity, self.readback_timeout)
                 {
-                    provider.shortcut(&window.identity, control, 0x2C, &cmd)
+                    provider.shortcut(&window.identity, control, 0x2C, &cmd)?;
                 } else {
-                    provider.send_window_key(&window.identity, 0x2C, &cmd)
+                    provider.send_window_key(&window.identity, 0x2C, &cmd)?;
                 }
+                Ok((window.identity, false))
+            }
+        }
+    }
+
+    pub fn open_model_picker(&self, adapter: &str) -> Result<(), String> {
+        let adapter = managed_adapter(adapter)?;
+        if adapter == DictationAdapter::Codex {
+            let _ = self.begin_codex_reasoning_turn();
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = self.capture_window_for_key(&mut *provider, adapter)?;
+        let (target_identity, ax_open_confirmed) =
+            self.open_model_picker_in_window(&mut *provider, adapter, window)?;
+        self.record_active_picker_target(adapter, &target_identity, ax_open_confirmed);
+        Ok(())
+    }
+
+    pub fn step_model_picker(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        let adapter = managed_adapter(adapter)?;
+        if adapter == DictationAdapter::Codex {
+            let _ = self.begin_codex_reasoning_turn();
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = self.capture_window_for_key(&mut *provider, adapter)?;
+        let prior_ax_confirmed = self.active_picker_state(adapter, &window.identity);
+        let observed = self.effective_popup_state(&window, adapter)?;
+        let is_open = match observed {
+            ObservedModelPickerPopupState::Open => true,
+            ObservedModelPickerPopupState::Closed => false,
+            ObservedModelPickerPopupState::Unknown => prior_ax_confirmed.is_some(),
+        };
+        let (target_identity, ax_open_confirmed) = if is_open {
+            (
+                window.identity,
+                observed == ObservedModelPickerPopupState::Open
+                    || prior_ax_confirmed.unwrap_or(false),
+            )
+        } else {
+            self.open_model_picker_in_window(&mut *provider, adapter, window)?
+        };
+        provider.send_window_key(&target_identity, key_code, &[])?;
+        self.record_active_picker_target(adapter, &target_identity, ax_open_confirmed);
+        Ok(())
+    }
+
+    pub fn confirm_model_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
+        let adapter = managed_adapter(adapter)?;
+        if adapter == DictationAdapter::Codex {
+            let _ = self.begin_codex_reasoning_turn();
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = self.capture_window_for_key(&mut *provider, adapter)?;
+        match self.effective_popup_state(&window, adapter)? {
+            ObservedModelPickerPopupState::Closed => {
+                self.clear_active_picker_target();
+                Ok(ModelPickerConfirmResult::PopupAlreadyClosed)
+            }
+            ObservedModelPickerPopupState::Open | ObservedModelPickerPopupState::Unknown => {
+                self.clear_active_picker_target();
+                provider.send_window_key(&window.identity, 0x24, &[])?;
+                Ok(ModelPickerConfirmResult::Confirmed)
             }
         }
     }
@@ -882,18 +1253,18 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         if adapter == DictationAdapter::Codex {
             let _ = self.begin_codex_reasoning_turn();
         }
-        let bundle = adapter_bundle(adapter);
         let mut provider = self
             .provider
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
-        let window = provider.capture_for_window_key(bundle)?;
-        validate_target(&window.identity, bundle)?;
-        let mut targets = self
-            .uncleared_targets
-            .lock()
-            .map_err(|_| blocked("ax_lock_poisoned"))?;
-        validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
+        let window = self.capture_window_for_key(&mut *provider, adapter)?;
+        if key_code == 0x35 {
+            self.clear_active_picker_target();
+        } else if matches!(key_code, 0x7B | 0x7C) {
+            if let Some(ax_open_confirmed) = self.active_picker_state(adapter, &window.identity) {
+                self.record_active_picker_target(adapter, &window.identity, ax_open_confirmed);
+            }
+        }
         provider.send_window_key(&window.identity, key_code, &[])
     }
 

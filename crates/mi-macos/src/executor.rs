@@ -1,5 +1,6 @@
 use crate::managed_controls::{
-    CodexReasoningAction, ManagedAxControls, ManagedControlReadiness, ObservedDictationState,
+    CodexReasoningAction, ManagedAxControls, ManagedControlReadiness, ModelPickerConfirmResult,
+    ObservedDictationState,
 };
 use crate::native_ax::NativeAxProvider;
 use mi_model::host_router::{ResolvedHostAction, ResolvedMacroEvent};
@@ -641,11 +642,11 @@ pub fn bundle_id_for_adapter(adapter: &str) -> Option<&'static str> {
 
 pub fn model_picker_navigation_key_code(command: &str) -> Option<u16> {
     match command.trim() {
-        "model-picker-prev" => Some(0x7E),
-        "model-picker-next" => Some(0x7D),
+        "model-picker-prev" | "search-prev" => Some(0x7E),
+        "model-picker-next" | "search-next" => Some(0x7D),
         "model-picker-effort-right" => Some(0x7C),
         "model-picker-effort-left" => Some(0x7B),
-        "model-picker-confirm" => Some(KEY_CODE_RETURN),
+        "model-picker-confirm" | "search-confirm" => Some(KEY_CODE_RETURN),
         "model-picker-cancel" => Some(0x35),
         _ => None,
     }
@@ -915,6 +916,13 @@ pub trait HostOsDriver: Send + Sync {
         Err(format!(
             "blocked:model_picker_key_unavailable:{adapter}:{key_code:x}"
         ))
+    }
+    fn step_model_picker(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        self.send_model_picker_key(adapter, key_code)
+    }
+    fn confirm_model_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
+        self.send_model_picker_key(adapter, KEY_CODE_RETURN)?;
+        Ok(ModelPickerConfirmResult::Confirmed)
     }
     fn resolve_default_managed_adapter(&self, profile_id: &str) -> &'static str {
         infer_managed_adapter_from_profile_id(profile_id).unwrap_or("antigravity")
@@ -2583,6 +2591,27 @@ impl HostOsDriver for MacOsSystemDriver {
         self.agent_shortcut(adapter, key_code, &[])
     }
 
+    fn step_model_picker(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        if is_managed_adapter(adapter) {
+            return self.managed_controls.step_model_picker(adapter, key_code);
+        }
+        self.agent_shortcut(adapter, key_code, &[])
+    }
+
+    fn confirm_model_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        if is_managed_adapter(adapter) {
+            return self.managed_controls.confirm_model_picker(adapter);
+        }
+        self.agent_shortcut(adapter, KEY_CODE_RETURN, &[])?;
+        Ok(ModelPickerConfirmResult::Confirmed)
+    }
+
     fn resolve_default_managed_adapter(&self, profile_id: &str) -> &'static str {
         if let Some(inferred) = infer_managed_adapter_from_profile_id(profile_id) {
             return inferred;
@@ -3003,6 +3032,15 @@ impl HostOsDriver for RecordingOsDriver {
             key_code,
         });
         Ok(())
+    }
+
+    fn step_model_picker(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        self.send_model_picker_key(adapter, key_code)
+    }
+
+    fn confirm_model_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
+        self.send_model_picker_key(adapter, KEY_CODE_RETURN)?;
+        Ok(ModelPickerConfirmResult::Confirmed)
     }
 
     fn set_model_picker_mouse_capture(&self, enabled: bool) {
@@ -3734,12 +3772,32 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    return match self
-                        .driver
-                        .send_model_picker_key(effective_adapter, key_code)
-                    {
-                        Ok(()) => make_receipt("executed", desc.detail),
-                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    return match command.trim() {
+                        "model-picker-prev" | "model-picker-next" => {
+                            match self.driver.step_model_picker(effective_adapter, key_code) {
+                                Ok(()) => make_receipt("executed", desc.detail),
+                                Err(error) => make_receipt(managed_error_outcome(&error), error),
+                            }
+                        }
+                        "model-picker-confirm" => {
+                            match self.driver.confirm_model_picker(effective_adapter) {
+                                Ok(ModelPickerConfirmResult::Confirmed) => {
+                                    make_receipt("executed", desc.detail)
+                                }
+                                Ok(ModelPickerConfirmResult::PopupAlreadyClosed) => make_receipt(
+                                    "executed",
+                                    format!("{effective_adapter}/model-picker-already-closed"),
+                                ),
+                                Err(error) => make_receipt(managed_error_outcome(&error), error),
+                            }
+                        }
+                        _ => match self
+                            .driver
+                            .send_model_picker_key(effective_adapter, key_code)
+                        {
+                            Ok(()) => make_receipt("executed", desc.detail),
+                            Err(error) => make_receipt(managed_error_outcome(&error), error),
+                        },
                     };
                 }
                 if matches!(command.as_str(), "model" | "model-picker-open")

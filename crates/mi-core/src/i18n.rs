@@ -51,6 +51,7 @@ pub const CORE_EN_TABLE: &[(&str, &str)] = &[
     ("硬件滚轮", "HW Scroll"),
     ("8向摇杆", "8-Way Stick"),
     ("USB 启动方案预览", "USB Startup Preview"),
+    ("模型选择（直旋模型 · 按下搜会话）", "Model Picker & Search (Turn Model · Press Search)"),
     ("模型选择（短按模型 · 长按搜会话）", "Model Picker & Search (Tap / Hold)"),
     ("旋钮轮询 Working/蓝点", "Dial Cycles Working / Unread"),
     ("旋钮+摇杆双滚轮", "Dial + Stick Dual Scroll"),

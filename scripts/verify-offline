@@ -32,7 +32,7 @@ def verify_evidence(run, scenario, started, process_alive):
         for required_detail in (
             "antigravity/model-picker-prev",
             "antigravity/model-picker-next",
-            "antigravity/model-picker-open",
+            "antigravity/search",
             "no_newline=true (bytes=8)",
         ):
             if required_detail not in details:

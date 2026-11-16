@@ -1221,11 +1221,9 @@ final class MicroInputTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = CoreStore(isolatedDirectory: dir.path)
 
-        // Default canonical Antigravity preset defaults top-left encoder to Model Selection
         XCTAssertEqual(store.canvas.encoderHoldLabel, "搜索会话")
-        XCTAssertEqual(store.canvas.encoderPressLabel, "弹出模型")
+        XCTAssertEqual(store.canvas.encoderPressLabel, "搜索会话")
 
-        // Select EncoderHold surface and inspect/edit its action independently of short press
         store.dispatch("canvas", ["SelectSurface": "EncoderHold"])
         XCTAssertEqual(store.canvas.selectedSurface, "EncoderHold")
         XCTAssertEqual(store.inspector.selectedSurface, "EncoderHold")
@@ -1233,12 +1231,11 @@ final class MicroInputTests: XCTestCase {
 
         store.dispatch("inspector", "UnassignSelectedSlot")
         XCTAssertEqual(store.canvas.encoderHoldLabel, "未绑定")
-        XCTAssertEqual(store.canvas.encoderPressLabel, "弹出模型")
+        XCTAssertEqual(store.canvas.encoderPressLabel, "搜索会话")
 
-        // Apply ModelSelectionAndMouse preset to restore encoder model selection
         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "ModelSelectionAndMouse"])
         XCTAssertEqual(store.canvas.encoderHoldLabel, "搜索会话")
-        XCTAssertEqual(store.canvas.encoderPressLabel, "弹出模型")
+        XCTAssertEqual(store.canvas.encoderPressLabel, "搜索会话")
 
         // Switch top-right joystick to 0.7.0 hardware MOUSE mode and verify encoderHoldLabel survives
         store.dispatch("canvas", ["SelectSurface": "Joystick"])

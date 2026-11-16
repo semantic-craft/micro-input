@@ -238,7 +238,7 @@ impl KnobJoystickPreset {
 
     pub const fn title(self) -> &'static str {
         match self {
-            Self::ModelSelectionAndMouse => "模型选择（短按模型 · 长按搜会话）",
+            Self::ModelSelectionAndMouse => "模型选择（直旋模型 · 按下搜会话）",
             Self::CycleWorkingAndBlueDot => "旋钮轮询 Working/蓝点",
             Self::DualScrollProjectsAndChat => "旋钮+摇杆双滚轮",
             Self::CodexScrollChatAndBottom => "旋钮滚动对话",

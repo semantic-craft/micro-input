@@ -3351,7 +3351,7 @@ impl WorkbenchStore {
                     KnobJoystickPreset::ModelSelectionAndMouse => &[
                         (13, "agent-model-picker-prev"),
                         (14, "agent-model-picker-next"),
-                        (15, "agent-model-picker-open"),
+                        (15, "agent-search"),
                         (16, "agent-model-picker-prev"),
                         (17, "agent-model-picker-next"),
                         (18, "agent-model-picker-effort-left"),
@@ -5295,6 +5295,58 @@ impl WorkbenchStore {
         }
     }
 
+    pub(crate) fn finalize_encoder_confirm_outcome(
+        &mut self,
+        receipt: Option<&HostActionReceipt>,
+    ) -> crate::encoder_model_picker::ConfirmExecutionDisposition {
+        let disposition = self.encoder_model_picker.apply_confirm_execution_outcome(
+            receipt.is_some_and(|r| r.succeeded()),
+            receipt.map_or("", |r| r.detail.as_str()),
+        );
+        self.set_model_picker_mouse_capture(false);
+        self.commit_runtime_update();
+        disposition
+    }
+
+    fn execute_encoder_short_press(
+        &mut self,
+        hold_profile: &str,
+        session_id: u64,
+        now: Instant,
+    ) -> Option<HostActionReceipt> {
+        let layout = self.current_bottom_row_layout();
+        let Some(short_action) = self.resolve_physical_action(hold_profile, "ENC_CLK", layout)
+        else {
+            self.status_message = "已按下 ENC_CLK（当前槽位未绑定动作）".to_string();
+            self.commit_runtime_update();
+            return None;
+        };
+        let target_adapter =
+            self.resolve_model_picker_target_adapter(hold_profile, Some(&short_action));
+        let mut action = short_action;
+        if let ResolvedHostAction::AgentCommand { adapter, .. } = &mut action {
+            if matches!(adapter.as_str(), "host" | "active-agent") {
+                if let Some(ref resolved) = target_adapter {
+                    *adapter = resolved.clone();
+                }
+            }
+        }
+        let receipt = self.execute_resolved_physical_action_with_session(
+            hold_profile,
+            "ENC_CLK",
+            session_id,
+            action.clone(),
+        );
+        if receipt.as_ref().is_some_and(|r| r.succeeded()) {
+            let eff_adapter = target_adapter.unwrap_or_else(|| "antigravity".to_string());
+            let transition =
+                self.encoder_model_picker
+                    .activate_overlay_after_action(eff_adapter, &action, now);
+            self.apply_overlay_transition(transition, receipt.as_ref());
+        }
+        receipt
+    }
+
     fn execute_encoder_hold_outcome(
         &mut self,
         overlay_kind: Option<crate::encoder_model_picker::EncoderOverlayKind>,
@@ -5465,58 +5517,32 @@ impl WorkbenchStore {
                             }
                             crate::encoder_model_picker::EncoderReleaseOutcome::ModelPickerConfirm {
                                 adapter,
+                                command,
                             } => {
-                                self.set_model_picker_mouse_capture(false);
-                                let confirm_action =
-                                    crate::encoder_model_picker::ModelPickerCommand::ModelPickerConfirm
-                                        .into_host_action(adapter);
-                                return self.execute_resolved_physical_action_with_session(
+                                let confirm_action = command.into_host_action(adapter);
+                                let receipt = self.execute_resolved_physical_action_with_session(
                                     &hold_profile,
                                     "ENC_CLK",
                                     event.session_id,
                                     confirm_action,
                                 );
-                            }
-                            crate::encoder_model_picker::EncoderReleaseOutcome::ShortPress => {
-                                let layout = self.current_bottom_row_layout();
-                                let Some(short_action) =
-                                    self.resolve_physical_action(&hold_profile, "ENC_CLK", layout)
-                                else {
-                                    self.status_message =
-                                        "已按下 ENC_CLK（当前槽位未绑定动作）".to_string();
-                                    self.commit_runtime_update();
-                                    return None;
-                                };
-                                let target_adapter = self.resolve_model_picker_target_adapter(
-                                    &hold_profile,
-                                    Some(&short_action),
-                                );
-                                let mut action = short_action;
-                                if let ResolvedHostAction::AgentCommand { adapter, .. } =
-                                    &mut action
+                                if self.finalize_encoder_confirm_outcome(receipt.as_ref())
+                                    == crate::encoder_model_picker::ConfirmExecutionDisposition::FallbackToShortPress
                                 {
-                                    if matches!(adapter.as_str(), "host" | "active-agent") {
-                                        if let Some(ref resolved) = target_adapter {
-                                            *adapter = resolved.clone();
-                                        }
-                                    }
-                                }
-                                let receipt = self.execute_resolved_physical_action_with_session(
-                                    &hold_profile,
-                                    "ENC_CLK",
-                                    event.session_id,
-                                    action.clone(),
-                                );
-                                if receipt.as_ref().is_some_and(|r| r.succeeded()) {
-                                    let eff_adapter = target_adapter.unwrap_or_else(|| "antigravity".to_string());
-                                    let transition = self.encoder_model_picker.activate_overlay_after_action(
-                                        eff_adapter,
-                                        &action,
+                                    return self.execute_encoder_short_press(
+                                        &hold_profile,
+                                        event.session_id,
                                         now,
                                     );
-                                    self.apply_overlay_transition(transition, receipt.as_ref());
                                 }
                                 return receipt;
+                            }
+                            crate::encoder_model_picker::EncoderReleaseOutcome::ShortPress => {
+                                return self.execute_encoder_short_press(
+                                    &hold_profile,
+                                    event.session_id,
+                                    now,
+                                );
                             }
                         }
                     }
@@ -5637,9 +5663,29 @@ impl WorkbenchStore {
                                 );
                             }
                         }
-                        crate::encoder_model_picker::EncoderTurnOutcome::FastScroll { .. } => {
+                        crate::encoder_model_picker::EncoderTurnOutcome::FastScroll {
+                            clockwise,
+                        } => {
                             self.dial_turned_while_pressed = true;
                             self.encoder_hold_profile_id = None;
+                            let adapter = self
+                                .resolve_model_picker_target_adapter(&profile_id, None)
+                                .or_else(|| self.active_desktop_agent_adapter())
+                                .unwrap_or_else(|| "antigravity".to_string());
+                            let scroll_action = ResolvedHostAction::AgentCommand {
+                                adapter,
+                                command: if clockwise {
+                                    "scroll-down-fast".to_string()
+                                } else {
+                                    "scroll-up-fast".to_string()
+                                },
+                            };
+                            return self.execute_resolved_physical_action_with_session(
+                                &profile_id,
+                                &binding_id,
+                                event.session_id,
+                                scroll_action,
+                            );
                         }
                         crate::encoder_model_picker::EncoderTurnOutcome::NormalSlot => {}
                     }
@@ -5677,12 +5723,28 @@ impl WorkbenchStore {
                     return None;
                 };
 
-                self.execute_resolved_physical_action_with_session(
+                let target_adapter =
+                    self.resolve_model_picker_target_adapter(&profile_id, Some(&action));
+                let receipt = self.execute_resolved_physical_action_with_session(
                     &profile_id,
                     &binding_id,
                     event.session_id,
-                    action,
-                )
+                    action.clone(),
+                );
+                if receipt.as_ref().is_some_and(|r| r.succeeded()) {
+                    let eff_adapter = target_adapter
+                        .or_else(|| self.active_desktop_agent_adapter())
+                        .unwrap_or_else(|| "antigravity".to_string());
+                    let transition = self.encoder_model_picker.activate_overlay_after_action(
+                        eff_adapter,
+                        &action,
+                        now,
+                    );
+                    if transition != crate::encoder_model_picker::OverlayTransition::None {
+                        self.apply_overlay_transition(transition, receipt.as_ref());
+                    }
+                }
+                receipt
             }
             _ => None,
         }
@@ -5740,7 +5802,11 @@ impl WorkbenchStore {
             if matches!(adapter.as_str(), "host" | "active-agent")
                 && !mi_model::is_host_mouse_command(command)
             {
-                *adapter = if command.starts_with("model-picker") || command == "model" {
+                *adapter = if command.starts_with("model-picker")
+                    || command.starts_with("search-")
+                    || command == "model"
+                    || command == "search"
+                {
                     self.resolve_model_picker_target_adapter(profile_id, None)
                         .or_else(|| self.active_desktop_agent_adapter())
                         .unwrap_or_else(|| "antigravity".to_string())
@@ -5826,6 +5892,9 @@ impl WorkbenchStore {
         } else {
             self.live_executor.execute(profile_id, binding_id, &action)
         };
+        if receipt.succeeded() && receipt.detail.ends_with("/model-picker-already-closed") {
+            return Some(receipt);
+        }
 
         if let ResolvedHostAction::OpenApp { bundle_id } = &action {
             if receipt.succeeded() {
@@ -9176,5 +9245,224 @@ mod tests {
         let link_doc_dir = dir.path().join("symlink-doc-dir");
         std::os::unix::fs::symlink(&loose_doc_dir, &link_doc_dir).unwrap();
         assert!(WorkbenchStore::open(WorkbenchStoreConfig::isolated(&link_doc_dir)).is_err());
+    }
+
+    #[test]
+    fn workbench_store_already_closed_confirm_falls_through_to_slot_search_and_both_press_modes_search(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).expect("open store");
+        store.set_host_execution_enabled(true).unwrap();
+        let ag_id = store
+            .find_canonical_profile_id(crate::CanonicalAgent::Antigravity)
+            .unwrap();
+        store.select_and_activate_profile(&ag_id).unwrap();
+
+        let mk_ev = |seq: u64, binding: &str, kind: InputEventKind| InputEvent {
+            session_id: 1,
+            board_layer: None,
+            sequence: seq,
+            ingress_sequence: seq,
+            radial_center: None,
+            radial_position: None,
+            timestamp_ms: seq,
+            kind,
+            logical_switch: None,
+            binding_id: Some(binding.into()),
+            physical_control: None,
+            keycap_group: None,
+            action_role: None,
+            lost_count: 0,
+            action_eligible: true,
+        };
+
+        let t0 = Instant::now();
+        assert!(store
+            .consume_physical_input_event(mk_ev(1, "ENC_CLK", InputEventKind::Pressed), t0)
+            .is_none());
+        let short_search = store
+            .consume_physical_input_event(
+                mk_ev(2, "ENC_CLK", InputEventKind::Released),
+                t0 + Duration::from_millis(60),
+            )
+            .expect("idle short press opens search");
+        assert_eq!(short_search.detail, "antigravity/search");
+        assert!(!store.is_model_picker_mouse_capture_enabled());
+        assert_eq!(
+            store
+                .encoder_model_picker
+                .active_kind(t0 + Duration::from_millis(60)),
+            Some(crate::encoder_model_picker::EncoderOverlayKind::SearchConversations)
+        );
+        store.cancel_encoder_model_picker();
+
+        let before_hold_len = store.dispatched_receipts().len();
+        assert!(store
+            .consume_physical_input_event(
+                mk_ev(3, "ENC_CLK", InputEventKind::Pressed),
+                t0 + Duration::from_millis(100),
+            )
+            .is_none());
+        let hold_gen = store
+            .encoder_model_picker
+            .hold_state()
+            .unwrap()
+            .hold_generation;
+        let hold_search = store
+            .fire_due_encoder_hold(1, hold_gen, t0 + Duration::from_millis(460))
+            .expect("idle 350ms hold opens search");
+        assert_eq!(hold_search.detail, "antigravity/search");
+        assert!(store
+            .consume_physical_input_event(
+                mk_ev(4, "ENC_CLK", InputEventKind::Released),
+                t0 + Duration::from_millis(500),
+            )
+            .is_none());
+        assert_eq!(store.dispatched_receipts().len(), before_hold_len + 1);
+        store.cancel_encoder_model_picker();
+
+        let turn_receipt = store
+            .consume_physical_input_event(
+                mk_ev(5, "AG13", InputEventKind::Pressed),
+                t0 + Duration::from_millis(600),
+            )
+            .expect("idle CCW turn enters model picker");
+        assert_eq!(turn_receipt.detail, "antigravity/model-picker-prev");
+        assert!(store.is_model_picker_mouse_capture_enabled());
+
+        let closed_receipt = HostActionReceipt {
+            action_type: "agent_command".into(),
+            binding_id: "ENC_CLK".into(),
+            detail: "antigravity/model-picker-already-closed".into(),
+            outcome: "executed".into(),
+            profile_id: ag_id.clone(),
+            target: "antigravity".into(),
+            text_byte_len: None,
+            timestamp_ms: 1,
+        };
+        assert_eq!(
+            store.finalize_encoder_confirm_outcome(Some(&closed_receipt)),
+            crate::encoder_model_picker::ConfirmExecutionDisposition::FallbackToShortPress
+        );
+        assert!(!store.is_model_picker_mouse_capture_enabled());
+
+        let fallback_search = store
+            .execute_encoder_short_press(&ag_id, 1, t0 + Duration::from_millis(680))
+            .expect("already-closed confirm falls through to slot 15 search");
+        assert_eq!(fallback_search.detail, "antigravity/search");
+        assert_eq!(
+            store
+                .encoder_model_picker
+                .active_kind(t0 + Duration::from_millis(680)),
+            Some(crate::encoder_model_picker::EncoderOverlayKind::SearchConversations)
+        );
+    }
+
+    #[test]
+    fn workbench_store_press_and_turn_fast_scrolls_and_search_aligns_target_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).expect("open store");
+        store.set_host_execution_enabled(true).unwrap();
+        let ag_id = store
+            .find_canonical_profile_id(crate::CanonicalAgent::Antigravity)
+            .unwrap();
+        store.select_and_activate_profile(&ag_id).unwrap();
+
+        let mk_ev = |seq: u64, binding: &str, kind: InputEventKind| InputEvent {
+            session_id: 1,
+            board_layer: None,
+            sequence: seq,
+            ingress_sequence: seq,
+            radial_center: None,
+            radial_position: None,
+            timestamp_ms: seq,
+            kind,
+            logical_switch: None,
+            binding_id: Some(binding.into()),
+            physical_control: None,
+            keycap_group: None,
+            action_role: None,
+            lost_count: 0,
+            action_eligible: true,
+        };
+
+        let t0 = Instant::now();
+        assert!(store
+            .consume_physical_input_event(mk_ev(1, "ENC_CLK", InputEventKind::Pressed), t0)
+            .is_none());
+        let fast_scroll = store
+            .consume_physical_input_event(
+                mk_ev(2, "AG14", InputEventKind::Pressed),
+                t0 + Duration::from_millis(50),
+            )
+            .expect("press+turn dispatches fast scroll");
+        assert_eq!(fast_scroll.detail, "antigravity/scroll-down-fast");
+        assert!(!store.is_model_picker_mouse_capture_enabled());
+        assert!(!store
+            .encoder_model_picker
+            .is_active(t0 + Duration::from_millis(50)));
+        assert!(store
+            .consume_physical_input_event(
+                mk_ev(3, "ENC_CLK", InputEventKind::Released),
+                t0 + Duration::from_millis(90),
+            )
+            .is_none());
+
+        let dsh_id = store
+            .find_canonical_profile_id(crate::CanonicalAgent::DeepseekHarness)
+            .unwrap();
+        let dsh_lid = store
+            .document_store
+            .host_store()
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles[&dsh_id]
+            .layer_order[0]
+            .clone();
+        store
+            .document_store
+            .update(|draft| {
+                draft.assign(
+                    &serde_json::json!(dsh_id),
+                    &serde_json::json!(dsh_lid),
+                    0,
+                    mi_model::preset::canonical_encoder_hold_action(),
+                )
+            })
+            .unwrap();
+        store.select_and_activate_profile(&dsh_id).unwrap();
+        store.foreground_bundle_id = Some("com.google.antigravity".to_string());
+
+        let t1 = t0 + Duration::from_millis(200);
+        let direct_search = store
+            .execute_resolved_physical_action_with_session(
+                &dsh_id,
+                "AG00",
+                1,
+                ResolvedHostAction::AgentCommand {
+                    adapter: "host".into(),
+                    command: "search".into(),
+                },
+            )
+            .expect("host/search resolves via profile target adapter");
+        assert_eq!(direct_search.detail, "dsh-desktop/search");
+
+        let search_open = store
+            .consume_physical_input_event(mk_ev(4, "AG00", InputEventKind::Pressed), t1)
+            .expect("host/search slot opens search");
+        assert_eq!(search_open.detail, "dsh-desktop/search");
+        assert!(!store.is_model_picker_mouse_capture_enabled());
+
+        let search_step = store
+            .consume_physical_input_event(
+                mk_ev(5, "AG14", InputEventKind::Pressed),
+                t1 + Duration::from_millis(40),
+            )
+            .expect("encoder turn steps search");
+        assert_eq!(search_step.detail, "dsh-desktop/search-next");
+        assert_eq!(direct_search.target, search_step.target);
+        assert_eq!(search_open.target, search_step.target);
     }
 }

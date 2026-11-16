@@ -439,7 +439,7 @@ mod tests {
                 assert_eq!(by_id("AG12")["label"], "停止听写并提交");
                 assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
                 assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
-                assert_eq!(by_id("ENC_CLK")["label"], "弹出模型选择页");
+                assert_eq!(by_id("ENC_CLK")["label"], "搜索会话");
                 assert_eq!(state["encoder_hold_label"], "搜索会话");
                 continue;
             }
@@ -475,7 +475,7 @@ mod tests {
                 assert_eq!(by_id("AG12")["label"], "停止听写并提交");
                 assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
                 assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
-                assert_eq!(by_id("ENC_CLK")["label"], "弹出模型选择页");
+                assert_eq!(by_id("ENC_CLK")["label"], "搜索会话");
                 assert_eq!(state["encoder_hold_label"], "搜索会话");
                 assert_eq!(by_id("AG15")["label"], "向上滚动对话");
                 assert_eq!(by_id("AG16")["label"], "历史后退 (command [)");
@@ -485,7 +485,7 @@ mod tests {
                 assert_eq!(by_id("AG01")["label"], "聚焦输入框");
                 assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
                 assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
-                assert_eq!(by_id("ENC_CLK")["label"], "弹出模型选择页");
+                assert_eq!(by_id("ENC_CLK")["label"], "搜索会话");
                 assert_eq!(state["encoder_hold_label"], "搜索会话");
             }
         }
@@ -883,7 +883,7 @@ mod tests {
         let by_id = |b: &str| keys.iter().find(|k| k["binding_id"] == b).unwrap();
         assert_eq!(by_id("AG13")["label"], "Previous Model / Effort");
         assert_eq!(by_id("AG14")["label"], "Next Model / Effort");
-        assert_eq!(by_id("ENC_CLK")["label"], "Open Model Picker");
+        assert_eq!(by_id("ENC_CLK")["label"], "Search Conversations");
 
         store
             .update_routing(request(

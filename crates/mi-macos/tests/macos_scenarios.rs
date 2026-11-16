@@ -414,7 +414,7 @@ fn test_four_synthetic_scenarios_match_verify_offline_contracts() {
     for expected in [
         "antigravity/model-picker-prev",
         "antigravity/model-picker-next",
-        "antigravity/model-picker-open",
+        "antigravity/search",
         "no_newline=true (bytes=8)",
     ] {
         assert!(details.contains(expected), "missing detail {expected}");

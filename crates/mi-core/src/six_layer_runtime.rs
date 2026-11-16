@@ -110,9 +110,9 @@ impl SavedSixLayerState {
             let d14 = slot_action("logical-14");
             let d15 = slot_action("logical-15");
 
-            let is_v090_doc = is_action_cmd(d13, "agent-model-picker-prev", "model-picker-prev")
+            let is_current_doc = is_action_cmd(d13, "agent-model-picker-prev", "model-picker-prev")
                 && is_action_cmd(d14, "agent-model-picker-next", "model-picker-next")
-                && is_action_cmd(d15, "agent-model-picker-open", "model-picker-open")
+                && is_action_cmd(d15, "agent-search", "search")
                 && is_action_cmd(hold_action, "agent-search", "search");
 
             let is_legacy_doc = mi_model::preset::coding_agent_layer_needs_encoder_migration(
@@ -121,7 +121,7 @@ impl SavedSixLayerState {
                 first_lid,
             );
 
-            if !is_v090_doc && !is_legacy_doc {
+            if !is_current_doc && !is_legacy_doc {
                 continue;
             }
 
@@ -151,7 +151,12 @@ impl SavedSixLayerState {
                 && is_host_cmd(b15, "model-picker-confirm")
                 && is_host_cmd(b_hold, "model-picker-open");
 
-            if baked_pre_v080 || baked_v080 {
+            let baked_v090 = is_host_cmd(b13, "model-picker-prev")
+                && is_host_cmd(b14, "model-picker-next")
+                && is_host_cmd(b15, "model-picker-open")
+                && is_host_cmd(b_hold, "search");
+
+            if baked_pre_v080 || baked_v080 || baked_v090 {
                 let adapter = host.adapter.clone();
                 host.actions[13] = Some(ResolvedHostAction::AgentCommand {
                     adapter: adapter.clone(),
@@ -163,7 +168,7 @@ impl SavedSixLayerState {
                 });
                 host.actions[15] = Some(ResolvedHostAction::AgentCommand {
                     adapter: adapter.clone(),
-                    command: "model-picker-open".into(),
+                    command: "search".into(),
                 });
                 host.encoder_hold_action = Some(ResolvedHostAction::AgentCommand {
                     adapter,
@@ -2088,8 +2093,9 @@ fn execute_clicks_with_encoder_picker(
     ) -> mi_macos::HostActionReceipt,
 ) {
     use crate::encoder_model_picker::{
-        EncoderHoldTimerOutcome, EncoderModelPicker, EncoderOverlayKind, EncoderReleaseOutcome,
-        EncoderTurnOutcome, ModelPickerCommand, OverlayTransition, ENCODER_HOLD_THRESHOLD,
+        ConfirmExecutionDisposition, EncoderHoldTimerOutcome, EncoderModelPicker,
+        EncoderOverlayKind, EncoderReleaseOutcome, EncoderTurnOutcome, OverlayTransition,
+        ENCODER_HOLD_THRESHOLD,
     };
 
     let mut picker = EncoderModelPicker::new();
@@ -2439,43 +2445,66 @@ fn execute_clicks_with_encoder_picker(
                             }
                             continue;
                         }
-                        EncoderReleaseOutcome::ModelPickerConfirm { adapter } => {
+                        EncoderReleaseOutcome::ModelPickerConfirm { adapter, command } => {
                             let profile_id = active_picker_context
                                 .take()
                                 .map(|(_, p, _)| p)
                                 .or_else(|| layer_adapter.map(|(p, _)| p.to_owned()))
-                                .or(current_eff_profile);
+                                .or_else(|| current_eff_profile.clone());
+                            let Some(profile_id) = profile_id else {
+                                set_capture_state(
+                                    false,
+                                    &mut mouse_capture_enabled,
+                                    &mut set_mouse_capture,
+                                );
+                                continue;
+                            };
+                            let confirm_action = command.into_host_action(adapter);
+                            if !policy.admits(admission, &confirm_action) {
+                                set_capture_state(
+                                    false,
+                                    &mut mouse_capture_enabled,
+                                    &mut set_mouse_capture,
+                                );
+                                continue;
+                            }
+                            if let Err(error) = check_connection() {
+                                set_capture_state(
+                                    false,
+                                    &mut mouse_capture_enabled,
+                                    &mut set_mouse_capture,
+                                );
+                                receiver.invalidate(&error);
+                                return;
+                            }
+                            if stop.load(Ordering::Acquire) || receiver.failure().is_some() {
+                                set_capture_state(
+                                    false,
+                                    &mut mouse_capture_enabled,
+                                    &mut set_mouse_capture,
+                                );
+                                return;
+                            }
+                            let receipt =
+                                execute(&profile_id, "ENC_CLK", &confirm_action, admission);
                             set_capture_state(
                                 false,
                                 &mut mouse_capture_enabled,
                                 &mut set_mouse_capture,
                             );
-                            let Some(profile_id) = profile_id else {
+                            let disposition = picker.apply_confirm_execution_outcome(
+                                receipt.succeeded(),
+                                &receipt.detail,
+                            );
+                            if disposition != ConfirmExecutionDisposition::FallbackToShortPress {
+                                if receipts.try_send(receipt).is_err() {
+                                    receiver.invalidate("执行回执积压，输入已暂停");
+                                    return;
+                                }
                                 continue;
-                            };
-                            let confirm_action =
-                                ModelPickerCommand::ModelPickerConfirm.into_host_action(adapter);
-                            if !policy.admits(admission, &confirm_action) {
-                                continue;
                             }
-                            if let Err(error) = check_connection() {
-                                receiver.invalidate(&error);
-                                return;
-                            }
-                            if stop.load(Ordering::Acquire) || receiver.failure().is_some() {
-                                return;
-                            }
-                            let receipt =
-                                execute(&profile_id, "ENC_CLK", &confirm_action, admission);
-                            if receipts.try_send(receipt).is_err() {
-                                receiver.invalidate("执行回执积压，输入已暂停");
-                                return;
-                            }
-                            continue;
                         }
-                        EncoderReleaseOutcome::ShortPress => {
-                            // Fall through to normal slot 15 execution below!
-                        }
+                        EncoderReleaseOutcome::ShortPress => {}
                     }
                 }
                 _ => continue,
@@ -2672,7 +2701,7 @@ fn execute_clicks_with_encoder_picker(
             continue;
         }
         let receipt = execute(profile_id, binding, action, admission);
-        if receipt.outcome == "executed" {
+        if receipt.succeeded() {
             let resolved_adapter = match action {
                 ResolvedHostAction::AgentCommand { adapter, .. }
                     if matches!(adapter.as_str(), "host" | "active-agent") =>
@@ -5876,21 +5905,21 @@ mod tests {
                 (
                     ag_profile_id.clone(),
                     "ENC_CLK".into(),
-                    "antigravity:model-picker-open".into(),
+                    "antigravity:search".into(),
                 ),
                 (
                     ag_profile_id.clone(),
                     "AG14".into(),
-                    "antigravity:model-picker-next".into(),
+                    "antigravity:search-next".into(),
                 ),
                 (
                     ag_profile_id,
                     "ENC_CLK".into(),
-                    "antigravity:model-picker-confirm".into(),
+                    "antigravity:search-confirm".into(),
                 ),
             ]
         );
-        assert_eq!(capture_transitions, vec![true, false]);
+        assert!(!capture_transitions.contains(&true));
     }
 
     #[test]
@@ -5982,12 +6011,12 @@ mod tests {
                 (
                     ag_profile_id.clone(),
                     "AG14".into(),
-                    "antigravity:model-picker-next".into(),
+                    "antigravity:search-next".into(),
                 ),
                 (
                     ag_profile_id,
                     "ENC_CLK".into(),
-                    "antigravity:model-picker-confirm".into(),
+                    "antigravity:search-confirm".into(),
                 ),
             ]
         );
@@ -6019,14 +6048,10 @@ mod tests {
             received_at: at,
         };
 
-        // Sequence:
-        // 1) Short tap ENC_CLK -> opens model picker (capture true)
-        // 2) Long hold ENC_CLK (380ms) -> cancels picker (sends Esc), sends search, enters Search (capture false)
         let mut steps = std::collections::VecDeque::from([
-            Some(mk_ev(1, 15, false, base)),
-            Some(mk_ev(2, 15, true, base + Duration::from_millis(50))),
-            Some(mk_ev(3, 15, false, base + Duration::from_millis(100))),
-            Some(mk_ev(4, 15, true, base + Duration::from_millis(480))),
+            Some(mk_ev(1, 14, false, base)),
+            Some(mk_ev(2, 15, false, base + Duration::from_millis(100))),
+            Some(mk_ev(3, 15, true, base + Duration::from_millis(480))),
         ]);
 
         let mut capture_transitions = Vec::new();
@@ -6079,8 +6104,8 @@ mod tests {
             vec![
                 (
                     ag_profile_id.clone(),
-                    "ENC_CLK".into(),
-                    "antigravity:model-picker-open".into(),
+                    "AG14".into(),
+                    "antigravity:model-picker-next".into(),
                 ),
                 (
                     ag_profile_id.clone(),
@@ -6135,9 +6160,8 @@ mod tests {
             || {
                 step += 1;
                 match step {
-                    1 => Ok(Some(mk_ev(1, 15, false, base))),
-                    2 => Ok(Some(mk_ev(2, 15, true, base + Duration::from_millis(40)))),
-                    3 => {
+                    1 => Ok(Some(mk_ev(1, 14, false, base))),
+                    2 => {
                         routing.lock().unwrap().update(Some("com.apple.Safari"));
                         Ok(None)
                     }
@@ -6201,11 +6225,10 @@ mod tests {
 
         let now = Instant::now();
         let mut steps = std::collections::VecDeque::from([
-            Some(mk_ev(1, 15, false, now)),
-            Some(mk_ev(2, 15, true, now)),
-            Some(mk_ev(3, 15, false, now)),
+            Some(mk_ev(1, 14, false, now)),
+            Some(mk_ev(2, 15, false, now)),
             None,
-            Some(mk_ev(4, 15, true, now)),
+            Some(mk_ev(3, 15, true, now)),
         ]);
 
         let mut capture_transitions = Vec::new();
@@ -6269,8 +6292,8 @@ mod tests {
             vec![
                 (
                     ag_profile_id.clone(),
-                    "ENC_CLK".into(),
-                    "antigravity:model-picker-open".into(),
+                    "AG14".into(),
+                    "antigravity:model-picker-next".into(),
                 ),
                 (
                     ag_profile_id.clone(),
@@ -6390,7 +6413,154 @@ mod tests {
                 ),
             ]
         );
-        assert!(capture_transitions.is_empty() || capture_transitions.iter().all(|&c| !c));
+        assert_eq!(capture_transitions, vec![true, false]);
+    }
+
+    #[test]
+    fn six_layer_idle_turn_activates_model_picker_and_reopened_confirm_preserves_session() {
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let plan = test_plan();
+        let ag_profile_id = plan.hosts[0].profile_id.clone();
+
+        let base = Instant::now() - Duration::from_millis(200);
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, base - Duration::from_secs(1));
+        let routing = Mutex::new(RoutingContext::default());
+        let observed = AtomicU8::new(1);
+        let first = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(16);
+
+        let gen: String = receiver.generation().into();
+        let mk_ev = |seq: u64, control: u8, released: bool, at: Instant| mi_transport::Activation {
+            control,
+            layer_override: None,
+            released,
+            generation: gen.clone(),
+            received_sequence: seq,
+            received_at: at,
+        };
+
+        let mut steps = std::collections::VecDeque::from([
+            Some(mk_ev(1, 13, false, base)),
+            None,
+            Some(mk_ev(2, 15, false, base + Duration::from_millis(60))),
+            Some(mk_ev(3, 15, true, base + Duration::from_millis(100))),
+            Some(mk_ev(4, 14, false, base + Duration::from_millis(140))),
+            Some(mk_ev(5, 15, false, base + Duration::from_millis(180))),
+            Some(mk_ev(6, 15, true, base + Duration::from_millis(220))),
+            Some(mk_ev(7, 15, false, base + Duration::from_millis(260))),
+            Some(mk_ev(8, 14, false, base + Duration::from_millis(300))),
+            Some(mk_ev(9, 15, true, base + Duration::from_millis(340))),
+        ]);
+
+        let mut capture_transitions = Vec::new();
+        let mut dispatched = Vec::new();
+        let mut injected_flick = false;
+        let mut already_closed_first_confirm = true;
+
+        execute_clicks_with_encoder_picker(
+            &receiver,
+            &plan,
+            &stop,
+            &policy,
+            &observed,
+            &first,
+            &routing,
+            &tx,
+            None,
+            || match steps.pop_front() {
+                Some(Some(ev)) => Ok(Some(ev)),
+                Some(None) => Ok(None),
+                None => {
+                    stop.store(true, Ordering::Release);
+                    Ok(None)
+                }
+            },
+            || Ok(()),
+            |enabled| capture_transitions.push(enabled),
+            || {
+                if !injected_flick {
+                    injected_flick = true;
+                    vec![(34.0, 1.0)]
+                } else {
+                    Vec::new()
+                }
+            },
+            |profile, binding, action, _admission| {
+                let (cmd, detail) = match action {
+                    ResolvedHostAction::AgentCommand { adapter, command } => {
+                        let logged = format!("{adapter}:{command}");
+                        let receipt_detail =
+                            if command == "model-picker-confirm" && already_closed_first_confirm {
+                                already_closed_first_confirm = false;
+                                format!("{adapter}/model-picker-already-closed")
+                            } else {
+                                format!("{adapter}/{command}")
+                            };
+                        (logged, receipt_detail)
+                    }
+                    other => {
+                        let dbg = format!("{other:?}");
+                        (dbg.clone(), dbg)
+                    }
+                };
+                dispatched.push((profile.to_owned(), binding.to_owned(), cmd));
+                mi_macos::HostActionReceipt {
+                    action_type: "agent_command".into(),
+                    binding_id: binding.into(),
+                    detail,
+                    outcome: "executed".into(),
+                    profile_id: profile.into(),
+                    target: "antigravity".into(),
+                    text_byte_len: None,
+                    timestamp_ms: 1,
+                }
+            },
+        );
+
+        assert_eq!(
+            dispatched,
+            vec![
+                (
+                    ag_profile_id.clone(),
+                    "AG13".into(),
+                    "antigravity:model-picker-prev".into(),
+                ),
+                (
+                    ag_profile_id.clone(),
+                    "ENC_CLK".into(),
+                    "antigravity:model-picker-effort-right".into(),
+                ),
+                (
+                    ag_profile_id.clone(),
+                    "ENC_CLK".into(),
+                    "antigravity:model-picker-confirm".into(),
+                ),
+                (
+                    ag_profile_id.clone(),
+                    "ENC_CLK".into(),
+                    "antigravity:search".into(),
+                ),
+                (
+                    ag_profile_id.clone(),
+                    "AG14".into(),
+                    "antigravity:search-next".into(),
+                ),
+                (
+                    ag_profile_id.clone(),
+                    "ENC_CLK".into(),
+                    "antigravity:search-confirm".into(),
+                ),
+                (
+                    ag_profile_id,
+                    "AG14".into(),
+                    "antigravity:scroll-down-fast".into(),
+                ),
+            ]
+        );
+        assert_eq!(capture_transitions, vec![true, false]);
     }
 }
 

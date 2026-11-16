@@ -1,9 +1,10 @@
 use mi_macos::executor::{
     ClipboardSnapshot, DialScrollRequest, HostOsDriver, LiveHostActionExecutor, MouseButtonKind,
+    SimulatedHostActionExecutor,
 };
 use mi_macos::managed_controls::{
     blocked, ManagedAxControls, ManagedAxProvider, ManagedControl, ManagedWindow,
-    ManagedWindowIdentity, ObservedDictationState,
+    ManagedWindowIdentity, ModelPickerConfirmResult, ObservedDictationState,
 };
 use mi_model::host_router::ResolvedHostAction;
 use std::sync::{Arc, Barrier, Mutex};
@@ -58,6 +59,7 @@ impl Provider {
                         pressable: true,
                         editable: false,
                         focused: false,
+                        expanded: None,
                     },
                     ManagedControl {
                         id: 3,
@@ -67,6 +69,7 @@ impl Provider {
                         pressable: false,
                         editable: true,
                         focused: false,
+                        expanded: None,
                     },
                 ],
             },
@@ -113,6 +116,12 @@ impl ManagedAxProvider for Provider {
             .unwrap()
             .retained_targets
             .retain(|old| old != target);
+    }
+    fn activate_window(&mut self, target: &ManagedWindowIdentity) -> Result<(), String> {
+        let mut state = self.0.lock().unwrap();
+        assert_eq!(*target, state.window.identity);
+        state.events.push("activate_window".into());
+        Ok(())
     }
 
     fn process_has_exited(&self, pid: i32) -> bool {
@@ -211,6 +220,12 @@ impl ManagedAxProvider for Provider {
                 }
                 _ => {}
             }
+            if control_role == "AXPopUpButton"
+                && effect != PressEffect::NoChange
+                && control.expanded == Some(false)
+            {
+                control.expanded = Some(true);
+            }
             if control_role == "AXMenuItem" && effect != PressEffect::NoChange {
                 if control.label.contains("fast") {
                     control.label = "Enable standard mode".into();
@@ -235,6 +250,7 @@ impl ManagedAxProvider for Provider {
                 pressable: true,
                 editable: false,
                 focused: false,
+                expanded: None,
             });
             if state.include_fast_mode {
                 state.window.controls.push(ManagedControl {
@@ -245,6 +261,7 @@ impl ManagedAxProvider for Provider {
                     pressable: true,
                     editable: false,
                     focused: false,
+                    expanded: None,
                 });
             }
         }
@@ -298,6 +315,13 @@ impl ManagedAxProvider for Provider {
         assert_eq!(*target, state.window.identity);
         if let Some(error) = &state.window_key_error {
             return Err(error.clone());
+        }
+        if key_code == 0x35 || key_code == 0x24 {
+            for control in &mut state.window.controls {
+                if control.role == "AXPopUpButton" && control.expanded == Some(true) {
+                    control.expanded = Some(false);
+                }
+            }
         }
         if key_code == 0x35 {
             state.window.controls.retain(|c| c.role != "AXMenuItem");
@@ -839,6 +863,12 @@ impl HostOsDriver for Driver {
     }
     fn open_model_picker(&self, adapter: &str) -> Result<(), String> {
         self.controls.open_model_picker(adapter)
+    }
+    fn step_model_picker(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        self.controls.step_model_picker(adapter, key_code)
+    }
+    fn confirm_model_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
+        self.controls.confirm_model_picker(adapter)
     }
     fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
         self.controls.send_model_picker_key(adapter, key_code)
@@ -1564,6 +1594,7 @@ fn codex_reasoning_effort_opens_popover_sends_arrow_and_auto_dismisses() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         });
     let controls = provider.controls_with_delay(Duration::from_millis(60));
     controls
@@ -1597,6 +1628,7 @@ fn codex_reasoning_effort_repeat_turn_cancels_previous_auto_dismiss() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         });
     let controls = provider.controls_with_delay(Duration::from_millis(70));
     controls
@@ -1645,6 +1677,7 @@ fn codex_reasoning_effort_no_op_when_popover_already_closed() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         });
     let controls = provider.controls_with_delay(Duration::from_millis(60));
     controls
@@ -1689,6 +1722,7 @@ fn codex_reasoning_fails_closed_when_trigger_missing_or_ambiguous() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         });
     provider
         .0
@@ -1704,6 +1738,7 @@ fn codex_reasoning_fails_closed_when_trigger_missing_or_ambiguous() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         });
     let err = controls
         .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::IncreaseEffort)
@@ -1728,6 +1763,7 @@ fn codex_toggle_fast_mode_flips_label_and_schedules_auto_dismiss() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         });
     let controls = provider.controls_with_delay(Duration::from_millis(60));
     controls
@@ -1760,6 +1796,7 @@ fn codex_toggle_fast_mode_missing_item_closes_popover_and_fails() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         });
     let controls = provider.controls();
     let err = controls
@@ -1827,6 +1864,7 @@ fn codex_reasoning_prefers_explicit_effort_over_fallback_and_ignores_non_effort_
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         },
         ManagedControl {
             id: 11,
@@ -1836,6 +1874,7 @@ fn codex_reasoning_prefers_explicit_effort_over_fallback_and_ignores_non_effort_
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         },
         ManagedControl {
             id: 12,
@@ -1845,6 +1884,7 @@ fn codex_reasoning_prefers_explicit_effort_over_fallback_and_ignores_non_effort_
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         },
         ManagedControl {
             id: 13,
@@ -1854,6 +1894,7 @@ fn codex_reasoning_prefers_explicit_effort_over_fallback_and_ignores_non_effort_
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         },
     ]);
     let controls = provider.controls_with_delay(Duration::from_millis(60));
@@ -1880,6 +1921,7 @@ fn codex_reasoning_manually_opened_popover_does_not_schedule_auto_dismiss() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         },
         ManagedControl {
             id: 1002,
@@ -1889,6 +1931,7 @@ fn codex_reasoning_manually_opened_popover_does_not_schedule_auto_dismiss() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         },
     ]);
     let controls = provider.controls_with_delay(Duration::from_millis(60));
@@ -1925,6 +1968,7 @@ fn codex_toggle_fast_mode_unconfirmed_flip_fails_closed_and_closes_popover() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         });
     let controls = provider.controls();
     let err = controls
@@ -1953,6 +1997,7 @@ fn codex_fast_mode_requires_positive_readback_after_press() {
                 pressable: true,
                 editable: false,
                 focused: false,
+                expanded: None,
             }];
         }
         let error = provider
@@ -1969,12 +2014,32 @@ fn codex_fast_mode_requires_positive_readback_after_press() {
 
 #[test]
 fn model_picker_navigation_keys_deliver_direct_window_keys_without_refocusing_composer() {
-    for (bundle, adapter) in [
-        ("com.google.antigravity", "antigravity"),
-        ("com.openai.codex", "codex"),
-        ("com.deepseek.dsh", "dsh-desktop"),
+    for (bundle, adapter, trigger_label) in [
+        (
+            "com.google.antigravity",
+            "antigravity",
+            "Select model, current: Gemini 4 Carbon High",
+        ),
+        ("com.openai.codex", "codex", "GPT-5.4 Standard"),
+        ("com.deepseek.dsh", "dsh-desktop", "DeepSeek-R1"),
     ] {
         let provider = Provider::with_target(bundle, "Dictate");
+        provider
+            .0
+            .lock()
+            .unwrap()
+            .window
+            .controls
+            .push(ManagedControl {
+                id: 50,
+                role: "AXPopUpButton".into(),
+                label: trigger_label.into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(false),
+            });
         let executor = LiveHostActionExecutor::new(Driver {
             controls: provider.controls(),
             trusted: true,
@@ -2078,6 +2143,7 @@ fn model_picker_open_supports_antigravity_codex_and_dsh_with_ax_fallbacks() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         });
     }
     let codex_ax_executor = LiveHostActionExecutor::new(Driver {
@@ -2116,6 +2182,7 @@ fn model_picker_open_supports_antigravity_codex_and_dsh_with_ax_fallbacks() {
             pressable: true,
             editable: false,
             focused: false,
+            expanded: None,
         });
     let dsh_executor = LiveHostActionExecutor::new(Driver {
         controls: dsh_provider.controls(),
@@ -2243,4 +2310,407 @@ fn host_search_command_resolves_to_active_agent_and_posts_cmd_k() {
             key_down: true,
         } if modifiers == &["command".to_string()]
     )));
+}
+
+#[test]
+fn antigravity_direct_step_activates_window_presses_select_model_and_steps_without_focusing_composer(
+) {
+    let provider = Provider::with_target("com.google.antigravity", "Start dictation");
+    let trigger_label = "Select model, current: Gemini 4 Carbon High";
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 40,
+            role: "AXPopUpButton".into(),
+            label: trigger_label.into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+    let executor = LiveHostActionExecutor::new(Driver {
+        controls: provider.controls(),
+        trusted: true,
+    });
+
+    let first_turn = executor.execute(
+        "Local Antigravity",
+        "ENC_CW",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-next".into(),
+        },
+    );
+    assert_eq!(first_turn.outcome, "executed");
+    assert_eq!(first_turn.detail, "antigravity/model-picker-next");
+    assert_eq!(
+        provider.events(),
+        vec![
+            "capture:com.google.antigravity",
+            "activate_window",
+            &format!("press:{trigger_label}"),
+            "window_key:arrow_down",
+        ]
+    );
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[2].expanded,
+        Some(true)
+    );
+
+    let second_turn = executor.execute(
+        "Local Antigravity",
+        "ENC_CW",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-next".into(),
+        },
+    );
+    assert_eq!(second_turn.outcome, "executed");
+    assert_eq!(
+        provider.events(),
+        vec![
+            "capture:com.google.antigravity",
+            "activate_window",
+            &format!("press:{trigger_label}"),
+            "window_key:arrow_down",
+            "capture:com.google.antigravity",
+            "window_key:arrow_down",
+        ]
+    );
+
+    let idempotent_open = executor.execute(
+        "Local Antigravity",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-open".into(),
+        },
+    );
+    assert_eq!(idempotent_open.outcome, "executed");
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|ev| ev.starts_with("press:"))
+            .count(),
+        1
+    );
+    assert!(!provider.events().iter().any(|ev| ev.starts_with("focus:")));
+
+    {
+        let mut st = provider.0.lock().unwrap();
+        st.window.controls[2].expanded = Some(false);
+        st.effect = PressEffect::NoChange;
+    }
+    let unconfirmed_step = executor.execute(
+        "Local Antigravity",
+        "ENC_CW",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-next".into(),
+        },
+    );
+    assert_eq!(unconfirmed_step.outcome, "failed");
+    assert_eq!(
+        unconfirmed_step.detail,
+        "unconfirmed:model_picker_open_readback"
+    );
+}
+
+#[test]
+fn external_popup_dismissal_reopens_on_next_step_and_confirm_reopens_without_sending_return() {
+    let provider = Provider::with_target("com.google.antigravity", "Start dictation");
+    let trigger_label = "Select model, current: Gemini 4 Carbon High";
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 41,
+            role: "AXPopUpButton".into(),
+            label: trigger_label.into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+    let executor = LiveHostActionExecutor::new(Driver {
+        controls: provider.controls(),
+        trusted: true,
+    });
+
+    let open = executor.execute(
+        "Local Antigravity",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-open".into(),
+        },
+    );
+    assert_eq!(open.outcome, "executed");
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[2].expanded,
+        Some(true)
+    );
+
+    provider.0.lock().unwrap().window.controls[2].expanded = Some(false);
+    provider.0.lock().unwrap().events.clear();
+
+    let step_after_dismiss = executor.execute(
+        "Local Antigravity",
+        "ENC_CC",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-prev".into(),
+        },
+    );
+    assert_eq!(step_after_dismiss.outcome, "executed");
+    assert_eq!(
+        provider.events(),
+        vec![
+            "capture:com.google.antigravity",
+            "activate_window",
+            &format!("press:{trigger_label}"),
+            "window_key:arrow_up",
+        ]
+    );
+
+    provider.0.lock().unwrap().window.controls[2].expanded = Some(false);
+    provider.0.lock().unwrap().events.clear();
+
+    let confirm_when_closed = executor.execute(
+        "Local Antigravity",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "model-picker-confirm".into(),
+        },
+    );
+    assert_eq!(confirm_when_closed.outcome, "executed");
+    assert_eq!(
+        confirm_when_closed.detail,
+        "antigravity/model-picker-already-closed"
+    );
+    assert_eq!(provider.events(), vec!["capture:com.google.antigravity"]);
+    assert!(!provider.events().contains(&"window_key:return".to_string()));
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[2].expanded,
+        Some(false)
+    );
+
+    provider.0.lock().unwrap().window.controls[2].expanded = Some(true);
+    provider.0.lock().unwrap().events.clear();
+    let confirm_when_open = executor.execute(
+        "Local Antigravity",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-confirm".into(),
+        },
+    );
+    assert_eq!(confirm_when_open.outcome, "executed");
+    assert_eq!(confirm_when_open.detail, "antigravity/model-picker-confirm");
+    assert_eq!(
+        provider.events(),
+        vec!["capture:com.google.antigravity", "window_key:return"]
+    );
+
+    let codex_provider = Provider::codex();
+    codex_provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 42,
+            role: "AXPopUpButton".into(),
+            label: "GPT-5.4 Standard".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+    let codex_executor = LiveHostActionExecutor::new(Driver {
+        controls: codex_provider.controls(),
+        trusted: true,
+    });
+    let codex_closed = codex_executor.execute(
+        "Local Codex",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "model-picker-confirm".into(),
+        },
+    );
+    assert_eq!(codex_closed.outcome, "executed");
+    assert_eq!(codex_closed.detail, "codex/model-picker-already-closed");
+    assert_eq!(codex_provider.events(), vec!["capture:com.openai.codex"]);
+    assert!(!codex_provider
+        .events()
+        .contains(&"window_key:return".to_string()));
+}
+
+#[test]
+fn search_navigation_commands_send_direct_window_keys_without_pressing_model_picker() {
+    let provider = Provider::with_target("com.google.antigravity", "Start dictation");
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 45,
+            role: "AXPopUpButton".into(),
+            label: "Select model, current: Gemini 4 Carbon High".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+    let executor = LiveHostActionExecutor::new(Driver {
+        controls: provider.controls(),
+        trusted: true,
+    });
+    let simulated = SimulatedHostActionExecutor::new();
+
+    for (command, expected_key) in [
+        ("search-prev", "window_key:arrow_up"),
+        ("search-next", "window_key:arrow_down"),
+        ("search-confirm", "window_key:return"),
+    ] {
+        let action = ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: command.into(),
+        };
+        let sim_receipt = simulated.execute("Local Antigravity", "ENC_CW", &action);
+        assert_eq!(sim_receipt.outcome, "simulated");
+        assert_eq!(sim_receipt.detail, format!("antigravity/{command}"));
+
+        provider.0.lock().unwrap().events.clear();
+        let live_receipt = executor.execute("Local Antigravity", "ENC_CW", &action);
+        assert_eq!(live_receipt.outcome, "executed");
+        assert_eq!(live_receipt.detail, format!("antigravity/{command}"));
+        assert_eq!(
+            provider.events(),
+            vec!["capture:com.google.antigravity", expected_key]
+        );
+    }
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[2].expanded,
+        Some(false)
+    );
+}
+
+#[test]
+fn codex_modal_focusing_composer_reopens_on_confirm_while_unfocused_composer_steps_and_confirms() {
+    let provider = Provider::codex();
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 46,
+            role: "AXPopUpButton".into(),
+            label: "GPT-5.4 Standard".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+    let executor = LiveHostActionExecutor::new(Driver {
+        controls: provider.controls(),
+        trusted: true,
+    });
+
+    let open_receipt = executor.execute(
+        "Local Codex",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "model-picker-open".into(),
+        },
+    );
+    assert_eq!(open_receipt.outcome, "executed");
+    assert!(provider
+        .events()
+        .contains(&"window_key:control+shift:2e".to_string()));
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[2].expanded,
+        Some(false)
+    );
+
+    provider.0.lock().unwrap().events.clear();
+    let step_receipt = executor.execute(
+        "Local Codex",
+        "ENC_CW",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "model-picker-next".into(),
+        },
+    );
+    assert_eq!(step_receipt.outcome, "executed");
+    assert_eq!(
+        provider.events(),
+        vec!["capture:com.openai.codex", "window_key:arrow_down"]
+    );
+
+    provider.0.lock().unwrap().events.clear();
+    let confirm_receipt = executor.execute(
+        "Local Codex",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "model-picker-confirm".into(),
+        },
+    );
+    assert_eq!(confirm_receipt.outcome, "executed");
+    assert_eq!(confirm_receipt.detail, "codex/model-picker-confirm");
+    assert_eq!(
+        provider.events(),
+        vec!["capture:com.openai.codex", "window_key:return"]
+    );
+
+    let reopen_receipt = executor.execute(
+        "Local Codex",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "model-picker-open".into(),
+        },
+    );
+    assert_eq!(reopen_receipt.outcome, "executed");
+
+    {
+        let mut st = provider.0.lock().unwrap();
+        st.window.controls[1].focused = true;
+        st.events.clear();
+    }
+
+    let guarded_confirm = executor.execute(
+        "Local Codex",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "model-picker-confirm".into(),
+        },
+    );
+    assert_eq!(guarded_confirm.outcome, "executed");
+    assert_eq!(guarded_confirm.detail, "codex/model-picker-already-closed");
+    assert_eq!(provider.events(), vec!["capture:com.openai.codex"]);
+    assert!(!provider.events().contains(&"window_key:return".to_string()));
 }

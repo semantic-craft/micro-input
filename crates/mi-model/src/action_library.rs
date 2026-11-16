@@ -263,6 +263,9 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                         | "model-picker-effort-right"
                         | "model-picker-effort-left"
                         | "model-picker-cancel"
+                        | "search-prev"
+                        | "search-next"
+                        | "search-confirm"
                 ) =>
             {
                 prerequisites.push(
