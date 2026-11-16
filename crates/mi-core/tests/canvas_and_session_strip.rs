@@ -1274,3 +1274,12 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         JoystickControlMode::LogicalSectors
     );
 }
+
+#[test]
+fn concise_keycap_caption_aliases_built_in_browser_to_browser() {
+    assert_eq!(format_concise_keycap_caption("打开内置浏览器"), "浏览器");
+    assert_eq!(
+        format_concise_keycap_caption("Antigravity · 打开内置浏览器"),
+        "浏览器"
+    );
+}

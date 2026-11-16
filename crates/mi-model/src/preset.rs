@@ -1678,6 +1678,24 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
             replace_encoder_slots_with_model_picker(assignments);
         }
     }
+    if let Some((_, ag_assignments)) = specs.iter_mut().find(|(name, _)| *name == "Antigravity") {
+        legacy_specs.push(("Antigravity", ag_assignments.clone()));
+        for item in ag_assignments.iter_mut() {
+            if item.0 == 8 {
+                *item = (
+                    8,
+                    "desktop-browser",
+                    "打开内置浏览器",
+                    "Agent",
+                    "切换右侧内置浏览器与预览面板（Cmd+Shift+B 或原生控件）",
+                    ActionKind::AgentCommand {
+                        adapter: "antigravity".into(),
+                        command: "browser".into(),
+                    },
+                );
+            }
+        }
+    }
     for mut hybrid in [codex_pre_slots, codex_r25, codex_r26] {
         replace_encoder_slots_with_model_picker(&mut hybrid);
         legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, hybrid));
@@ -1897,6 +1915,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                                     .and_then(|b| b.action_id.clone())
                             };
                             let aid7 = slot_aid(&work.document, "logical-7");
+                            let aid8 = slot_aid(&work.document, "logical-8");
                             let aid10 = slot_aid(&work.document, "logical-10");
                             let aid11 = slot_aid(&work.document, "logical-11");
                             let aid12 = slot_aid(&work.document, "logical-12");
@@ -1922,6 +1941,30 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                                                 serde_json::to_value(ActionKind::AgentCommand {
                                                     adapter: "antigravity".into(),
                                                     command: "focus-input".into(),
+                                                })
+                                                .map_err(|e| e.to_string())?;
+                                        }
+                                    }
+                                }
+                                if let Some(id8) = &aid8 {
+                                    let should_update_8 = doc
+                                        .editable
+                                        .graph
+                                        .actions
+                                        .get(id8)
+                                        .is_some_and(is_unmodified_antigravity_terminal_slot8);
+                                    if should_update_8 {
+                                        if let Some(a8) = doc.editable.graph.actions.get_mut(id8) {
+                                            a8.id = "desktop-browser".into();
+                                            a8.name = "打开内置浏览器".into();
+                                            a8.category = "Agent".into();
+                                            a8.detail =
+                                                "切换右侧内置浏览器与预览面板（Cmd+Shift+B 或原生控件）"
+                                                    .into();
+                                            a8.payload =
+                                                serde_json::to_value(ActionKind::AgentCommand {
+                                                    adapter: "antigravity".into(),
+                                                    command: "browser".into(),
                                                 })
                                                 .map_err(|e| e.to_string())?;
                                         }
@@ -2264,6 +2307,12 @@ pub fn local_codex_profile_needs_starter_slot_migration(
             .any(|(_, assignments)| layer_matches_starter_assignments(doc, layer, assignments))
 }
 
+fn is_unmodified_antigravity_terminal_slot8(action: &crate::draft::Action) -> bool {
+    action.id == "desktop-terminal"
+        && action.name == "打开终端面板"
+        && action.payload.get("command").and_then(Value::as_str) == Some("terminal")
+}
+
 pub fn antigravity_layer_needs_starter_slot_migration(
     doc: &LocalDocumentV2,
     layer_id: &str,
@@ -2280,6 +2329,7 @@ pub fn antigravity_layer_needs_starter_slot_migration(
             .and_then(|id| doc.editable.graph.actions.get(id))
     };
     let a7 = slot_action("logical-7");
+    let a8 = slot_action("logical-8");
     let a10 = slot_action("logical-10");
     let a11 = slot_action("logical-11");
     let is_cmd =
@@ -2295,6 +2345,7 @@ pub fn antigravity_layer_needs_starter_slot_migration(
     let legacy_2u_dictation = is_cmd(a10, "desktop-dictation", &["push-to-talk", "dictation"])
         && is_cmd(a11, "desktop-dictation-r", &["push-to-talk", "dictation"]);
     let previous_starter_slots = is_cmd(a7, "desktop-browser", &["browser"])
+        || a8.is_some_and(is_unmodified_antigravity_terminal_slot8)
         || (is_cmd(a10, "desktop-input", &["focus-input"])
             && is_cmd(a11, "desktop-dictation", &["push-to-talk", "dictation"]));
     legacy_2u_dictation || previous_starter_slots
@@ -2823,5 +2874,192 @@ mod agent_migration_tests {
             draft.document.editable.graph.layers[&herdr_lid] == herdr_before,
             "User-customized Herdr profile (with joystick prompt) must remain untouched"
         );
+    }
+
+    #[test]
+    fn antigravity_slot8_terminal_migrates_to_browser_losslessly_and_idempotently() {
+        for customize_other_slot in [false, true] {
+            let mut d = Draft::default();
+            let ids = install_agent_starter_profiles(&mut d).unwrap();
+            let ag_pid = ids
+                .iter()
+                .find(|pid| d.document.editable.graph.profiles[*pid].name == "Antigravity")
+                .unwrap()
+                .clone();
+            let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+
+            d.assign(
+                &json!(ag_pid),
+                &json!(ag_lid),
+                8,
+                crate::draft::Action {
+                    id: "desktop-terminal".into(),
+                    name: "打开终端面板".into(),
+                    category: "Agent".into(),
+                    detail: "切换底部终端面板（Cmd+J 或原生控件）".into(),
+                    payload: json!({"type":"agent_command","adapter":"antigravity","command":"terminal"}),
+                },
+            )
+            .unwrap();
+            if customize_other_slot {
+                d.assign(
+                    &json!(ag_pid),
+                    &json!(ag_lid),
+                    9,
+                    crate::draft::Action {
+                        id: "custom-slot-9".into(),
+                        name: "自定义键".into(),
+                        category: "文本".into(),
+                        detail: "保留".into(),
+                        payload: json!({"type":"text","text":"keep-slot-9"}),
+                    },
+                )
+                .unwrap();
+                assert!(antigravity_layer_needs_starter_slot_migration(
+                    &d.document,
+                    &ag_lid
+                ));
+            }
+
+            let before_editable = d.document.editable.clone();
+            let rev_before = d.revision;
+            let upgraded_ids = install_agent_starter_profiles(&mut d).unwrap();
+            assert_eq!(upgraded_ids, ids);
+            assert_eq!(
+                d.document.editable.graph.profiles[&ag_pid].layer_order,
+                vec![ag_lid.clone()]
+            );
+            assert_eq!(d.revision, rev_before + 1);
+            assert!(!antigravity_layer_needs_starter_slot_migration(
+                &d.document,
+                &ag_lid
+            ));
+
+            let layer = &d.document.editable.graph.layers[&ag_lid];
+            let aid8 = layer
+                .controls
+                .values()
+                .find(|b| b.logical_control == "logical-8")
+                .and_then(|b| b.action_id.as_ref())
+                .unwrap();
+            let a8 = &d.document.editable.graph.actions[aid8];
+            assert_eq!(a8.id, "desktop-browser");
+            assert_eq!(a8.name, "打开内置浏览器");
+            assert_eq!(a8.category, "Agent");
+            assert_eq!(
+                a8.detail,
+                "切换右侧内置浏览器与预览面板（Cmd+Shift+B 或原生控件）"
+            );
+            assert_eq!(a8.payload["adapter"], "antigravity");
+            assert_eq!(a8.payload["command"], "browser");
+
+            if customize_other_slot {
+                let aid9 = layer
+                    .controls
+                    .values()
+                    .find(|b| b.logical_control == "logical-9")
+                    .and_then(|b| b.action_id.as_ref())
+                    .unwrap();
+                assert_eq!(d.document.editable.graph.actions[aid9].id, "custom-slot-9");
+            }
+
+            let after_editable = serde_json::to_value(&d.document.editable).unwrap();
+            let rev_after = d.revision;
+            install_agent_starter_profiles(&mut d).unwrap();
+            assert_eq!(d.revision, rev_after);
+            assert_eq!(
+                serde_json::to_value(&d.document.editable).unwrap(),
+                after_editable
+            );
+
+            d.undo(false).unwrap();
+            assert_eq!(
+                serde_json::to_value(&d.document.editable).unwrap(),
+                serde_json::to_value(&before_editable).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_customized_slot8_is_preserved_untouched() {
+        let mut d = Draft::default();
+        let ids = install_agent_starter_profiles(&mut d).unwrap();
+        let ag_pid = ids
+            .iter()
+            .find(|pid| d.document.editable.graph.profiles[*pid].name == "Antigravity")
+            .unwrap()
+            .clone();
+        let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+
+        // Renamed terminal slot 8 must not trigger slot-8 migration.
+        d.assign(
+            &json!(ag_pid),
+            &json!(ag_lid),
+            8,
+            crate::draft::Action {
+                id: "desktop-terminal".into(),
+                name: "我的终端".into(),
+                category: "Agent".into(),
+                detail: "保留重命名".into(),
+                payload: json!({"type":"agent_command","adapter":"antigravity","command":"terminal"}),
+            },
+        )
+        .unwrap();
+        assert!(!antigravity_layer_needs_starter_slot_migration(
+            &d.document,
+            &ag_lid
+        ));
+        let before = serde_json::to_value(&d.document.editable).unwrap();
+        install_agent_starter_profiles(&mut d).unwrap();
+        assert_eq!(serde_json::to_value(&d.document.editable).unwrap(), before);
+
+        // Rebound slot 8 remains untouched even when another legacy starter slot migrates.
+        d.assign(
+            &json!(ag_pid),
+            &json!(ag_lid),
+            7,
+            crate::draft::Action {
+                id: "desktop-browser".into(),
+                name: "打开内置浏览器".into(),
+                category: "Agent".into(),
+                detail: "旧槽位 7".into(),
+                payload: json!({"type":"agent_command","adapter":"antigravity","command":"browser"}),
+            },
+        )
+        .unwrap();
+        d.assign(
+            &json!(ag_pid),
+            &json!(ag_lid),
+            8,
+            crate::draft::Action {
+                id: "user-rebound-8".into(),
+                name: "自定义槽位 8".into(),
+                category: "文本".into(),
+                detail: "保留".into(),
+                payload: json!({"type":"text","text":"custom-8"}),
+            },
+        )
+        .unwrap();
+        assert!(antigravity_layer_needs_starter_slot_migration(
+            &d.document,
+            &ag_lid
+        ));
+        install_agent_starter_profiles(&mut d).unwrap();
+        let layer = &d.document.editable.graph.layers[&ag_lid];
+        let aid7 = layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == "logical-7")
+            .and_then(|b| b.action_id.as_ref())
+            .unwrap();
+        let aid8 = layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == "logical-8")
+            .and_then(|b| b.action_id.as_ref())
+            .unwrap();
+        assert_eq!(d.document.editable.graph.actions[aid7].id, "desktop-input");
+        assert_eq!(d.document.editable.graph.actions[aid8].id, "user-rebound-8");
+        assert_eq!(d.document.editable.graph.actions[aid8].name, "自定义槽位 8");
     }
 }
