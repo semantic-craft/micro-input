@@ -909,17 +909,27 @@ pub fn concise_keycap_caption_en(raw_label: &str) -> String {
     if trimmed.is_empty() || trimmed == "未绑定" || trimmed == "Unbound" {
         return "Unbound".to_string();
     }
-    let localized = mi_model::i18n::en_lookup(trimmed).unwrap_or(trimmed);
+    let localized = mi_model::i18n::localize_action_label(trimmed, mi_model::ResolvedLocale::En);
     let base = localized
         .split_once(" (")
         .map(|(l, _)| l.trim())
-        .unwrap_or(localized);
-    let segment = base
-        .split(" · ")
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(base);
+        .unwrap_or(localized.as_str());
+    if base == "Built-in Browser · Layout" {
+        return "Browser".to_string();
+    }
+    let segment = if let Some((left, right)) = base.split_once(" · ") {
+        let left_trim = left.trim();
+        let right_trim = right.trim();
+        if left_trim.starts_with("Session ") || left_trim.starts_with("Slot ") {
+            left_trim
+        } else if !right_trim.is_empty() {
+            right_trim
+        } else {
+            left_trim
+        }
+    } else {
+        base
+    };
     match segment {
         "Scroll Chat Up" => return "Scroll Up".to_string(),
         "Scroll Chat Down" => return "Scroll Dn".to_string(),
@@ -960,7 +970,9 @@ pub fn concise_keycap_caption_en(raw_label: &str) -> String {
         "Mouse Wheel Left" => return "Wheel Left".to_string(),
         "Mouse Wheel Right" => return "Wheel Rgt".to_string(),
         "Cycle Mouse Speed" | "Cycle Pointer Speed" => return "Ptr Speed".to_string(),
-        "Built-in Browser" | "Open Built-in Browser" => return "Browser".to_string(),
+        "Built-in Browser" | "Open Built-in Browser" | "Open Browser" => {
+            return "Browser".to_string()
+        }
         "Toggle Sidebar" => return "Sidebar".to_string(),
         "Command Palette" => return "Palette".to_string(),
         "Switch Workspace" | "Project Workspace Switcher" => return "Workspace".to_string(),

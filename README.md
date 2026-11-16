@@ -166,7 +166,7 @@ Micro Input handles daily macOS key configuration and official firmware updates 
 
 #### Dedicated Physical Workflows for Antigravity
 
-- **Antigravity keymap ready out of the box.** Starter controls cover focusing `com.google.antigravity`, composer input focus, new conversations, project picker, workspace quick-switch, model picker, Gemini Live voice toggle, built-in browser, terminal panel, split right, hold-to-talk, and submit after confirmed dictation stop.
+- **Antigravity keymap ready out of the box.** Starter controls cover focusing `com.google.antigravity`, composer input focus, new conversations, project picker, workspace quick-switch, model picker, Gemini Live voice toggle, built-in browser, split right, hold-to-talk, and submit after confirmed dictation stop.
 - **Hardware keycaps track real unread watermarks.** Top slots track primary conversations after subagent filtering, retain ocean-blue unread indicators past 15 minutes, clear automatically once viewed frontmost at `/c/<cid>`, and switch sessions directly through sidebar links.
 - **Voice and model controls tuned to hardware cadence.** Rotating the encoder directly opens Antigravity's model picker in place without stealing composer focus and adjusts reasoning effort, pressing or holding the encoder searches conversations, and bottom `AG10` and `AG11` switches merge into a debounced 2U wide dictation key or split back into dual 1U keys for new conversation and hold-to-talk.
 - **Responsive, zero-patch Accessibility execution.** Integrates cleanly through macOS Accessibility and observable endpoints without patching the target app, reducing Antigravity 2.31.0 release composer focus median time to 284.3 ms.
