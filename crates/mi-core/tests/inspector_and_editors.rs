@@ -1002,3 +1002,22 @@ fn joystick_dual_mode_inspector_projects_summary_and_preserves_dormant_slots() {
         "dormant joystick sector assignment must survive mode roundtrip"
     );
 }
+
+#[test]
+fn desktop_browser_infers_nav_keycap_for_slot_8() {
+    let browser = mi_model::draft::Action {
+        id: "desktop-browser".into(),
+        name: "打开内置浏览器".into(),
+        category: "Agent".into(),
+        detail: "切换右侧内置浏览器与预览面板（Cmd+Shift+B 或原生控件）".into(),
+        payload: json!({
+            "type": "agent_command",
+            "adapter": "antigravity",
+            "command": "browser"
+        }),
+    };
+    assert_eq!(
+        CodexKeycapId::infer_for_slot(8, Some(&browser)),
+        CodexKeycapId::Nav
+    );
+}

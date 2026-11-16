@@ -645,7 +645,7 @@ impl CodexKeycapId {
             if a.id.contains("project") {
                 return Self::Folder;
             }
-            if a.id.contains("search") {
+            if a.id.contains("search") || a.id.contains("browser") || cmd == Some("browser") {
                 return Self::Nav;
             }
             if a.id.contains("save") {

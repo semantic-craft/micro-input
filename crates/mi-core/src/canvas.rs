@@ -539,6 +539,7 @@ pub(crate) fn concise_dial_caption_alias(label: &str) -> Option<&'static str> {
         "切换 Fast 模式" => Some("Fast"),
         "在项目中新建会话" => Some("项目新建"),
         "新建标签页" => Some("新标签页"),
+        "打开内置浏览器" => Some("浏览器"),
         "Gemini Live 实时语音" | "Live 实时语音" => Some("实时语音"),
         "鼠标指针上移" => Some("指针上移"),
         "鼠标指针下移" => Some("指针下移"),

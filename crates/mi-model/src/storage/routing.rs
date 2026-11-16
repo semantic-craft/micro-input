@@ -468,7 +468,7 @@ mod tests {
                 assert_eq!(by_id("AG05")["label"], "项目工作区快切 (command+shift K)");
                 assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
                 assert_eq!(by_id("AG07")["label"], "聚焦输入框");
-                assert_eq!(by_id("AG08")["label"], "打开终端面板");
+                assert_eq!(by_id("AG08")["label"], "打开内置浏览器");
                 assert_eq!(by_id("AG09")["label"], "快速向右分栏");
                 assert_eq!(by_id("AG10")["label"], "在项目中新建会话");
                 assert_eq!(by_id("AG11")["label"], "按住说话");

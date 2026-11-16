@@ -224,7 +224,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         ("AG04", "model"),
         ("AG06", "live-voice"),
         ("AG07", "focus-input"),
-        ("AG08", "terminal"),
+        ("AG08", "browser"),
         ("AG09", "split-right"),
         ("AG10", "push-to-talk"),
         ("AG11", "push-to-talk"),
