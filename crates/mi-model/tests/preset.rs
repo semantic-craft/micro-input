@@ -889,6 +889,100 @@ fn antigravity_legacy_bottom_row_dictation_upgrades_to_focus_input_and_push_to_t
 }
 
 #[test]
+fn antigravity_slot_9_unmodified_split_right_migrates_to_side_question_and_is_idempotent() {
+    let mut d = Draft::default();
+    let ids = preset::install_agent_starter_profiles(&mut d).unwrap();
+    let ag_pid = ids
+        .iter()
+        .find(|pid| d.document.editable.graph.profiles[*pid].name == "Antigravity")
+        .unwrap()
+        .clone();
+    let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        9,
+        mi_model::draft::Action {
+            id: "desktop-split".into(),
+            name: "快速向右分栏".into(),
+            category: "Agent".into(),
+            detail: "将当前会话向右分栏（Cmd+D）".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"split-right"}),
+        },
+    )
+    .unwrap();
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        0,
+        mi_model::draft::Action {
+            id: "custom-slot-0".into(),
+            name: "自定义槽位0".into(),
+            category: "自定义".into(),
+            detail: "保持不变".into(),
+            payload: json!({"type":"text","text":"custom-0"}),
+        },
+    )
+    .unwrap();
+
+    assert!(preset::antigravity_layer_needs_starter_slot_migration(
+        &d.document,
+        &ag_lid
+    ));
+
+    preset::install_agent_starter_profiles(&mut d).unwrap();
+
+    assert!(!preset::antigravity_layer_needs_starter_slot_migration(
+        &d.document,
+        &ag_lid
+    ));
+
+    let action_for = |draft: &Draft, slot: &str| {
+        let layer = &draft.document.editable.graph.layers[&ag_lid];
+        let aid = layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == slot)
+            .and_then(|b| b.action_id.as_ref())
+            .unwrap();
+        draft.document.editable.graph.actions[aid].clone()
+    };
+
+    let a9 = action_for(&d, "logical-9");
+    assert_eq!(a9.id, "desktop-side-question");
+    assert_eq!(a9.name, "打开 Side Question");
+    assert_eq!(a9.payload["command"], "side-question");
+
+    let a0 = action_for(&d, "logical-0");
+    assert_eq!(a0.id, "custom-slot-0");
+
+    preset::install_agent_starter_profiles(&mut d).unwrap();
+    let a9_again = action_for(&d, "logical-9");
+    assert_eq!(a9_again.id, "desktop-side-question");
+    assert_eq!(a9_again.name, "打开 Side Question");
+    let a0_again = action_for(&d, "logical-0");
+    assert_eq!(a0_again.id, "custom-slot-0");
+
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        9,
+        mi_model::draft::Action {
+            id: "user-assigned-slot-9".into(),
+            name: "用户按键9".into(),
+            category: "自定义".into(),
+            detail: "用户自定义".into(),
+            payload: json!({"type":"text","text":"custom-9"}),
+        },
+    )
+    .unwrap();
+    preset::install_agent_starter_profiles(&mut d).unwrap();
+    let a9_custom = action_for(&d, "logical-9");
+    assert_eq!(a9_custom.id, "user-assigned-slot-9");
+}
+
+#[test]
 fn coding_agent_legacy_encoder_upgrades_losslessly_and_preserves_custom_encoder_bindings() {
     let mut d = Draft::default();
     let ids = preset::install_agent_starter_profiles(&mut d).unwrap();

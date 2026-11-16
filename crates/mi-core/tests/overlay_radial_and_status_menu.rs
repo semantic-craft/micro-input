@@ -768,6 +768,7 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
         "跳到底部"
     );
     assert_eq!(format_popover_cheat_label("滚动到对话底部"), "跳到底部");
+    assert_eq!(format_popover_cheat_label("打开 Side Question"), "Side Q");
 
     let dir = tempdir().expect("tempdir");
     let mut cfg = WorkbenchStoreConfig::isolated(dir.path());

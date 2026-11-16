@@ -1,12 +1,12 @@
 use mi_bridge::FourAppAgentPhase;
 use mi_core::{
-    format_concise_keycap_caption, AmbientColorPreset, BottomRowLayout, CanonicalAgent,
-    CanvasAction, ControlSurfaceId, FourAppLiveCandidate, FourAppSessionKind, JoystickDirection8,
-    KnobJoystickPreset, LightingBrightnessPreset, LightingTimeoutPreset, SessionStripAction,
-    WorkbenchError, WorkbenchStore, CANVAS_HEIGHT, CANVAS_PADDING, CANVAS_WIDTH, KEY_1U_SIZE,
-    KEY_2U_WIDTH, KEY_GAP,
+    format_concise_keycap_caption, format_concise_keycap_caption_localized, AmbientColorPreset,
+    BottomRowLayout, CanonicalAgent, CanvasAction, ControlSurfaceId, FourAppLiveCandidate,
+    FourAppSessionKind, JoystickDirection8, KnobJoystickPreset, LightingBrightnessPreset,
+    LightingTimeoutPreset, SessionStripAction, WorkbenchError, WorkbenchStore, CANVAS_HEIGHT,
+    CANVAS_PADDING, CANVAS_WIDTH, KEY_1U_SIZE, KEY_2U_WIDTH, KEY_GAP,
 };
-use mi_model::{navigation_history::NavigationPlace, slot_table::SlotMode};
+use mi_model::{navigation_history::NavigationPlace, slot_table::SlotMode, ResolvedLocale};
 use tempfile::TempDir;
 
 #[test]
@@ -268,6 +268,18 @@ fn bottom_row_2u_wide_key_merge_split_and_silkscreen_icon_label_toggles() {
     );
     assert_eq!(format_concise_keycap_caption("新建标签页"), "新标签页");
     assert_eq!(format_concise_keycap_caption("内置浏览器 · 布局"), "浏览器");
+    assert_eq!(
+        format_concise_keycap_caption("打开 Side Question"),
+        "Side Q"
+    );
+    assert_eq!(
+        format_concise_keycap_caption_localized("打开 Side Question", ResolvedLocale::En),
+        "Side Q"
+    );
+    assert_eq!(
+        format_concise_keycap_caption_localized("Open Side Question", ResolvedLocale::En),
+        "Side Q"
+    );
 }
 
 #[test]

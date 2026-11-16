@@ -33,6 +33,8 @@ struct Fixture {
     retained_targets: Vec<ManagedWindowIdentity>,
     after_capture: Option<fn(&mut Fixture)>,
     after_focus: Option<fn(&mut Fixture)>,
+    after_press: Option<fn(&mut Fixture, &str, u64)>,
+    side_panel_delay_reads: Option<usize>,
     finish_reads_remaining: Option<usize>,
     include_fast_mode: bool,
     window_key_error: Option<String>,
@@ -84,6 +86,8 @@ impl Provider {
             retained_targets: Vec::new(),
             after_capture: None,
             after_focus: None,
+            after_press: None,
+            side_panel_delay_reads: None,
             finish_reads_remaining: None,
             include_fast_mode: true,
             window_key_error: None,
@@ -123,7 +127,6 @@ impl ManagedAxProvider for Provider {
         state.events.push("activate_window".into());
         Ok(())
     }
-
     fn process_has_exited(&self, pid: i32) -> bool {
         self.0.lock().unwrap().exited_pids.contains(&pid)
     }
@@ -162,6 +165,30 @@ impl ManagedAxProvider for Provider {
                 } else {
                     *remaining -= 1;
                 }
+            }
+        }
+        if let Some(remaining) = state.side_panel_delay_reads.as_mut() {
+            if *remaining > 0 {
+                *remaining -= 1;
+            } else if state
+                .window
+                .controls
+                .iter()
+                .any(|c| c.id == 10 && c.expanded == Some(false))
+            {
+                if let Some(btn) = state.window.controls.iter_mut().find(|c| c.id == 10) {
+                    btn.expanded = Some(true);
+                }
+                state.window.controls.push(ManagedControl {
+                    id: 20,
+                    role: "AXButton".into(),
+                    label: "Side Question".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
             }
         }
         if state.enforce_target_cache
@@ -266,6 +293,9 @@ impl ManagedAxProvider for Provider {
             }
         }
         state.events.push(format!("press:{old_label}"));
+        if let Some(hook) = state.after_press {
+            hook(&mut state, &old_label, control_id);
+        }
         Ok(())
     }
     fn focus(&mut self, target: &ManagedWindowIdentity, id: u64) -> Result<(), String> {
@@ -2713,4 +2743,448 @@ fn codex_modal_focusing_composer_reopens_on_confirm_while_unfocused_composer_ste
     assert_eq!(guarded_confirm.detail, "codex/model-picker-already-closed");
     assert_eq!(provider.events(), vec!["capture:com.openai.codex"]);
     assert!(!provider.events().contains(&"window_key:return".to_string()));
+}
+
+#[test]
+fn side_question_flow_opens_closed_side_panel_then_clicks_side_question_and_focuses_input() {
+    let provider = Provider::with_target("com.google.antigravity", "开始听写");
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![ManagedControl {
+            id: 10,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        }];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                if let Some(btn) = fixture.window.controls.iter_mut().find(|c| c.id == 10) {
+                    btn.expanded = Some(true);
+                }
+                fixture.window.controls.push(ManagedControl {
+                    id: 20,
+                    role: "AXButton".into(),
+                    label: "Side Question".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "Side Question" {
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXButton".into(),
+                    label: "New Side Question".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+                fixture.window.controls.push(ManagedControl {
+                    id: 31,
+                    role: "AXTextArea".into(),
+                    label: "Side Question Input".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+
+    let controls = provider.controls();
+    controls.open_side_question("antigravity").unwrap();
+
+    let events = provider.events();
+    assert!(events.contains(&"activate_window".to_string()));
+    assert!(events.contains(&"press:Toggle Side Panel".to_string()));
+    assert!(events.contains(&"press:Side Question".to_string()));
+    assert!(events.contains(&"focus:31".to_string()));
+}
+
+#[test]
+fn side_question_flow_clicks_new_tab_in_open_side_panel_then_clicks_side_question_and_focuses() {
+    let provider = Provider::with_target("com.google.antigravity", "开始听写");
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 11,
+                role: "AXButton".into(),
+                label: "New tab".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "New tab" {
+                fixture.window.controls.push(ManagedControl {
+                    id: 20,
+                    role: "AXButton".into(),
+                    label: "Side Question".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "Side Question" {
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXButton".into(),
+                    label: "New Side Question".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+                fixture.window.controls.push(ManagedControl {
+                    id: 31,
+                    role: "AXTextArea".into(),
+                    label: "Side Question Input".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+
+    let controls = provider.controls();
+    controls.open_side_question("antigravity").unwrap();
+
+    let events = provider.events();
+    assert!(events.contains(&"activate_window".to_string()));
+    assert!(events.contains(&"press:New tab".to_string()));
+    assert!(events.contains(&"press:Side Question".to_string()));
+    assert!(events.contains(&"focus:31".to_string()));
+}
+
+#[test]
+fn side_question_returns_blocked_when_side_question_button_disabled_with_zero_press() {
+    let provider = Provider::with_target("com.google.antigravity", "开始听写");
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 20,
+                role: "AXButton".into(),
+                label: "Side Question".into(),
+                enabled: false,
+                pressable: false,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+    }
+
+    let controls = provider.controls();
+    let err = controls.open_side_question("antigravity").unwrap_err();
+    assert_eq!(err, "blocked:side_question_unavailable");
+
+    let events = provider.events();
+    assert!(!events.iter().any(|ev| ev.starts_with("press:")));
+}
+
+#[test]
+fn side_question_already_open_focuses_composer_directly() {
+    let provider = Provider::with_target("com.google.antigravity", "开始听写");
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 30,
+                role: "AXButton".into(),
+                label: "New Side Question".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 31,
+                role: "AXTextArea".into(),
+                label: "Side Question Input".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: false,
+                expanded: None,
+            },
+        ];
+    }
+
+    let controls = provider.controls();
+    controls.open_side_question("antigravity").unwrap();
+
+    let events = provider.events();
+    assert!(!events.iter().any(|ev| ev.starts_with("press:")));
+    assert!(events.contains(&"focus:31".to_string()));
+}
+
+#[test]
+fn side_question_flow_presses_toggle_side_panel_only_once_during_delayed_expansion() {
+    let provider = Provider::with_target("com.google.antigravity", "开始听写");
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![ManagedControl {
+            id: 10,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        }];
+        state.side_panel_delay_reads = Some(2);
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Side Question" {
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXButton".into(),
+                    label: "New Side Question".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+                fixture.window.controls.push(ManagedControl {
+                    id: 31,
+                    role: "AXTextArea".into(),
+                    label: "Side Question Input".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+
+    let controls = provider.controls();
+    controls.open_side_question("antigravity").unwrap();
+
+    let events = provider.events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|ev| *ev == "press:Toggle Side Panel")
+            .count(),
+        1,
+        "Toggle Side Panel must be pressed exactly once during delayed expansion"
+    );
+    assert!(events.contains(&"press:Side Question".to_string()));
+    assert!(events.contains(&"focus:31".to_string()));
+}
+
+#[test]
+fn side_question_already_open_without_new_side_question_button_focuses_directly_with_zero_press() {
+    let provider = Provider::with_target("com.google.antigravity", "开始听写");
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 31,
+                role: "AXTextArea".into(),
+                label: "Side Question Input".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: false,
+                expanded: None,
+            },
+        ];
+    }
+
+    let controls = provider.controls();
+    controls.open_side_question("antigravity").unwrap();
+
+    let events = provider.events();
+    assert!(!events.iter().any(|ev| ev.starts_with("press:")));
+    assert!(events.contains(&"focus:31".to_string()));
+}
+
+#[test]
+fn side_question_collapsed_toggle_side_panel_precedes_unrelated_new_tab_button() {
+    let provider = Provider::with_target("com.google.antigravity", "开始听写");
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(false),
+            },
+            ManagedControl {
+                id: 11,
+                role: "AXButton".into(),
+                label: "New tab".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                if let Some(btn) = fixture.window.controls.iter_mut().find(|c| c.id == 10) {
+                    btn.expanded = Some(true);
+                }
+                fixture.window.controls.push(ManagedControl {
+                    id: 20,
+                    role: "AXButton".into(),
+                    label: "Side Question".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "Side Question" {
+                fixture.window.controls.push(ManagedControl {
+                    id: 31,
+                    role: "AXTextArea".into(),
+                    label: "Side Question Input".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+
+    let controls = provider.controls();
+    controls.open_side_question("antigravity").unwrap();
+
+    let events = provider.events();
+    assert!(events.contains(&"press:Toggle Side Panel".to_string()));
+    assert!(!events.contains(&"press:New tab".to_string()));
+    assert!(events.contains(&"press:Side Question".to_string()));
+    assert!(events.contains(&"focus:31".to_string()));
+}
+
+#[test]
+fn side_question_pre_press_read_error_preserves_blocked_prefix() {
+    let provider = Provider::with_target("com.google.antigravity", "开始听写");
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.after_capture = Some(|fixture| {
+            fixture.read_pid = Some(999);
+        });
+    }
+
+    let controls = provider.controls();
+    let err = controls.open_side_question("antigravity").unwrap_err();
+    assert!(
+        err.starts_with("blocked:"),
+        "pre-press read failure must stay blocked:*, got {err}"
+    );
+}
+
+#[test]
+fn focus_input_with_primary_and_unfocused_side_question_input_focuses_primary() {
+    let provider = Provider::with_target("com.google.antigravity", "开始听写");
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.window.controls = vec![
+            ManagedControl {
+                id: 3,
+                role: "AXTextArea".into(),
+                label: String::new(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: false,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 31,
+                role: "AXTextArea".into(),
+                label: "Side Question Input".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: false,
+                expanded: None,
+            },
+        ];
+    }
+
+    let controls = provider.controls();
+    controls.focus_input("antigravity").unwrap();
+
+    let events = provider.events();
+    assert!(events.contains(&"focus:3".to_string()));
+    assert!(!events.contains(&"focus:31".to_string()));
 }

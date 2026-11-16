@@ -56,6 +56,9 @@ pub trait ManagedAxProvider: Send {
         false
     }
     fn capture(&mut self, bundle_id: &str) -> Result<ManagedWindow, String>;
+    fn capture_full_window(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
+        self.capture(bundle_id)
+    }
     fn capture_for_scroll(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
         self.capture(bundle_id)
     }
@@ -899,6 +902,180 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         focus_in_window(&mut *provider, &window.identity, self.readback_timeout).map(|_| ())
     }
 
+    pub fn open_side_question(&self, adapter: &str) -> Result<(), String> {
+        if managed_adapter(adapter)? != DictationAdapter::Antigravity {
+            return Err(blocked("unsupported_side_question_adapter"));
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = provider.capture_full_window("com.google.antigravity")?;
+        provider.activate_window(&window.identity)?;
+
+        let timeout = if self.readback_timeout.is_zero() {
+            Duration::from_millis(1200)
+        } else if self.readback_timeout < Duration::from_millis(100) {
+            self.readback_timeout * 2
+        } else {
+            self.readback_timeout.max(Duration::from_millis(1200))
+        };
+        let deadline = Instant::now() + timeout;
+        let mut pressed_toggle_panel = false;
+        let mut pressed_new_tab = false;
+        let mut pressed_side_question = false;
+        let mut pressed_new_side_question = false;
+
+        let is_transient_removal = |err: &str| {
+            matches!(
+                err,
+                "blocked:ax_control_removed" | "blocked:ax_target_missing"
+            )
+        };
+
+        loop {
+            let pressed_any = pressed_toggle_panel
+                || pressed_new_tab
+                || pressed_side_question
+                || pressed_new_side_question;
+
+            if Instant::now() >= deadline {
+                if pressed_any {
+                    return Err("unconfirmed:side_question_open".into());
+                } else {
+                    return Err(blocked("side_question_control_not_found"));
+                }
+            }
+
+            let current = match read(&mut *provider, &window.identity) {
+                Ok(window) => window,
+                Err(error) if pressed_any => return Err(format!("unconfirmed:{error}")),
+                Err(error) => return Err(error),
+            };
+
+            let side_question_input = current.controls.iter().find(|c| {
+                c.enabled
+                    && c.editable
+                    && matches!(c.role.as_str(), "AXTextArea" | "AXTextField")
+                    && is_side_question_input(c)
+            });
+
+            if let Some(input) = side_question_input {
+                let id = input.id;
+                if let Err(err) = provider.focus(&window.identity, id) {
+                    if pressed_any && is_transient_removal(&err) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(25));
+                        continue;
+                    }
+                    return Err(err);
+                }
+                let focus_timeout = if self.readback_timeout.is_zero() {
+                    Duration::from_millis(1200)
+                } else {
+                    self.readback_timeout.max(Duration::from_millis(300))
+                };
+                let focus_deadline = Instant::now() + focus_timeout;
+                loop {
+                    let control = provider
+                        .read_control(&window.identity, id)
+                        .map_err(|error| format!("unconfirmed:{error}"))?;
+                    if control.id == id && control.editable && control.focused {
+                        return Ok(());
+                    }
+                    if Instant::now() >= focus_deadline {
+                        return Err("unconfirmed:input_focus".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+
+            let toggle_panel_btn = current.controls.iter().find(|c| {
+                c.role == "AXButton"
+                    && c.label.trim() == "Toggle Side Panel"
+                    && c.enabled
+                    && c.pressable
+            });
+
+            if let Some(btn) = current.controls.iter().find(|c| {
+                c.role == "AXButton"
+                    && c.label.trim() == "New Side Question"
+                    && c.enabled
+                    && c.pressable
+            }) {
+                if !pressed_new_side_question {
+                    match provider.press(&window.identity, btn.id) {
+                        Ok(()) => pressed_new_side_question = true,
+                        Err(err)
+                            if pressed_any
+                                && is_transient_removal(&err)
+                                && Instant::now() < deadline => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            } else if let Some(btn) = current
+                .controls
+                .iter()
+                .find(|c| c.role == "AXButton" && c.label.trim() == "Side Question")
+            {
+                if !btn.enabled || !btn.pressable {
+                    return Err(blocked("side_question_unavailable"));
+                }
+                if !pressed_side_question {
+                    match provider.press(&window.identity, btn.id) {
+                        Ok(()) => pressed_side_question = true,
+                        Err(err)
+                            if pressed_any
+                                && is_transient_removal(&err)
+                                && Instant::now() < deadline => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            } else if let Some(btn) = toggle_panel_btn.filter(|btn| btn.expanded == Some(false)) {
+                if !pressed_toggle_panel {
+                    match provider.press(&window.identity, btn.id) {
+                        Ok(()) => pressed_toggle_panel = true,
+                        Err(err)
+                            if pressed_any
+                                && is_transient_removal(&err)
+                                && Instant::now() < deadline => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            } else if let Some(btn) = current.controls.iter().find(|c| {
+                c.role == "AXButton" && c.label.trim() == "New tab" && c.enabled && c.pressable
+            }) {
+                if !pressed_new_tab {
+                    match provider.press(&window.identity, btn.id) {
+                        Ok(()) => pressed_new_tab = true,
+                        Err(err)
+                            if pressed_any
+                                && is_transient_removal(&err)
+                                && Instant::now() < deadline => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            } else if let Some(btn) = toggle_panel_btn.filter(|btn| btn.expanded != Some(true)) {
+                if !pressed_toggle_panel {
+                    match provider.press(&window.identity, btn.id) {
+                        Ok(()) => pressed_toggle_panel = true,
+                        Err(err)
+                            if pressed_any
+                                && is_transient_removal(&err)
+                                && Instant::now() < deadline => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            } else {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+
     pub fn scroll(&self, request: &DialScrollRequest) -> Result<(), String> {
         if !matches!(
             request.target_bundle_id.as_str(),
@@ -1664,6 +1841,10 @@ fn stop_in_window<P: ManagedAxProvider>(
     Ok(true)
 }
 
+pub(crate) fn is_side_question_input(control: &ManagedControl) -> bool {
+    control.label == "Side Question Input"
+}
+
 fn focus_in_window<P: ManagedAxProvider>(
     provider: &mut P,
     target: &ManagedWindowIdentity,
@@ -1683,6 +1864,18 @@ fn focus_in_window<P: ManagedAxProvider>(
     let control = match (focused.as_slice(), candidates.as_slice()) {
         ([control], _) => *control,
         ([], [control]) => *control,
+        ([], _) if candidates.len() > 1 => {
+            let primary: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|control| !is_side_question_input(control))
+                .collect();
+            if let [control] = primary.as_slice() {
+                *control
+            } else {
+                return Err(blocked("ambiguous_or_missing_input"));
+            }
+        }
         _ => return Err(blocked("ambiguous_or_missing_input")),
     };
     let id = control.id;

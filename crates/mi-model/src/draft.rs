@@ -790,6 +790,7 @@ pub fn actions() -> Vec<Action> {
                 ("ag-focus-input", "聚焦当前输入框", "Agent", "激活 Antigravity 并聚焦当前对话输入框（Cmd+L）", json!({"type":"agent_command","adapter":"antigravity","command":"focus-input"})),
                 ("ag-browser", "Antigravity · 打开内置浏览器", "Agent", "切换右侧内置浏览器与预览面板（Cmd+Shift+B 或原生控件）", json!({"type":"agent_command","adapter":"antigravity","command":"browser"})),
                 ("ag-split-right", "Antigravity · 快速向右分栏", "Agent", "将当前会话向右分栏（Cmd+D）", json!({"type":"agent_command","adapter":"antigravity","command":"split-right"})),
+                ("ag-side-question", "Antigravity · 打开 Side Question", "Agent", "打开 Antigravity Side Question 侧栏提问并聚焦输入框", json!({"type":"agent_command","adapter":"antigravity","command":"side-question"})),
                 ("codex-scroll-up", "Codex · 向上滚动对话", "Agent", "向上滚动 Codex 当前对话内容（不抢占窗口焦点）", json!({"type":"agent_command","adapter":"codex","command":"scroll-up"})),
                 ("codex-scroll-down", "Codex · 向下滚动对话", "Agent", "向下滚动 Codex 当前对话内容（不抢占窗口焦点）", json!({"type":"agent_command","adapter":"codex","command":"scroll-down"})),
                 ("codex-scroll-to-bottom", "Codex · 跳到底部并聚焦输入", "Agent", "跳回 Codex 对话底部（存在 Scroll to bottom 按钮时优先点击，否则发送向下滚动）", json!({"type":"agent_command","adapter":"codex","command":"scroll-to-bottom"})),

@@ -976,6 +976,7 @@ pub fn concise_keycap_caption_en(raw_label: &str) -> String {
         "Toggle Sidebar" => return "Sidebar".to_string(),
         "Command Palette" => return "Palette".to_string(),
         "Switch Workspace" | "Project Workspace Switcher" => return "Workspace".to_string(),
+        "Open Side Question" => return "Side Q".to_string(),
         _ => {}
     }
     if let Some(num) = segment.strip_prefix("Session ") {

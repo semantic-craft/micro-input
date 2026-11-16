@@ -470,6 +470,203 @@ fn opening_saved_desktop_presets_migrates_unchanged_antigravity_slot8_to_browser
 }
 
 #[test]
+fn opening_saved_desktop_presets_migrates_antigravity_slot9_isolated_and_preserves_customized() {
+    use mi_model::draft::Action;
+    use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
+    use serde_json::json;
+
+    let temp = TempDir::new().unwrap();
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let (ag_pid, ag_lid) = {
+        let doc = &store.document_store.draft.document;
+        let (pid, profile) = doc
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, profile)| profile.name == "Antigravity")
+            .unwrap();
+        (pid.clone(), profile.layer_order[0].clone())
+    };
+    let mut shared_aid = String::new();
+    store
+        .document_store
+        .update(|draft| {
+            draft.assign(
+                &json!(ag_pid),
+                &json!(ag_lid),
+                9,
+                Action {
+                    id: "desktop-split".into(),
+                    name: "快速向右分栏".into(),
+                    category: "Agent".into(),
+                    detail: "将当前会话向右分栏（Cmd+D）".into(),
+                    payload: json!({
+                        "type": "agent_command",
+                        "adapter": "antigravity",
+                        "command": "split-right"
+                    }),
+                },
+            )?;
+            let layer = &draft.document.editable.graph.layers[&ag_lid];
+            shared_aid = layer
+                .controls
+                .values()
+                .find(|b| b.logical_control == "logical-9")
+                .and_then(|b| b.action_id.as_ref())
+                .unwrap()
+                .clone();
+            let bid12 = layer
+                .controls
+                .iter()
+                .find(|(_, b)| b.logical_control == "logical-12")
+                .map(|(bid, _)| bid.clone())
+                .unwrap();
+            draft.bind_existing_action(&ag_pid, &ag_lid, &bid12, Some(&shared_aid))
+        })
+        .unwrap();
+    let revision_before = store.document_store.draft.revision;
+    std::fs::write(
+        temp.path().join("workbench.json"),
+        serde_json::to_vec(&store.document_store.draft.document).unwrap(),
+    )
+    .unwrap();
+    drop(store);
+
+    let mut reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert!(reopened.has_all_desktop_agent_presets());
+    assert_eq!(reopened.document_store.draft.revision, revision_before + 1);
+    assert_eq!(
+        resolve_host_action(
+            &reopened.document_store.draft.document,
+            Some(&ag_pid),
+            "AG09",
+            true
+        ),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "side-question".into(),
+        })
+    );
+    assert_eq!(
+        resolve_host_action(
+            &reopened.document_store.draft.document,
+            Some(&ag_pid),
+            "AG12",
+            true
+        ),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "split-right".into(),
+        })
+    );
+    {
+        let doc = &reopened.document_store.draft.document;
+        let layer = &doc.editable.graph.layers[&ag_lid];
+        let new_aid9 = layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == "logical-9")
+            .and_then(|b| b.action_id.as_ref())
+            .unwrap();
+        let aid12 = layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == "logical-12")
+            .and_then(|b| b.action_id.as_ref())
+            .unwrap();
+        assert_ne!(new_aid9, &shared_aid);
+        assert_eq!(aid12, &shared_aid);
+        assert_eq!(
+            doc.editable.graph.actions[new_aid9].id,
+            "desktop-side-question"
+        );
+        assert_eq!(doc.editable.graph.actions[aid12].id, "desktop-split");
+        assert_eq!(doc.editable.graph.actions[aid12].name, "快速向右分栏");
+    }
+    let migrated_bytes = std::fs::read(temp.path().join("workbench.json")).unwrap();
+    let migrated_revision = reopened.document_store.draft.revision;
+    reopened.set_status_message("已就绪");
+    reopened.prepare_desktop_profiles().unwrap();
+    assert_eq!(reopened.status_message(), "已就绪");
+    assert_eq!(reopened.document_store.draft.revision, migrated_revision);
+    drop(reopened);
+
+    let reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert_eq!(reopened.document_store.draft.revision, migrated_revision);
+    assert_eq!(
+        std::fs::read(temp.path().join("workbench.json")).unwrap(),
+        migrated_bytes
+    );
+    drop(reopened);
+
+    for (action_name, adapter) in [("我的向右分栏", "antigravity"), ("快速向右分栏", "codex")]
+    {
+        let custom_temp = TempDir::new().unwrap();
+        let mut custom_store = WorkbenchStore::open_isolated(custom_temp.path()).unwrap();
+        let (custom_pid, custom_lid) = {
+            let doc = &custom_store.document_store.draft.document;
+            let (pid, profile) = doc
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, profile)| profile.name == "Antigravity")
+                .unwrap();
+            (pid.clone(), profile.layer_order[0].clone())
+        };
+        custom_store
+            .document_store
+            .update(|draft| {
+                draft.assign(
+                    &json!(custom_pid),
+                    &json!(custom_lid),
+                    9,
+                    Action {
+                        id: "desktop-split".into(),
+                        name: action_name.into(),
+                        category: "Agent".into(),
+                        detail: "custom split".into(),
+                        payload: json!({
+                            "type": "agent_command",
+                            "adapter": adapter,
+                            "command": "split-right"
+                        }),
+                    },
+                )
+            })
+            .unwrap();
+        let before = serde_json::to_vec(&custom_store.document_store.draft.document).unwrap();
+        let custom_rev = custom_store.document_store.draft.revision;
+        std::fs::write(custom_temp.path().join("workbench.json"), &before).unwrap();
+        drop(custom_store);
+
+        let mut custom_reopened = WorkbenchStore::open_isolated(custom_temp.path()).unwrap();
+        assert!(custom_reopened.has_all_desktop_agent_presets());
+        custom_reopened.set_status_message("已就绪");
+        custom_reopened.prepare_desktop_profiles().unwrap();
+        assert_eq!(custom_reopened.status_message(), "已就绪");
+        assert_eq!(custom_reopened.document_store.draft.revision, custom_rev);
+        assert_eq!(
+            std::fs::read(custom_temp.path().join("workbench.json")).unwrap(),
+            before
+        );
+        assert_eq!(
+            resolve_host_action(
+                &custom_reopened.document_store.draft.document,
+                Some(&custom_pid),
+                "AG09",
+                true
+            ),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: adapter.into(),
+                command: "split-right".into(),
+            })
+        );
+    }
+}
+
+#[test]
 fn opening_saved_customized_local_codex_preserves_document_and_ready_status() {
     use serde_json::json;
 

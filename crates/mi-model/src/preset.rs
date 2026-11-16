@@ -1695,6 +1695,22 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
                 );
             }
         }
+        legacy_specs.push(("Antigravity", ag_assignments.clone()));
+        for item in ag_assignments.iter_mut() {
+            if item.0 == 9 {
+                *item = (
+                    9,
+                    "desktop-side-question",
+                    "打开 Side Question",
+                    "Agent",
+                    "打开 Antigravity Side Question 侧栏提问并聚焦输入框",
+                    ActionKind::AgentCommand {
+                        adapter: "antigravity".into(),
+                        command: "side-question".into(),
+                    },
+                );
+            }
+        }
     }
     for mut hybrid in [codex_pre_slots, codex_r25, codex_r26] {
         replace_encoder_slots_with_model_picker(&mut hybrid);
@@ -1916,6 +1932,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                             };
                             let aid7 = slot_aid(&work.document, "logical-7");
                             let aid8 = slot_aid(&work.document, "logical-8");
+                            let aid9 = slot_aid(&work.document, "logical-9");
                             let aid10 = slot_aid(&work.document, "logical-10");
                             let aid11 = slot_aid(&work.document, "logical-11");
                             let aid12 = slot_aid(&work.document, "logical-12");
@@ -1968,43 +1985,43 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                                             )
                                             .map_err(|e| e.to_string())?,
                                         };
-                                        let new_action_id = crate::document::new_id();
-                                        let rebound = doc
-                                            .editable
-                                            .graph
-                                            .layers
-                                            .get_mut(&lid)
-                                            .and_then(|layer| {
-                                                layer
-                                                    .controls
-                                                    .values_mut()
-                                                    .find(|b| b.logical_control == "logical-8")
-                                            })
-                                            .map(|binding| {
-                                                let old =
-                                                    binding.action_id.replace(new_action_id.clone());
-                                                (old, new_action_id)
-                                            });
-                                        if let Some((old, new_action_id)) = rebound {
-                                            doc.editable
-                                                .graph
-                                                .actions
-                                                .insert(new_action_id, new_action);
-                                            if let Some(old) = old {
-                                                if !doc.editable.graph.actions.get(&old).is_some_and(
-                                                    |a| {
-                                                        crate::macro_library::is_local_macro(a)
-                                                            || crate::multi::is_local_multi(a)
-                                                    },
-                                                ) && crate::multi::parent_references(doc, &old)
-                                                    .is_empty()
-                                                    && !doc.layer_references_action(&old)
-                                                {
-                                                    doc.editable.graph.actions.remove(&old);
-                                                    doc.editable.source_refs.remove(&old);
-                                                }
-                                            }
-                                        }
+                                        rebind_starter_slot_action(
+                                            doc,
+                                            &lid,
+                                            "logical-8",
+                                            new_action,
+                                        );
+                                    }
+                                }
+                                if let Some(id9) = &aid9 {
+                                    let should_update_9 = doc
+                                        .editable
+                                        .graph
+                                        .actions
+                                        .get(id9)
+                                        .is_some_and(is_unmodified_antigravity_split_slot9);
+                                    if should_update_9 {
+                                        let new_action = crate::draft::Action {
+                                            id: "desktop-side-question".into(),
+                                            name: "打开 Side Question".into(),
+                                            category: "Agent".into(),
+                                            detail:
+                                                "打开 Antigravity Side Question 侧栏提问并聚焦输入框"
+                                                    .into(),
+                                            payload: serde_json::to_value(
+                                                ActionKind::AgentCommand {
+                                                    adapter: "antigravity".into(),
+                                                    command: "side-question".into(),
+                                                },
+                                            )
+                                            .map_err(|e| e.to_string())?,
+                                        };
+                                        rebind_starter_slot_action(
+                                            doc,
+                                            &lid,
+                                            "logical-9",
+                                            new_action,
+                                        );
                                     }
                                 }
                                 if let Some(id10) = &aid10 {
@@ -2344,11 +2361,55 @@ pub fn local_codex_profile_needs_starter_slot_migration(
             .any(|(_, assignments)| layer_matches_starter_assignments(doc, layer, assignments))
 }
 
+fn rebind_starter_slot_action(
+    doc: &mut LocalDocumentV2,
+    layer_id: &str,
+    logical_control: &str,
+    new_action: crate::draft::Action,
+) {
+    let new_action_id = crate::document::new_id();
+    let rebound = doc
+        .editable
+        .graph
+        .layers
+        .get_mut(layer_id)
+        .and_then(|layer| {
+            layer
+                .controls
+                .values_mut()
+                .find(|b| b.logical_control == logical_control)
+        })
+        .map(|binding| {
+            let old = binding.action_id.replace(new_action_id.clone());
+            (old, new_action_id)
+        });
+    if let Some((old, new_action_id)) = rebound {
+        doc.editable.graph.actions.insert(new_action_id, new_action);
+        if let Some(old) = old {
+            if !doc.editable.graph.actions.get(&old).is_some_and(|a| {
+                crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
+            }) && crate::multi::parent_references(doc, &old).is_empty()
+                && !doc.layer_references_action(&old)
+            {
+                doc.editable.graph.actions.remove(&old);
+                doc.editable.source_refs.remove(&old);
+            }
+        }
+    }
+}
+
 fn is_unmodified_antigravity_terminal_slot8(action: &crate::draft::Action) -> bool {
     action.id == "desktop-terminal"
         && action.name == "打开终端面板"
         && action.payload.get("adapter").and_then(Value::as_str) == Some("antigravity")
         && action.payload.get("command").and_then(Value::as_str) == Some("terminal")
+}
+
+fn is_unmodified_antigravity_split_slot9(action: &crate::draft::Action) -> bool {
+    action.id == "desktop-split"
+        && action.name == "快速向右分栏"
+        && action.payload.get("adapter").and_then(Value::as_str) == Some("antigravity")
+        && action.payload.get("command").and_then(Value::as_str) == Some("split-right")
 }
 
 pub fn antigravity_layer_needs_starter_slot_migration(
@@ -2368,6 +2429,7 @@ pub fn antigravity_layer_needs_starter_slot_migration(
     };
     let a7 = slot_action("logical-7");
     let a8 = slot_action("logical-8");
+    let a9 = slot_action("logical-9");
     let a10 = slot_action("logical-10");
     let a11 = slot_action("logical-11");
     let is_cmd =
@@ -2385,7 +2447,8 @@ pub fn antigravity_layer_needs_starter_slot_migration(
     let previous_starter_slots = is_cmd(a7, "desktop-browser", &["browser"])
         || a8.is_some_and(is_unmodified_antigravity_terminal_slot8)
         || (is_cmd(a10, "desktop-input", &["focus-input"])
-            && is_cmd(a11, "desktop-dictation", &["push-to-talk", "dictation"]));
+            && is_cmd(a11, "desktop-dictation", &["push-to-talk", "dictation"]))
+        || a9.is_some_and(is_unmodified_antigravity_split_slot9);
     legacy_2u_dictation || previous_starter_slots
 }
 
