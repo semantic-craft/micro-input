@@ -119,9 +119,15 @@ pub(super) struct SessionNavigation {
     intents: mpsc::Receiver<PhysicalNavigationIntent>,
     pending: Option<PendingNavigation>,
     #[cfg(test)]
-    test_worker:
+    pub(super) test_worker:
         Option<Box<dyn FnOnce(NavigationPlace, mpsc::SyncSender<Result<NavigationPlace, String>>)>>,
 }
+impl SessionNavigation {
+    pub(super) fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
 impl Default for SessionNavigation {
     fn default() -> Self {
         let (tx, intents) = mpsc::sync_channel(16);
@@ -321,6 +327,25 @@ impl WorkbenchStore {
         profile: String,
         binding: String,
     ) {
+        self.request_navigation_command_with_commit(
+            command,
+            revision,
+            input_generation,
+            profile,
+            binding,
+            true,
+        );
+    }
+
+    pub(super) fn request_navigation_command_with_commit(
+        &mut self,
+        command: NavigationCommand,
+        revision: Option<u64>,
+        input_generation: Option<NavigationInputLease>,
+        profile: String,
+        binding: String,
+        commit: bool,
+    ) {
         if revision.is_some_and(|rev| {
             rev != self
                 .session_navigation
@@ -330,7 +355,12 @@ impl WorkbenchStore {
                 .unwrap()
                 .revision
         }) {
-            self.navigation_rejected(&profile, &binding, "blocked:session_slots_changed");
+            self.navigation_rejected_with_commit(
+                &profile,
+                &binding,
+                "blocked:session_slots_changed",
+                commit,
+            );
             return;
         }
         let mut history = self.navigation_history.clone();
@@ -359,54 +389,78 @@ impl WorkbenchStore {
             NavigationCommand::Forward => history.forward(|p| self.navigation_available(p)),
         };
         let Some(place) = place else {
-            self.navigation_rejected(&profile, &binding, "blocked:session_target_unavailable");
+            self.navigation_rejected_with_commit(
+                &profile,
+                &binding,
+                "blocked:session_target_unavailable",
+                commit,
+            );
             return;
         };
         if matches!(command, NavigationCommand::Slot(_)) {
             history.visit(place.clone());
         }
-        self.begin_session_navigation(place, history, input_generation, profile, binding);
+        self.begin_session_navigation_with_commit(
+            place,
+            history,
+            input_generation,
+            profile,
+            binding,
+            commit,
+        );
     }
 
     pub(super) fn request_session_navigation(&mut self, place: NavigationPlace) {
         let mut history = self.navigation_history.clone();
         history.visit(place.clone());
-        self.begin_session_navigation(
+        self.begin_session_navigation_with_commit(
             place,
             history,
             None,
             "workbench".into(),
             "session-strip".into(),
+            true,
         );
     }
 
-    fn navigation_rejected(&mut self, profile: &str, binding: &str, detail: &str) {
+    fn navigation_rejected_with_commit(
+        &mut self,
+        profile: &str,
+        binding: &str,
+        detail: &str,
+        commit: bool,
+    ) {
         self.status_message = format!("会话未切换 · {detail}");
         self.record_host_action_receipt(navigation_receipt(
             profile, binding, "", "blocked", detail,
         ));
-        self.commit_runtime_update();
+        if commit {
+            self.commit_runtime_update();
+        }
     }
 
-    fn begin_session_navigation(
+    fn begin_session_navigation_with_commit(
         &mut self,
         place: NavigationPlace,
         history: NavigationHistory,
         input_generation: Option<NavigationInputLease>,
         profile: String,
         binding: String,
+        commit: bool,
     ) {
         let fn_unconfirmed = self.live_executor.has_unconfirmed_apple_fn_release();
-        self.begin_session_navigation_checked(
+        self.begin_session_navigation_checked_with_commit(
             place,
             history,
             input_generation,
             profile,
             binding,
             fn_unconfirmed,
+            commit,
         );
     }
 
+    #[cfg(test)]
     fn begin_session_navigation_checked(
         &mut self,
         place: NavigationPlace,
@@ -416,23 +470,52 @@ impl WorkbenchStore {
         binding: String,
         fn_unconfirmed: bool,
     ) {
+        self.begin_session_navigation_checked_with_commit(
+            place,
+            history,
+            input_generation,
+            profile,
+            binding,
+            fn_unconfirmed,
+            true,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_session_navigation_checked_with_commit(
+        &mut self,
+        place: NavigationPlace,
+        history: NavigationHistory,
+        input_generation: Option<NavigationInputLease>,
+        profile: String,
+        binding: String,
+        fn_unconfirmed: bool,
+        commit: bool,
+    ) {
         if self.config.isolated && !self.has_navigation_test_worker() {
-            self.navigation_rejected(
+            self.navigation_rejected_with_commit(
                 &profile,
                 &binding,
                 "blocked:isolated_navigation_unavailable",
+                commit,
             );
             return;
         }
         if self.session_navigation.pending.is_some() {
-            self.navigation_rejected(&profile, &binding, "blocked:session_navigation_busy");
+            self.navigation_rejected_with_commit(
+                &profile,
+                &binding,
+                "blocked:session_navigation_busy",
+                commit,
+            );
             return;
         }
         if !self.navigation_available(&place) {
-            self.navigation_rejected(
+            self.navigation_rejected_with_commit(
                 &profile,
                 &binding,
                 "blocked:session_target_stale_or_unsupported",
+                commit,
             );
             return;
         }
@@ -440,11 +523,21 @@ impl WorkbenchStore {
             .as_ref()
             .is_some_and(|lease| !self.navigation_input_valid(lease))
         {
-            self.navigation_rejected(&profile, &binding, "blocked:session_input_retired");
+            self.navigation_rejected_with_commit(
+                &profile,
+                &binding,
+                "blocked:session_input_retired",
+                commit,
+            );
             return;
         }
         if fn_unconfirmed {
-            self.navigation_rejected(&profile, &binding, "blocked:unconfirmed_apple_fn_release");
+            self.navigation_rejected_with_commit(
+                &profile,
+                &binding,
+                "blocked:unconfirmed_apple_fn_release",
+                commit,
+            );
             return;
         }
         let watermark = self
@@ -512,7 +605,9 @@ impl WorkbenchStore {
             let _ = tx.send(result);
         });
         self.status_message = "正在切换会话，等待目标回读…".into();
-        self.commit_runtime_update();
+        if commit {
+            self.commit_runtime_update();
+        }
     }
 
     fn has_navigation_test_worker(&self) -> bool {
@@ -526,7 +621,13 @@ impl WorkbenchStore {
         }
     }
 
-    pub(super) fn poll_session_navigation(&mut self) {
+    #[cfg(test)]
+    pub(super) fn poll_session_navigation(&mut self) -> bool {
+        self.poll_session_navigation_with_commit(true)
+    }
+
+    pub(super) fn poll_session_navigation_with_commit(&mut self, commit: bool) -> bool {
+        let mut dirty = false;
         if self
             .session_navigation
             .catalog
@@ -534,6 +635,7 @@ impl WorkbenchStore {
             .is_some_and(|c| c.observed_at.elapsed() > CATALOG_TTL)
         {
             self.update_navigation_catalog(None);
+            dirty = true;
         }
         let intents: Vec<_> = self.session_navigation.intents.try_iter().collect();
         for intent in intents {
@@ -546,7 +648,7 @@ impl WorkbenchStore {
                 && intent.received_at.elapsed() < Duration::from_secs(2)
                 && self.system_lifecycle == SystemLifecycle::Awake
             {
-                self.request_navigation_command(
+                self.request_navigation_command_with_commit(
                     intent.command,
                     Some(intent.revision),
                     Some(NavigationInputLease::SixLayer(
@@ -555,7 +657,9 @@ impl WorkbenchStore {
                     )),
                     intent.profile,
                     intent.binding,
+                    false,
                 );
+                dirty = true;
             }
         }
         let invalid_input = self
@@ -566,6 +670,7 @@ impl WorkbenchStore {
             .is_some_and(|lease| !self.navigation_input_valid(lease));
         if invalid_input {
             self.cancel_session_navigation();
+            dirty = true;
         }
         let result =
             self.session_navigation
@@ -640,8 +745,13 @@ impl WorkbenchStore {
                 outcome,
                 &detail,
             ));
-            self.commit_runtime_update();
+            dirty = true;
         }
+        if dirty && commit {
+            self.commit_runtime_update();
+            return false;
+        }
+        dirty
     }
 }
 

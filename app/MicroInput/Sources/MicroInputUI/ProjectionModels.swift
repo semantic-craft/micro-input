@@ -615,6 +615,7 @@ public struct SidebarSliceModel: Equatable {
     public var selectedProfileId: String? = nil
     public var selectedDisplayName: String = "未选择方案"
     public var activeHostProfileId: String? = nil
+    public var activeHostProfileName: String = "Antigravity"
     public var isProfileLocked: Bool = false
     public var lockedProfileId: String? = nil
     public var accessibilityTrusted: Bool = true
@@ -636,6 +637,7 @@ public struct SidebarSliceModel: Equatable {
         self.selectedProfileId = m.selectedProfileId
         self.selectedDisplayName = m.selectedDisplayName
         self.activeHostProfileId = m.activeHostProfileId
+        self.activeHostProfileName = m.activeProfileName
         self.isProfileLocked = m.isProfileLocked
         self.lockedProfileId = m.lockedProfileId
         self.accessibilityTrusted = m.accessibilityTrusted

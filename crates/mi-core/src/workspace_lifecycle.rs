@@ -139,10 +139,12 @@ impl WorkbenchStore {
     }
 
     pub(super) fn poll_workspace_lifecycle(&mut self) {
+        let mut completed = false;
         if let Some(rx) = &self.lifecycle_cleanup {
             match rx.try_recv() {
                 Ok(result) => {
                     self.lifecycle_cleanup = None;
+                    completed = true;
                     if let Err(error) = self.finish_host_cleanup(result) {
                         self.status_message =
                             format!("旧会话清理未确认 · {error}；宿主输入保持暂停");
@@ -162,6 +164,9 @@ impl WorkbenchStore {
             }
         }
         if self.system_lifecycle != SystemLifecycle::Waking {
+            if completed {
+                self.commit_runtime_update();
+            }
             return;
         }
         self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);

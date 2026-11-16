@@ -853,3 +853,312 @@ fn host_mouse_commands_preserve_host_adapter_in_compile_profile_twenty_slots() {
         }
     }
 }
+
+#[test]
+fn idle_poll_at_skips_commit_local_update_and_does_not_bump_projection_generation() {
+    let (_dir, mut store, now) = active_store();
+    let initial_gen = store.projection_generation();
+    let initial_commits = store.commit_local_update_count;
+    assert!(initial_gen > 0);
+    assert!(initial_commits > 0);
+
+    for offset in [
+        Duration::from_millis(16),
+        Duration::from_secs(1),
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+    ] {
+        assert!(!store.poll_at(now + offset));
+        assert_eq!(store.projection_generation(), initial_gen);
+        assert_eq!(store.commit_local_update_count, initial_commits);
+    }
+}
+
+#[test]
+fn poll_at_detects_app_cache_invalidate_and_overlay_expiry() {
+    let dir = tempfile::tempdir().unwrap();
+    let installed_flag = Arc::new(AtomicBool::new(false));
+    let flag_reader = Arc::clone(&installed_flag);
+    let mut cfg = WorkbenchStoreConfig::isolated(dir.path());
+    cfg.app_cache = Arc::new(AppBundleCache::with_resolver(Arc::new(move |id| {
+        let installed = id == "com.google.antigravity" && flag_reader.load(Ordering::Acquire);
+        AppBundleInfo {
+            bundle_id: id.to_string(),
+            installed,
+            app_path: None,
+            display_name: None,
+            icon_cached: false,
+        }
+    })));
+    let mut store = WorkbenchStore::open(cfg).unwrap();
+    let t0 = Instant::now() + Duration::from_secs(3600);
+    let profile = store
+        .find_canonical_profile_id(CanonicalAgent::Antigravity)
+        .unwrap();
+
+    assert!(
+        !store
+            .projection()
+            .sidebar
+            .rows
+            .iter()
+            .find(|r| r.profile_id == profile)
+            .unwrap()
+            .app_installed
+    );
+    assert!(!store.poll_at(t0));
+
+    installed_flag.store(true, Ordering::Release);
+    assert!(!store.poll_at(t0 + Duration::from_millis(50)));
+
+    store.app_cache.invalidate("com.google.antigravity");
+    let before_gen = store.projection_generation();
+    assert!(store.poll_at(t0 + Duration::from_millis(100)));
+    assert_eq!(store.projection_generation(), before_gen + 1);
+    assert!(
+        store
+            .projection()
+            .sidebar
+            .rows
+            .iter()
+            .find(|r| r.profile_id == profile)
+            .unwrap()
+            .app_installed
+    );
+
+    let settled_commits = store.commit_local_update_count;
+    assert!(!store.poll_at(t0 + Duration::from_millis(150)));
+    assert_eq!(store.commit_local_update_count, settled_commits);
+
+    let t1 = t0 + Duration::from_secs(1);
+    store
+        .select_and_activate_profile_at(&profile, t1, true)
+        .unwrap();
+    assert!(store.projection().overlay.panel_spec.is_some());
+
+    let before_expiry_commits = store.commit_local_update_count;
+    assert!(!store.poll_at(t1 + crate::PASSIVE_NOTICE_DURATION - Duration::from_millis(1)));
+    assert_eq!(store.commit_local_update_count, before_expiry_commits);
+
+    let gen_before_expiry = store.projection_generation();
+    assert!(store.poll_at(t1 + crate::PASSIVE_NOTICE_DURATION));
+    assert_eq!(store.projection_generation(), gen_before_expiry + 1);
+    assert!(store.projection().overlay.panel_spec.is_none());
+
+    let commits_after_expiry = store.commit_local_update_count;
+    assert!(!store.poll_at(t1 + crate::PASSIVE_NOTICE_DURATION + Duration::from_millis(50)));
+    assert_eq!(store.commit_local_update_count, commits_after_expiry);
+}
+
+#[test]
+fn poll_at_triggers_encoder_model_picker_hold_and_idle_expiry() {
+    let (_dir, mut store, now) = active_store();
+    let press = InputEvent {
+        binding_id: Some("ENC_CLK".into()),
+        ..input(11, InputEventKind::Pressed)
+    };
+    assert!(store.consume_physical_input_event(press, now).is_none());
+
+    let pre_hold_commits = store.commit_local_update_count;
+    assert!(!store.poll_at(now + Duration::from_millis(100)));
+    assert_eq!(store.commit_local_update_count, pre_hold_commits);
+
+    let gen_before_hold = store.projection_generation();
+    assert!(store.poll_at(now + crate::ENCODER_HOLD_THRESHOLD));
+    assert_eq!(store.commit_local_update_count, pre_hold_commits + 1);
+    assert!(store.projection_generation() > gen_before_hold);
+    assert!(store.projection().status_message.contains("搜索会话"));
+
+    let release = InputEvent {
+        binding_id: Some("ENC_CLK".into()),
+        ..input(11, InputEventKind::Released)
+    };
+    assert!(store
+        .consume_physical_input_event(release, now + Duration::from_millis(400))
+        .is_none());
+
+    let confirm_press = InputEvent {
+        binding_id: Some("ENC_CLK".into()),
+        ..input(11, InputEventKind::Pressed)
+    };
+    assert!(store
+        .consume_physical_input_event(confirm_press, now + Duration::from_millis(420))
+        .is_none());
+    let confirm_release = InputEvent {
+        binding_id: Some("ENC_CLK".into()),
+        ..input(11, InputEventKind::Released)
+    };
+    assert!(store
+        .consume_physical_input_event(confirm_release, now + Duration::from_millis(440))
+        .is_some());
+    assert!(store.encoder_model_picker.active_session().is_none());
+
+    let t_turn = now + Duration::from_millis(480);
+    let turn = InputEvent {
+        binding_id: Some("AG14".into()),
+        ..input(11, InputEventKind::Pressed)
+    };
+    assert!(store.consume_physical_input_event(turn, t_turn).is_some());
+    assert!(store.is_model_picker_mouse_capture_enabled());
+    assert!(store.encoder_model_picker.active_session().is_some());
+
+    let mid_commits = store.commit_local_update_count;
+    assert!(!store.poll_at(t_turn + Duration::from_secs(5)));
+    assert_eq!(store.commit_local_update_count, mid_commits);
+    assert!(store.is_model_picker_mouse_capture_enabled());
+
+    let _ = store.poll_at(t_turn + crate::MODEL_PICKER_IDLE_TIMEOUT + Duration::from_millis(1));
+    assert_eq!(store.commit_local_update_count, mid_commits + 1);
+    assert!(!store.is_model_picker_mouse_capture_enabled());
+    assert!(store.encoder_model_picker.active_session().is_none());
+
+    let post_expiry_commits = store.commit_local_update_count;
+    assert!(!store.poll_at(t_turn + crate::MODEL_PICKER_IDLE_TIMEOUT + Duration::from_secs(1)));
+    assert_eq!(store.commit_local_update_count, post_expiry_commits);
+}
+
+#[test]
+fn poll_at_detects_session_navigation_and_slot_table_mutations() {
+    let (_dir, mut store, now) = active_store();
+    let cand = FourAppLiveCandidate {
+        place: NavigationPlace::antigravity("conv-poll-1", "/tmp/ws"),
+        title: "Poll Session 1".into(),
+        phase: FourAppSessionKind::BlueDotCompleted,
+        watermark: "wm-1".into(),
+        last_modified_ms: 5000,
+        last_user_view_ms: 1000,
+        updated_at_ms: 5000,
+    };
+
+    let gen_before_slot = store.projection_generation();
+    let pre_slot_commits = store.commit_local_update_count;
+    store
+        .slot_table
+        .update_candidates(vec![cand.clone()], &BTreeMap::new());
+    assert!(store.poll_at(now + Duration::from_millis(20)));
+    assert_eq!(store.commit_local_update_count, pre_slot_commits + 1);
+    assert!(store.projection_generation() > gen_before_slot);
+    assert_eq!(
+        store.projection().session_strip.slots[0].title,
+        "Poll Session 1"
+    );
+
+    let idle_commits = store.commit_local_update_count;
+    assert!(!store.poll_at(now + Duration::from_millis(40)));
+    assert_eq!(store.commit_local_update_count, idle_commits);
+
+    store.session_navigation.catalog = Some(NavigationCatalog {
+        instance: CatalogInstance::Antigravity(AntigravityInstance {
+            hub: "hub-poll".into(),
+            pid: 1,
+            ui_port: 12,
+        }),
+        observed_at: Instant::now(),
+        candidates: vec![cand.clone()],
+        project_ids: BTreeMap::new(),
+        frontmost_acknowledged: None,
+    });
+    let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+    store.session_navigation.test_worker = Some(Box::new(move |place, reply| {
+        worker_tx.send((place, reply)).unwrap();
+    }));
+
+    store.request_session_navigation(cand.place.clone());
+    let (_place, reply) = worker_rx.recv().unwrap();
+    reply.send(Ok(cand.place.clone())).unwrap();
+
+    let gen_before_nav = store.projection_generation();
+    let pre_nav_commits = store.commit_local_update_count;
+    assert!(store.poll_at(now + Duration::from_millis(60)));
+    assert_eq!(store.commit_local_update_count, pre_nav_commits + 1);
+    assert!(store.projection_generation() > gen_before_nav);
+    assert!(store.projection().status_message.contains("已切换会话"));
+    assert_eq!(
+        store
+            .lighting_arbiter
+            .acknowledged_watermarks
+            .get(&cand.place.target_id()),
+        Some(&"wm-1".to_string())
+    );
+
+    let post_nav_commits = store.commit_local_update_count;
+    assert!(!store.poll_at(now + Duration::from_millis(80)));
+    assert_eq!(store.commit_local_update_count, post_nav_commits);
+}
+
+#[test]
+fn idle_poll_after_browse_profile_skips_commit() {
+    let (_dir, mut store, now) = active_store();
+    let other = store
+        .find_canonical_profile_id(CanonicalAgent::Herdr)
+        .unwrap();
+    store.browse_profile(&other).unwrap();
+    let commits_after_browse = store.commit_local_update_count;
+    let gen_after_browse = store.projection_generation();
+
+    assert!(!store.poll_at(now + Duration::from_millis(16)));
+    assert_eq!(store.commit_local_update_count, commits_after_browse);
+    assert_eq!(store.projection_generation(), gen_after_browse);
+}
+
+#[test]
+fn idle_live_candidates_none_does_not_force_commit_local_update() {
+    let (_dir, mut store, now) = active_store();
+    let commits_before = store.commit_local_update_count;
+    let gen_before = store.projection_generation();
+
+    store.handle_hardware_loop_event(
+        HardwareLoopEvent::LiveCandidatesUpdated {
+            epoch: 0,
+            catalog: None,
+        },
+        now,
+    );
+
+    assert!(!store.poll_at(now + Duration::from_millis(16)));
+    assert_eq!(store.commit_local_update_count, commits_before);
+    assert_eq!(store.projection_generation(), gen_before);
+}
+
+#[test]
+fn external_board_configuration_and_slot_role_override_mutations_are_detected_by_poll_at() {
+    let (_dir, mut store, now) = active_store();
+    let target = store
+        .find_canonical_profile_id(CanonicalAgent::Herdr)
+        .unwrap();
+    store
+        .assign_board_layer(BoardLayer::ALL[3], Some(target))
+        .unwrap();
+    let commits_after_assign = store.commit_local_update_count;
+    assert!(!store.poll_at(now + Duration::from_millis(16)));
+    assert_eq!(store.commit_local_update_count, commits_after_assign);
+
+    let mut next_plan = store
+        .document_store
+        .board_layer_plan()
+        .cloned()
+        .unwrap_or_default();
+    next_plan.replace(BoardLayer::ALL[3], BoardLayerRoute::Unassigned);
+    store
+        .document_store
+        .save_board_configuration(
+            next_plan,
+            BoardPreviewSelection::Layer(BoardLayer::ALL[3]),
+            Some("usb-startup-profile".into()),
+        )
+        .unwrap();
+    assert!(store.poll_at(now + Duration::from_millis(32)));
+    assert_eq!(store.commit_local_update_count, commits_after_assign + 1);
+
+    let profile_id = store.selected_profile_id().unwrap().to_string();
+    let flipped_role = if store.projection().canvas.keycap_cells[0].slot_role == "TaskKey" {
+        KeycapRole::ActionKey
+    } else {
+        KeycapRole::TaskKey
+    };
+    store
+        .slot_role_overrides
+        .insert((profile_id, 0), flipped_role);
+    assert!(store.poll_at(now + Duration::from_millis(48)));
+    assert_eq!(store.commit_local_update_count, commits_after_assign + 2);
+}

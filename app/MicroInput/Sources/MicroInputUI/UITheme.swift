@@ -783,24 +783,25 @@ public struct PopoverActionRow: View {
     }
 }
 
+@MainActor
 public enum StatusItemIcon {
-    public static func make(locale: ResolvedLocale = .zhHans) -> NSImage {
+    private static let zhHansIcon = build(locale: .zhHans)
+    private static let enIcon = build(locale: .en)
+
+    public static func make(locale: ResolvedLocale = .zhHans) -> NSImage { locale == .en ? enIcon : zhHansIcon }
+
+    private static func build(locale: ResolvedLocale) -> NSImage {
         let image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
-            NSColor.black.setStroke()
-            NSColor.black.setFill()
-            let body = NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 18, height: 13), xRadius: 2, yRadius: 2)
-            body.lineWidth = 1.25
-            body.stroke()
-            for y in [7.0, 10.5] {
-                for x in [3.5, 7.0, 10.5] {
-                    NSBezierPath(roundedRect: NSRect(x: x, y: y, width: 2, height: 2), xRadius: 0.35, yRadius: 0.35).fill()
-                }
+            NSColor.black.set()
+            let strokePath: (NSBezierPath, CGFloat) -> Void = { $0.lineWidth = $1; $0.stroke() }
+            let fillRect: (CGFloat, CGFloat, CGFloat, CGFloat, CGFloat) -> Void = { x, y, w, h, r in
+                NSBezierPath(roundedRect: NSRect(x: x, y: y, width: w, height: h), xRadius: r, yRadius: r).fill()
             }
-            NSBezierPath(roundedRect: NSRect(x: 5, y: 4.5, width: 7.5, height: 1.25), xRadius: 0.4, yRadius: 0.4).fill()
-            let knob = NSBezierPath(ovalIn: NSRect(x: 14, y: 10, width: 3, height: 3))
-            knob.lineWidth = 1
-            knob.stroke()
-            NSBezierPath(roundedRect: NSRect(x: 14.5, y: 5, width: 2, height: 3), xRadius: 0.4, yRadius: 0.4).fill()
+            strokePath(NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 18, height: 13), xRadius: 2, yRadius: 2), 1.25)
+            for y in [7.0, 10.5] { for x in [3.5, 7.0, 10.5] { fillRect(x, y, 2, 2, 0.35) } }
+            fillRect(5, 4.5, 7.5, 1.25, 0.4)
+            strokePath(NSBezierPath(ovalIn: NSRect(x: 14, y: 10, width: 3, height: 3)), 1)
+            fillRect(14.5, 5, 2, 3, 0.4)
             return true
         }
         image.isTemplate = true
@@ -941,21 +942,40 @@ public enum AgentProfileKind: String {
     public var bridgeDescription: String { bridgeDescription(.zhHans) }
 }
 
-public extension Color {
-    init(hex: String) {
-        let cleaned = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var val: UInt64 = 0
-        Scanner(string: cleaned).scanHexInt64(&val)
-        let r, g, b: Double
-        if cleaned.count == 6 {
-            r = Double((val >> 16) & 0xFF) / 255.0
-            g = Double((val >> 8) & 0xFF) / 255.0
-            b = Double(val & 0xFF) / 255.0
-        } else {
-            r = 0.23
-            g = 0.51
-            b = 0.96
+private enum HexColorCache {
+    private static let fallback = Color(red: 0.23, green: 0.51, blue: 0.96)
+    private static let lock = NSLock()
+    private static var table: [String: Color] = [:]
+
+    static func resolve(_ hex: String) -> Color {
+        if let cached = lock.withLock({ table[hex] }) { return cached }
+        let parsed = parse(hex)
+        lock.withLock { if table.count >= 128 { table.removeAll(keepingCapacity: true) }; table[hex] = parsed }
+        return parsed
+    }
+
+    private static func isASCIIAlnum(_ b: UInt8) -> Bool { (48...57).contains(b) || (65...90).contains(b) || (97...122).contains(b) }
+
+    private static func hexNibble(_ b: UInt8) -> UInt8? {
+        if (48...57).contains(b) { return b - 48 }
+        if (65...70).contains(b) { return b - 55 }
+        return (97...102).contains(b) ? b - 87 : nil
+    }
+
+    private static func parse(_ hex: String) -> Color {
+        let bytes = hex.utf8
+        var start = bytes.startIndex, end = bytes.endIndex
+        while start < end && !isASCIIAlnum(bytes[start]) { bytes.formIndex(after: &start) }
+        while end > start && !isASCIIAlnum(bytes[bytes.index(before: end)]) { bytes.formIndex(before: &end) }
+        var value: UInt32 = 0, count = 0
+        for byte in bytes[start..<end] {
+            guard count < 6, let nibble = hexNibble(byte) else { return fallback }
+            value = (value << 4) | UInt32(nibble)
+            count += 1
         }
-        self.init(red: r, green: g, blue: b)
+        guard count == 6 else { return fallback }
+        return Color(red: Double((value >> 16) & 0xFF) / 255.0, green: Double((value >> 8) & 0xFF) / 255.0, blue: Double(value & 0xFF) / 255.0)
     }
 }
+
+public extension Color { init(hex: String) { self = HexColorCache.resolve(hex) } }
