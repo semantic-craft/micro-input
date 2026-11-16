@@ -37,14 +37,14 @@ Micro Input 一方面在 macOS 上完整接管日常配置、通用快捷键映�
 
 - **开箱即用的 Antigravity 全键位映射。** 默认物理布局覆盖 Antigravity 全部高频操作，包含唤起并聚焦 `com.google.antigravity`、聚焦当前输入框、新建会话、选择或新建项目、项目工作区快切、呼出模型列表、开关 Gemini Live 实时语音、打开内置浏览器、打开终端面板、快速向右分栏、按住说话与先停听写再发送消息。
 - **物理键帽同步真实未读状态。** 顶部状态键按上述过滤规则只跟踪顶层主会话，运行中呼吸绿光，超过 15 分钟仍保留未读海洋蓝状态灯，直到你在前台窗口实际打开对应 `/c/<cid>` 会话后自动熄灯，单按槽位即通过侧栏直达。
-- **围绕语音与选模型重构的硬件操控。** 长按旋钮即可在 Antigravity 内原地切换模型与推理档位，无需抬手点选菜单。底行中键合并为 2U 宽键后适合连续口述代码需求，并由底层防抖确保松开最后一侧微动才停录，也可随时拆回两颗 1U 按键分别承担新建会话与按住说话。
+- **围绕语音与选模型重构的硬件操控。** 直接旋转旋钮即可在 Antigravity 内原位展开并切换模型与推理档位，按下或长按旋钮直接搜索会话，无需先聚焦输入框或抬手点选菜单。底行中键合并为 2U 宽键后适合连续口述代码需求，并由底层防抖确保松开最后一侧微动才停录，也可随时拆回两颗 1U 按键分别承担新建会话与按住说话。
 - **跟手且零侵入的辅助功能执行。** 所有 Antigravity 集成均基于可观测界面与辅助功能实现，不向宿主应用打 `.patch` 补丁，并在 Antigravity 2.31.0 下把 release 构建聚焦输入框中位耗时压至 284.3 ms，让单键切换窗口和输入几乎感受不到等待。
 
 #### 超越内置插件的可自定义 Codex 交互
 
 - **解放官方插件写死的 20 个控制位。** 出厂固件内置 Codex 布局将顶部 `KV_OAI_AG00` 至 `AG05`、底部 `KV_OAI_ACT06` 至 `ACT12` 与旋钮摇杆绑定为原厂插件固定动作，日常缺少高频编码与模型操控入口，且多窗口并存时难以稳定命中焦点。Micro Input 独占 USB Vendor 接口并用可编辑本机方案 `Codex · Micro Input` 接管全部 20 个控制位，在保留原设备配置不被静默覆写的同时，开放每一个键位供个人习惯重塑。
 - **补齐原厂插件缺少的实用编码动作。** 默认下排七键直接提供实时语音、聚焦 `com.openai.codex` 输入框、新建标签页 `Cmd+T`、切换内置浏览器与工作区布局 `Cmd+Shift+B`、在当前项目新建对话 `Cmd+N`、点击听写以及停听写提交；所有多窗口场景自动锁定当前焦点 Codex 窗口，避免误操作切到背景项目。
-- **模型、推理力度、滚动与短语指令随心组合。** 可在工作台为 Codex 单独绑定推理档位递增与递减、切换 Fast 与 Standard 速度模式、不抢窗口焦点的对话上下滚动与一键跳到底部、长按旋钮原地切模型，或是将「点击听写」改回「按住说话」、把单键映射成不破坏原剪贴板的 `Continue`、`Test`、`Review`、`Commit`、`Summary` 与自定义工程短语粘贴或显式提交，也能混搭通用 Mac 快捷键与跨应用审批和停止按键。
+- **模型、推理力度、滚动与短语指令随心组合。** 可在工作台为 Codex 单独绑定推理档位递增与递减、切换 Fast 与 Standard 速度模式、不抢窗口焦点的对话上下滚动与一键跳到底部、直接旋转旋钮原位切模型与按下旋钮搜会话，或是将「点击听写」改回「按住说话」、把单键映射成不破坏原剪贴板的 `Continue`、`Test`、`Review`、`Commit`、`Summary` 与自定义工程短语粘贴或显式提交，也能混搭通用 Mac 快捷键与跨应用审批和停止按键。
 
 #### 在 macOS 覆盖通用按键配置与最新固件升级
 
@@ -78,7 +78,7 @@ Micro Input 针对每个关键子系统吸收了同类开源项目的成熟结�
 
 很多桌面配置工具把小键盘简化成一排普通快捷键。Micro Input 通过 macOS 独占 Vendor HID 接口连接 `303A:8298` 设备，使用 267 字节编号报告 `0x06` 与通道 `0x02` 配合 Karabiner 去重，把机械轴、旋钮、摇杆、底排微动与状态灯的物理特性发挥到实用状态。
 
-- **旋钮的多手势与模型选择器。** 除短按、左旋和右旋外，`encoder_model_picker.rs` 实现了完整的多阶段手势状态机。按住旋钮同时旋转触发快速滚动，长按旋钮 350 ms 以上可直接打开当前目标 Agent 的模型选择页，随后旋转旋钮或上下拨动摇杆切换模型，水平轻扫鼠标或左右拨动摇杆调节推理力度，再次按下旋钮确认选择，闲置 12 秒自动退出。工作台内建 6 套旋钮与摇杆组合预设，覆盖模型选择、Working 与未读会话轮询、双滚轮、对话滚动、推理档位和硬件鼠标模式。
+- **旋钮的多手势与模型选择器。** 除常规按键映射外，`encoder_model_picker.rs` 实现了完整的多阶段手势状态机。在桌面 Agent 方案下，直接左右旋转旋钮即可不抢输入框焦点原位展开模型列表并切换模型，随后水平轻扫鼠标或左右拨动摇杆调节推理力度，短按旋钮确认选择；无活跃弹层时无论短按或长按旋钮均统一打开会话搜索（`Cmd+K`）并进入旋钮选会话；按住旋钮同时旋转触发快速滚动，闲置 12 秒自动退出。工作台内建 6 套旋钮与摇杆组合预设，覆盖模型选择、Working 与未读会话轮询、双滚轮、对话滚动、推理档位和硬件鼠标模式。
 - **摇杆双模运行。** 在软件模式中，摇杆驱动不抢焦点的 8 向极坐标「轮盘菜单」，必须先回中再拨动选区，支持旋钮按下确认或摇杆回弹确认，慢速回中则取消。升级至官方 `0.7.0-rc.16` 预发布固件后，摇杆可切入固件原生 `MOUSE` 与 `SCROLL` 模式，提供 `Precise`、`Slow`、`Standard`、`Fast` 四档预设、13 项 `mouse.config` 底层曲线参数、摇杆死区调校与跨主机脱机生效的 `MS_*` HID 鼠标键码。
 - **底排双微动自由切换 1U+1U 与 2U 宽键。** 针对底行左中两个微动开关 `AG10` 与 `AG11`，主机偏好支持随时在拆成两个 1U 按键与合并为 2U 宽键之间切换。合并模式下通过 `WideKeyMerger` 对双微动按位掩码去重，直到最后一个微动松开才结束按住手势，避免并排开关触发微差导致的误松手。
 - **六层物理共存与逐键状态灯。** 第 1 层完整保留 20 个控制位的 `Codex · Micro Input` 本机控制，同时通过 `SharedVendorBridge` 将第 2、3 层顶部按键映射为 `KV_OAI_AG06` 至 `KV_OAI_AG17` 专属通道。这些机械键帽直接作为 AI 会话状态指示灯使用，运行中呼吸绿光，完成待查看常亮海洋蓝光，阅读后自动熄灭，并且只以固件 `v.oai.thstatus` 总线真实 ACK 确认同步状态，在到达 900 次请求边界前自动预轮转会话。
@@ -168,14 +168,14 @@ Micro Input handles daily macOS key configuration and official firmware updates 
 
 - **Antigravity keymap ready out of the box.** Starter controls cover focusing `com.google.antigravity`, composer input focus, new conversations, project picker, workspace quick-switch, model picker, Gemini Live voice toggle, built-in browser, terminal panel, split right, hold-to-talk, and submit after confirmed dictation stop.
 - **Hardware keycaps track real unread watermarks.** Top slots track primary conversations after subagent filtering, retain ocean-blue unread indicators past 15 minutes, clear automatically once viewed frontmost at `/c/<cid>`, and switch sessions directly through sidebar links.
-- **Voice and model controls tuned to hardware cadence.** Holding the encoder enters Antigravity's model picker and adjusts reasoning effort without reaching for dropdown menus, while bottom `AG10` and `AG11` switches merge into a debounced 2U wide dictation key or split back into dual 1U keys for new conversation and hold-to-talk.
+- **Voice and model controls tuned to hardware cadence.** Rotating the encoder directly opens Antigravity's model picker in place without stealing composer focus and adjusts reasoning effort, pressing or holding the encoder searches conversations, and bottom `AG10` and `AG11` switches merge into a debounced 2U wide dictation key or split back into dual 1U keys for new conversation and hold-to-talk.
 - **Responsive, zero-patch Accessibility execution.** Integrates cleanly through macOS Accessibility and observable endpoints without patching the target app, reducing Antigravity 2.31.0 release composer focus median time to 284.3 ms.
 
 #### Customizable Codex Controls Beyond the Stock Plugin
 
 - **Frees all 20 controls locked by the factory Codex plugin.** Firmware 0.6.3 hardcodes top slots `KV_OAI_AG00` through `AG05`, bottom actions `KV_OAI_ACT06` through `ACT12`, and stock encoder bindings, missing common editor controls and failing to track active multi-window focus reliably. Micro Input claims exclusive USB Vendor access and exposes an editable `Codex · Micro Input` profile across every control while preserving factory device originals untouched.
 - **Adds everyday coding shortcuts missing from the vendor plugin.** The upgraded bottom seven keys map real-time voice, `com.openai.codex` input focus, new tab `Cmd+T`, browser and workspace layout toggle `Cmd+Shift+B`, new chat in project `Cmd+N`, click dictation, and submit after confirmed dictation completion, anchored to the currently focused Codex window across multiple projects.
-- **Freely remix models, effort, scroll, voice modes, and prompts.** Remap controls in the workbench to dedicated `effort-up` and `effort-down` adjustments, Fast and Standard mode switching, non-focus-stealing chat scrolling and scroll-to-bottom, encoder model picking, switching between click dictation and `push-to-talk`, clipboard-safe `Continue`, `Test`, `Review`, `Commit`, and `Summary` prompt actions, or generic macOS shortcuts and cross-app approval keys.
+- **Freely remix models, effort, scroll, voice modes, and prompts.** Remap controls in the workbench to dedicated `effort-up` and `effort-down` adjustments, Fast and Standard mode switching, non-focus-stealing chat scrolling and scroll-to-bottom, direct-turn encoder model picking and press-to-search, switching between click dictation and `push-to-talk`, clipboard-safe `Continue`, `Test`, `Review`, `Commit`, and `Summary` prompt actions, or generic macOS shortcuts and cross-app approval keys.
 
 #### Full General-Key Mapping and Official Firmware Updates on macOS
 
@@ -209,7 +209,7 @@ Micro Input borrows proven designs across subsystems while closing gaps specific
 
 Micro Input opens an exclusive macOS Vendor HID link to `303A:8298` over 267-byte numbered report `0x06` and channel `0x02` paired with Karabiner deduplication to turn every switch, dial, and LED on the board into predictable daily hardware.
 
-- **Multi-stage rotary encoder picker and presets.** `encoder_model_picker.rs` handles short presses, turns, press-and-turn fast scrolling, and a 350 ms hold gesture that enters model and effort selection across dial, mouse swipe, and joystick tilt, exiting automatically after 12 seconds idle. Six built-in knob and joystick presets cover model picking, Working and unread cycling, dual scroll, chat scrolling, effort levels, and hardware mouse mode.
+- **Multi-stage rotary encoder picker and presets.** `encoder_model_picker.rs` opens the target Agent's model picker directly on idle left or right turns without stealing input focus, adjusts reasoning effort via horizontal mouse flick or joystick tilt, unifies short presses and 350 ms holds on conversation search when idle, preserves press-and-turn fast scrolling, and exits automatically after 12 seconds idle. Six built-in knob and joystick presets cover model picking, Working and unread cycling, dual scroll, chat scrolling, effort levels, and hardware mouse mode.
 - **Dual-mode joystick operation.** In software mode, the joystick drives an 8-direction polar wheel menu that avoids stealing window focus, requiring neutral return before selection and supporting encoder click or spring-back confirmation. On `0.7.0-rc.16` firmware, it also unlocks hardware `MOUSE` and `SCROLL` modes with `Precise`, `Slow`, `Standard`, and `Fast` profiles, 13 `mouse.config` curve parameters, deadzone tuning, and host-independent `MS_*` HID mouse keycodes.
 - **Flexible bottom `1U+1U` split or `2U` merged micro-switches.** Bottom switches `AG10` and `AG11` can switch globally between dual 1U keys and a merged 2U bar deduplicated by bitmask in `WideKeyMerger` until the final switch releases.
 - **Six-layer coexistence and ACK-verified per-key status LEDs.** Layer 1 preserves 20-control `Codex · Micro Input` behavior while `SharedVendorBridge` assigns Layer 2 and 3 top slots to `KV_OAI_AG06` through `KV_OAI_AG17` for green running and ocean-blue unread keycaps backed by firmware `v.oai.thstatus` ACK tracking and proactive session rotation at 900 requests.
