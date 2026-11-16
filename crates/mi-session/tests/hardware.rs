@@ -2,19 +2,22 @@ mod support;
 use async_trait::async_trait;
 use base64::Engine;
 use mi_proto::{Framer, NativeFramer};
-use mi_transport::{HidCandidate, HidLink, HidTransport, LinkBackend, TransportError};
+use mi_transport::{
+    HidCandidate, HidLink, HidTransport, LinkBackend, TransportError, TransportHint, UsagePair,
+};
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use std::{
     collections::BTreeMap,
     fs,
+    os::unix::fs::PermissionsExt,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
 };
-use support::{fixture, hardware::*, temp_name};
+use support::{hardware::*, temp_name};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -36,7 +39,9 @@ enum Fault {
     MutationError(usize),
 }
 struct Fake {
-    inner: fixture::Fixture,
+    opens: AtomicUsize,
+    enumerations: AtomicUsize,
+    closed: Arc<AtomicBool>,
     fault: Fault,
     requests: Arc<Mutex<Vec<Value>>>,
 }
@@ -52,7 +57,9 @@ struct Link {
 impl Fake {
     fn new(fault: Fault) -> Self {
         Self {
-            inner: fixture::Fixture::new(fixture::Fault::None),
+            opens: AtomicUsize::new(0),
+            enumerations: AtomicUsize::new(0),
+            closed: Arc::new(AtomicBool::new(false)),
             fault,
             requests: Arc::new(Mutex::new(vec![])),
         }
@@ -60,13 +67,27 @@ impl Fake {
 }
 impl HidTransport for Fake {
     fn enumerate(&self) -> std::result::Result<Vec<HidCandidate>, TransportError> {
-        self.inner.enumerate()
+        self.enumerations.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![HidCandidate {
+            vid: 0x303a,
+            pid: 0x8298,
+            usage_page: 0xff00,
+            usage: 1,
+            usage_pairs: vec![UsagePair {
+                page: 0xff00,
+                usage: 1,
+            }],
+            transport_hint: TransportHint::Usb,
+            product: "Independent synthetic USB".into(),
+            path: "synthetic-no-native-open".into(),
+            serial_number: None,
+        }])
     }
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
-        self.inner.subscribe()
+        tokio::sync::broadcast::channel(1).1
     }
     fn open(&self, _: &str) -> std::result::Result<Arc<dyn HidLink>, TransportError> {
-        self.inner.opens.fetch_add(1, Ordering::SeqCst);
+        self.opens.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();
         let mut files = BTreeMap::from([
             ("keymap.json".into(), b"raw unparsed configuration".to_vec()),
@@ -91,7 +112,7 @@ impl HidTransport for Fake {
             framer: Mutex::new(NativeFramer::default()),
             requests: self.requests.clone(),
             fault: self.fault,
-            closed: self.inner.closed.clone(),
+            closed: self.closed.clone(),
         }))
     }
 }
@@ -219,7 +240,17 @@ async fn h0_backs_up_raw_bytes_without_mutations_and_distinguishes_absence() {
                 .unwrap()
                 .is_empty());
         }
-        assert!(fake.inner.closed.load(Ordering::SeqCst));
+        assert!(fake.closed.load(Ordering::SeqCst));
+        assert_eq!(
+            fs::metadata(&out.directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        for item in fs::read_dir(&out.directory).unwrap() {
+            assert_eq!(
+                item.unwrap().metadata().unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         fs::remove_dir_all(out.directory).unwrap();
     }
 }
@@ -256,7 +287,7 @@ async fn h1_exact_wire_sequence_and_configuration_preservation() {
         fs::read(out.directory.join("keymap.json")).unwrap(),
         b"raw unparsed configuration"
     );
-    assert!(fake.inner.closed.load(Ordering::SeqCst));
+    assert!(fake.closed.load(Ordering::SeqCst));
     fs::remove_dir_all(out.directory).unwrap();
 }
 #[tokio::test]
@@ -273,7 +304,7 @@ async fn h1_stops_without_any_followup_request_after_uncertain_mutation() {
         assert!(!out.passed);
         assert!(!out.cleanup_confirmed);
         assert_eq!(mutations(&fake).len(), count);
-        assert!(fake.inner.closed.load(Ordering::SeqCst));
+        assert!(fake.closed.load(Ordering::SeqCst));
         if [Fault::WrongId, Fault::DeleteTimeout].contains(&fault) {
             assert!(["fs.writebin", "fs.delete"].contains(
                 &fake.requests.lock().unwrap().last().unwrap()["method"]
@@ -302,6 +333,14 @@ async fn incomplete_identity_foreign_traffic_and_budget_fail_before_writes() {
 }
 #[tokio::test]
 async fn invalid_authority_target_review_or_hash_never_enumerates() {
+    for invalid in [
+        "mi_123456789abc.txt/",
+        "../mi_123456789abc.txt",
+        "mi_123456789abC.txt",
+        "smart_actions.json",
+    ] {
+        assert!(temp_name(invalid).is_err(), "{invalid}");
+    }
     for n in 0..4 {
         let fake = Fake::new(Fault::None);
         let mut opts = options(true);
@@ -312,7 +351,7 @@ async fn invalid_authority_target_review_or_hash_never_enumerates() {
             _ => opts.expected_keymap = None,
         };
         assert!(run(&fake, &opts, Duration::ZERO).await.is_err());
-        assert_eq!(fake.inner.enumerations.load(Ordering::SeqCst), 0);
+        assert_eq!(fake.enumerations.load(Ordering::SeqCst), 0);
     }
 }
 #[tokio::test]
@@ -321,7 +360,7 @@ async fn stale_baseline_and_wrong_path_never_write() {
     let mut opts = options(true);
     opts.path = "other".into();
     assert!(run(&fake, &opts, Duration::ZERO).await.is_err());
-    assert_eq!(fake.inner.opens.load(Ordering::SeqCst), 0);
+    assert_eq!(fake.opens.load(Ordering::SeqCst), 0);
     opts.path = "synthetic-no-native-open".into();
     opts.expected_keymap = Some("0".repeat(64));
     let out = run(&fake, &opts, Duration::ZERO).await.unwrap();
@@ -353,7 +392,7 @@ async fn each_mutation_failure_is_terminal_without_replay_or_cleanup() {
                 .as_str()
                 .unwrap()
         ));
-        assert!(fake.inner.closed.load(Ordering::SeqCst));
+        assert!(fake.closed.load(Ordering::SeqCst));
         fs::remove_dir_all(out.directory).unwrap();
     }
 }
