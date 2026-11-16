@@ -402,13 +402,81 @@ struct HeldDictation {
     adapter: String,
 }
 
-fn fnv1a_str(s: &str) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325 ^ (s.len() as u64);
-    for &byte in s.as_bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+#[derive(Clone, Copy)]
+pub(crate) struct Fnv1a(u64);
+
+impl Fnv1a {
+    pub(crate) const fn new() -> Self {
+        Self(0xcbf29ce484222325)
     }
-    hash
+
+    pub(crate) fn write_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    pub(crate) fn write_u8(&mut self, v: u8) {
+        self.write_bytes(&[v]);
+    }
+
+    pub(crate) fn write_bool(&mut self, v: bool) {
+        self.write_u8(u8::from(v));
+    }
+
+    pub(crate) fn write_u16(&mut self, v: u16) {
+        self.write_bytes(&v.to_le_bytes());
+    }
+
+    pub(crate) fn write_u64(&mut self, v: u64) {
+        self.write_bytes(&v.to_le_bytes());
+    }
+
+    pub(crate) fn write_f64(&mut self, v: f64) {
+        let bits = if v == 0.0 { 0 } else { v.to_bits() };
+        self.write_u64(bits);
+    }
+
+    pub(crate) fn write_str(&mut self, s: &str) {
+        self.write_u64(s.len() as u64);
+        self.write_bytes(s.as_bytes());
+    }
+
+    pub(crate) fn write_opt_str(&mut self, s: Option<&str>) {
+        match s {
+            Some(val) => {
+                self.write_u8(1);
+                self.write_str(val);
+            }
+            None => self.write_u8(0),
+        }
+    }
+
+    pub(crate) fn write_rect(&mut self, rect: ScreenRect) {
+        self.write_f64(rect.x);
+        self.write_f64(rect.y);
+        self.write_f64(rect.width);
+        self.write_f64(rect.height);
+    }
+
+    pub(crate) fn write_candidate(&mut self, c: &mi_transport::HidCandidate) {
+        self.write_str(&c.path);
+        self.write_opt_str(c.serial_number.as_deref());
+        self.write_str(&c.product);
+        self.write_u16(c.vid);
+        self.write_u16(c.pid);
+    }
+
+    pub(crate) const fn finish(self) -> u64 {
+        self.0
+    }
+}
+
+fn fnv1a_str(s: &str) -> u64 {
+    let mut h = Fnv1a::new();
+    h.write_str(s);
+    h.finish()
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -416,25 +484,23 @@ struct RuntimeCommitStamp {
     draft_revision: u64,
     host_revision: u64,
     device_connected: bool,
-    has_connected_candidate: bool,
-    usb_candidates_len: usize,
+    usb_candidates_hash: u64,
     hardware_rpc_verified: bool,
     six_layer_busy: bool,
     six_layer_present: bool,
     six_layer_user_pinned: bool,
     ptt_active: bool,
     board_routing: BoardRouting,
-    radial_enabled: bool,
-    radial_session_active: bool,
+    radial_state_hash: u64,
     radial_readiness: RadialInputReadiness,
-    overlay_window_active: bool,
-    overlay_cheat_sheet_visible: bool,
-    main_visible_frame: ScreenRect,
-    screens_len: usize,
+    overlay_state_hash: u64,
+    screen_geometry_hash: u64,
     last_cursor_position: ScreenPoint,
     accessibility_trusted: bool,
+    competing_input_app_running: bool,
     busy: bool,
     status_menu_open: bool,
+    banner_flash_count: u64,
     selected_binding_slot: Option<u32>,
     selected_surface: ControlSurfaceId,
     selected_joystick_direction: JoystickDirection8,
@@ -445,7 +511,7 @@ struct RuntimeCommitStamp {
     status_message_hash: u64,
     firmware_phase_hash: u64,
     firmware_message_hash: u64,
-    v070_status_hash: u64,
+    v070_text_hash: u64,
 }
 
 pub struct WorkbenchStore {
@@ -985,7 +1051,7 @@ impl WorkbenchStore {
             dirty |= self.refresh_accessibility_trusted();
         }
         dirty |= self.refresh_competing_input_app_running(false);
-        dirty |= self.poll_workspace_lifecycle();
+        self.poll_workspace_lifecycle();
         if self.system_lifecycle == SystemLifecycle::Awake && !self.firmware_update.reserved() {
             self.poll_six_layer_runtime();
         }
@@ -2044,9 +2110,11 @@ impl WorkbenchStore {
                     self.sa_rgb_coordinator.clear_on_disconnect();
                     needs_commit = true;
                 }
+                let before_gen = self.projection_generation;
                 if !self.config.isolated && !self.device_session_connected() {
                     let _ = self.connect_default_usb_with_execution(false);
-                } else if needs_commit {
+                }
+                if needs_commit && self.projection_generation == before_gen {
                     self.commit_runtime_update();
                 }
                 None
@@ -2776,6 +2844,9 @@ impl WorkbenchStore {
         self.commit_runtime_update();
         if self.projection.header.banner.is_caution() {
             self.banner_flash_count += 1;
+            self.projection.banner_flash_count = self.banner_flash_count;
+            self.projection_generation = self.projection_generation.wrapping_add(1);
+            self.last_committed_stamp = Some(self.current_runtime_stamp());
         }
         Ok(())
     }
@@ -2790,12 +2861,15 @@ impl WorkbenchStore {
         let bundle_id = bundle_id
             .map(str::trim)
             .filter(|bundle| !bundle.is_empty() && *bundle != "*");
-        self.refresh_accessibility_trusted();
+        let before_gen = self.projection_generation;
+        let mut env_dirty = self.refresh_accessibility_trusted();
         if bundle_id == Some("com.worklouder.input") {
-            self.applications
-                .insert("com.worklouder.input".to_string(), true);
+            env_dirty |= self
+                .applications
+                .insert("com.worklouder.input".to_string(), true)
+                != Some(true);
         } else {
-            self.refresh_competing_input_app_running(false);
+            env_dirty |= self.refresh_competing_input_app_running(false);
         }
         self.navigation_foreground_changed(bundle_id);
         let bundle_changed = self.foreground_bundle_id.as_deref() != bundle_id;
@@ -2804,25 +2878,31 @@ impl WorkbenchStore {
         }
         self.foreground_bundle_id = bundle_id.map(str::to_owned);
         let unlocked = self.document_store.locked_profile_id().is_none();
-        if let Some(running) = &self.six_layer_running {
+        let updated = if let Some(running) = &self.six_layer_running {
             let running_updated = running.foreground_changed(bundle_id);
             if bundle_changed && unlocked {
                 self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
-                return running_updated;
+                running_updated
+            } else {
+                if bundle_id == Some("com.worklouder.input") {
+                    self.commit_runtime_update();
+                }
+                false
+            }
+        } else {
+            if unlocked && bundle_changed {
+                self.sync_v070_session_sa_rgb();
             }
             if bundle_id == Some("com.worklouder.input") {
                 self.commit_runtime_update();
             }
-            return false;
-        }
-        if unlocked && bundle_changed {
-            self.sync_v070_session_sa_rgb();
-        }
-        if bundle_id == Some("com.worklouder.input") {
+            false
+        };
+        if env_dirty && self.projection_generation == before_gen {
             self.commit_runtime_update();
         }
-        false
+        updated
     }
 
     pub fn set_host_execution_enabled(&mut self, enabled: bool) -> Result<(), WorkbenchError> {
@@ -4117,6 +4197,7 @@ impl WorkbenchStore {
         self.capture_runtime_view();
         self.commit_local_update();
         self.reconcile_presentation();
+        self.last_committed_stamp = Some(self.current_runtime_stamp());
     }
 
     fn observed_firmware_version(&self) -> Option<String> {
@@ -4243,7 +4324,69 @@ impl WorkbenchStore {
         if changed {
             self.projection_generation = self.projection_generation.wrapping_add(1);
         }
-        self.last_committed_stamp = Some(self.current_runtime_stamp());
+        self.last_committed_stamp = None;
+    }
+
+    fn usb_candidates_hash(&self) -> u64 {
+        let mut h = Fnv1a::new();
+        match &self.connected_candidate {
+            Some(c) => {
+                h.write_u8(1);
+                h.write_candidate(c);
+            }
+            None => h.write_u8(0),
+        }
+        h.write_u64(self.available_usb_candidates.len() as u64);
+        for c in &self.available_usb_candidates {
+            h.write_candidate(c);
+        }
+        h.finish()
+    }
+
+    fn radial_state_hash(&self) -> u64 {
+        let mut h = Fnv1a::new();
+        h.write_bool(self.radial_state.enabled());
+        h.write_u8(match self.radial_state.confirm_mode() {
+            RadialConfirmMode::EncoderPress => 0,
+            RadialConfirmMode::SpringBack => 1,
+        });
+        match self.radial_state.session() {
+            None => h.write_u8(0),
+            Some(session) => {
+                h.write_u8(1);
+                h.write_u64(session.input_session);
+                match session.selected {
+                    Some(sector) => {
+                        h.write_u8(1);
+                        h.write_u8(sector.as_u8());
+                    }
+                    None => h.write_u8(0),
+                }
+                h.write_rect(session.anchor_frame);
+                h.write_u64(session.route.document_revision);
+                h.write_u64(session.route.host_revision);
+                h.write_opt_str(session.route.profile_id.as_deref());
+                h.write_str(&session.route.profile_name);
+            }
+        }
+        h.finish()
+    }
+
+    fn screen_geometry_hash(&self) -> u64 {
+        let mut h = Fnv1a::new();
+        h.write_rect(self.screen_geometry.main_visible_frame);
+        h.write_u64(self.screen_geometry.screens.len() as u64);
+        for rect in &self.screen_geometry.screens {
+            h.write_rect(*rect);
+        }
+        h.finish()
+    }
+
+    fn v070_text_hash(&self) -> u64 {
+        let mut h = Fnv1a::new();
+        h.write_str(&self.v070_hardware.projection.status_message);
+        h.write_opt_str(self.v070_hardware.projection.last_error.as_deref());
+        h.finish()
     }
 
     fn current_runtime_stamp(&self) -> RuntimeCommitStamp {
@@ -4251,25 +4394,27 @@ impl WorkbenchStore {
             draft_revision: self.document_store.draft.revision,
             host_revision: self.document_store.host_revision(),
             device_connected: self.device_session_connected(),
-            has_connected_candidate: self.connected_candidate.is_some(),
-            usb_candidates_len: self.available_usb_candidates.len(),
+            usb_candidates_hash: self.usb_candidates_hash(),
             hardware_rpc_verified: self.hardware_rpc_verified,
             six_layer_busy: self.six_layer_job.is_some(),
             six_layer_present: self.six_layer_running.is_some(),
             six_layer_user_pinned: self.six_layer_user_pinned,
             ptt_active: self.ptt_controller.is_active,
             board_routing: self.board_routing,
-            radial_enabled: self.radial_state.enabled(),
-            radial_session_active: self.radial_state.session().is_some(),
+            radial_state_hash: self.radial_state_hash(),
             radial_readiness: self.radial_readiness,
-            overlay_window_active: self.overlay_controller.main_workbench_window_active(),
-            overlay_cheat_sheet_visible: self.overlay_controller.is_cheat_sheet_visible(),
-            main_visible_frame: self.screen_geometry.main_visible_frame,
-            screens_len: self.screen_geometry.screens.len(),
+            overlay_state_hash: self.overlay_controller.state_stamp_hash(),
+            screen_geometry_hash: self.screen_geometry_hash(),
             last_cursor_position: self.last_cursor_position,
             accessibility_trusted: self.accessibility_trusted,
+            competing_input_app_running: self
+                .applications
+                .get("com.worklouder.input")
+                .copied()
+                .unwrap_or(false),
             busy: self.busy,
             status_menu_open: self.status_menu_open,
+            banner_flash_count: self.banner_flash_count as u64,
             selected_binding_slot: self.selected_binding_slot,
             selected_surface: self.selected_surface,
             selected_joystick_direction: self.selected_joystick_direction,
@@ -4280,7 +4425,7 @@ impl WorkbenchStore {
             status_message_hash: fnv1a_str(&self.status_message),
             firmware_phase_hash: fnv1a_str(&self.firmware_update.projection.phase),
             firmware_message_hash: fnv1a_str(&self.firmware_update.projection.message),
-            v070_status_hash: fnv1a_str(&self.v070_hardware.projection.status_message),
+            v070_text_hash: self.v070_text_hash(),
         }
     }
 
@@ -4292,12 +4437,40 @@ impl WorkbenchStore {
             }
         }
         if let Some(running) = &self.six_layer_running {
-            return !running.observed_firmware_version_eq(prev);
+            if !running.observed_firmware_version_eq(None) {
+                return !running.observed_firmware_version_eq(prev);
+            }
         }
         if let Some(session) = &self.device_session {
-            return session.observed_firmware_version().as_deref() != prev;
+            if let Some(ver) = session.observed_firmware_version() {
+                return Some(ver.as_str()) != prev;
+            }
         }
         prev.is_some()
+    }
+
+    fn v070_hardware_fields_dirty(&self) -> bool {
+        let cur = &self.v070_hardware.projection;
+        let prev = &self.projection.v070_hardware;
+        cur.supported != prev.supported
+            || cur.busy != prev.busy
+            || cur.synced != prev.synced
+            || cur.active_profile != prev.active_profile
+            || cur.active_layer != prev.active_layer
+            || cur.active_joystick_mode != prev.active_joystick_mode
+            || cur.battery_percent != prev.battery_percent
+            || cur.is_charging != prev.is_charging
+            || cur.host_sleep_status != prev.host_sleep_status
+            || self.document_store.v070_auto_layer_sync_enabled() != prev.auto_layer_sync_enabled
+            || self.document_store.v070_session_sa_rgb_sync_enabled()
+                != prev.session_sa_rgb_sync_enabled
+            || self.document_store.preferred_device_serial_str()
+                != prev.preferred_device_serial.as_deref()
+            || cur.mouse != prev.mouse
+            || cur.pm_config != prev.pm_config
+            || cur.pm_state != prev.pm_state
+            || cur.device_name != prev.device_name
+            || cur.sa_rgb != prev.sa_rgb
     }
 
     fn external_runtime_dirty(&self) -> bool {
@@ -4331,7 +4504,7 @@ impl WorkbenchStore {
         {
             return true;
         }
-        if self.observed_firmware_changed() {
+        if self.v070_hardware_fields_dirty() || self.observed_firmware_changed() {
             return true;
         }
         match (&self.six_layer_running, &self.six_layer_view) {
@@ -5736,115 +5909,12 @@ impl WorkbenchStore {
                     }
                 }
                 let before_gen = self.projection_generation;
-                let receipt = (|| -> Option<HostActionReceipt> {
-                    if !self.document_store.host_execution_enabled() {
-                        self.status_message = format!("已按下 {binding_id}（已暂停软件按键映射）");
-                        self.commit_runtime_update();
-                        return None;
-                    }
-
-                    if self.encoder_model_picker.expire_if_idle(now).is_some() {
-                        self.set_model_picker_mouse_capture(false);
-                    }
-
-                    if binding_id == "ENC_CLK" {
-                        self.dial_pressed = true;
-                        self.dial_turned_while_pressed = false;
-                        let hold_action = self.resolve_encoder_hold_physical_action(&profile_id);
-                        let picker_active = self.encoder_model_picker.is_active(now);
-                        if hold_action.is_some() || picker_active {
-                            let hold_gen = self
-                                .encoder_model_picker
-                                .on_encoder_press(event.session_id, now);
-                            self.encoder_hold_profile_id = Some(profile_id);
-                            if hold_action.is_some() {
-                                let tx = self.hardware_event_tx.clone();
-                                let session_id = event.session_id;
-                                self.tokio_runtime.spawn(async move {
-                                    tokio::time::sleep(
-                                        crate::encoder_model_picker::ENCODER_HOLD_THRESHOLD,
-                                    )
-                                    .await;
-                                    let _ = tx.send(HardwareLoopEvent::EncoderHoldTimer {
-                                        session_id,
-                                        hold_generation: hold_gen,
-                                    });
-                                });
-                            }
-                            self.commit_runtime_update();
-                            return None;
-                        }
-                    } else if matches!(
-                        binding_id.as_str(),
-                        "AG13" | "ENC_CC" | "ENC_CCW" | "AG14" | "ENC_CW"
-                    ) {
-                        let clockwise = matches!(binding_id.as_str(), "AG14" | "ENC_CW");
-                        match self.encoder_model_picker.on_encoder_turn(clockwise, now) {
-                            crate::encoder_model_picker::EncoderTurnOutcome::ModelPicker(cmd) => {
-                                if let Some(adapter) = self
-                                    .encoder_model_picker
-                                    .active_adapter(now)
-                                    .map(str::to_owned)
-                                {
-                                    let action = cmd.into_host_action(adapter);
-                                    return self.execute_resolved_physical_action_with_session(
-                                        &profile_id,
-                                        &binding_id,
-                                        event.session_id,
-                                        action,
-                                    );
-                                }
-                            }
-                            crate::encoder_model_picker::EncoderTurnOutcome::FastScroll {
-                                ..
-                            } => {
-                                self.dial_turned_while_pressed = true;
-                                self.encoder_hold_profile_id = None;
-                            }
-                            crate::encoder_model_picker::EncoderTurnOutcome::NormalSlot => {}
-                        }
-                    } else if matches!(binding_id.as_str(), "AG15" | "AG16" | "AG17" | "AG18") {
-                        if let Some(cmd) = self
-                            .encoder_model_picker
-                            .on_sector_direction_while_active(&binding_id, now)
-                        {
-                            if let Some(adapter) = self
-                                .encoder_model_picker
-                                .active_adapter(now)
-                                .map(str::to_owned)
-                            {
-                                let action = cmd.into_host_action(adapter);
-                                return self.execute_resolved_physical_action_with_session(
-                                    &profile_id,
-                                    &binding_id,
-                                    event.session_id,
-                                    action,
-                                );
-                            }
-                        }
-                        if self.encoder_model_picker.is_active(now) {
-                            self.cancel_encoder_model_picker();
-                        }
-                    } else if self.encoder_model_picker.is_active(now) {
-                        self.cancel_encoder_model_picker();
-                    }
-
-                    let layout = self.current_bottom_row_layout();
-                    let Some(action) =
-                        self.resolve_physical_action(&profile_id, &binding_id, layout)
-                    else {
-                        self.status_message = format!("已按下 {binding_id}（当前槽位未绑定动作）");
-                        self.commit_runtime_update();
-                        return None;
-                    };
-
-                    self.execute_resolved_physical_action_with_session(
-                        &profile_id,
-                        &binding_id,
-                        event.session_id,
-                        action,
-                    )
-                })();
+                let receipt = self.dispatch_pressed_physical_binding(
+                    profile_id,
+                    binding_id,
+                    event.session_id,
+                    now,
+                );
                 if selection_changed && self.projection_generation == before_gen {
                     self.commit_runtime_update();
                 }
@@ -5852,6 +5922,113 @@ impl WorkbenchStore {
             }
             _ => None,
         }
+    }
+
+    fn dispatch_pressed_physical_binding(
+        &mut self,
+        profile_id: String,
+        binding_id: String,
+        session_id: u64,
+        now: Instant,
+    ) -> Option<HostActionReceipt> {
+        if !self.document_store.host_execution_enabled() {
+            self.status_message = format!("已按下 {binding_id}（已暂停软件按键映射）");
+            self.commit_runtime_update();
+            return None;
+        }
+
+        if self.encoder_model_picker.expire_if_idle(now).is_some() {
+            self.set_model_picker_mouse_capture(false);
+        }
+
+        if binding_id == "ENC_CLK" {
+            self.dial_pressed = true;
+            self.dial_turned_while_pressed = false;
+            let hold_action = self.resolve_encoder_hold_physical_action(&profile_id);
+            let picker_active = self.encoder_model_picker.is_active(now);
+            if hold_action.is_some() || picker_active {
+                let hold_gen = self.encoder_model_picker.on_encoder_press(session_id, now);
+                self.encoder_hold_profile_id = Some(profile_id);
+                if hold_action.is_some() {
+                    let tx = self.hardware_event_tx.clone();
+                    self.tokio_runtime.spawn(async move {
+                        tokio::time::sleep(crate::encoder_model_picker::ENCODER_HOLD_THRESHOLD)
+                            .await;
+                        let _ = tx.send(HardwareLoopEvent::EncoderHoldTimer {
+                            session_id,
+                            hold_generation: hold_gen,
+                        });
+                    });
+                }
+                self.commit_runtime_update();
+                return None;
+            }
+        } else if matches!(
+            binding_id.as_str(),
+            "AG13" | "ENC_CC" | "ENC_CCW" | "AG14" | "ENC_CW"
+        ) {
+            let clockwise = matches!(binding_id.as_str(), "AG14" | "ENC_CW");
+            match self.encoder_model_picker.on_encoder_turn(clockwise, now) {
+                crate::encoder_model_picker::EncoderTurnOutcome::ModelPicker(cmd) => {
+                    if let Some(adapter) = self
+                        .encoder_model_picker
+                        .active_adapter(now)
+                        .map(str::to_owned)
+                    {
+                        let action = cmd.into_host_action(adapter);
+                        return self.execute_resolved_physical_action_with_session(
+                            &profile_id,
+                            &binding_id,
+                            session_id,
+                            action,
+                        );
+                    }
+                }
+                crate::encoder_model_picker::EncoderTurnOutcome::FastScroll { .. } => {
+                    self.dial_turned_while_pressed = true;
+                    self.encoder_hold_profile_id = None;
+                }
+                crate::encoder_model_picker::EncoderTurnOutcome::NormalSlot => {}
+            }
+        } else if matches!(binding_id.as_str(), "AG15" | "AG16" | "AG17" | "AG18") {
+            if let Some(cmd) = self
+                .encoder_model_picker
+                .on_sector_direction_while_active(&binding_id, now)
+            {
+                if let Some(adapter) = self
+                    .encoder_model_picker
+                    .active_adapter(now)
+                    .map(str::to_owned)
+                {
+                    let action = cmd.into_host_action(adapter);
+                    return self.execute_resolved_physical_action_with_session(
+                        &profile_id,
+                        &binding_id,
+                        session_id,
+                        action,
+                    );
+                }
+            }
+            if self.encoder_model_picker.is_active(now) {
+                self.cancel_encoder_model_picker();
+            }
+        } else if self.encoder_model_picker.is_active(now) {
+            self.cancel_encoder_model_picker();
+        }
+
+        let layout = self.current_bottom_row_layout();
+        let Some(action) = self.resolve_physical_action(&profile_id, &binding_id, layout) else {
+            self.status_message = format!("已按下 {binding_id}（当前槽位未绑定动作）");
+            self.commit_runtime_update();
+            return None;
+        };
+
+        self.execute_resolved_physical_action_with_session(
+            &profile_id,
+            &binding_id,
+            session_id,
+            action,
+        )
     }
 
     fn execute_resolved_physical_action_with_session(

@@ -933,3 +933,170 @@ fn idle_poll_at_skips_projection_rebuild_and_commits_on_subpoll_or_external_dirt
     assert!(!store.poll_at(t_fw_start + Duration::from_millis(480)));
     assert_eq!(store.projection_generation(), ext_gen);
 }
+
+#[test]
+fn competing_input_app_quit_while_locked_clears_banner_on_foreground_and_poll() {
+    let (_dir, mut store, now) = active_store();
+    store.set_profile_locked(true, true).unwrap();
+    assert!(store.document_store.locked_profile_id().is_some());
+
+    if !mi_macos::is_bundle_running("com.worklouder.input") {
+        store.config.isolated = false;
+        store.config.auto_connect_usb = true;
+        store.set_accessibility_trusted_for_test(Some(true));
+        store.foreground_changed(Some("com.worklouder.input"));
+        assert!(store
+            .projection()
+            .status_menu
+            .competing_host_notice
+            .is_some());
+
+        store.update_now = now + Duration::from_secs(10);
+        store.foreground_changed(Some("com.google.antigravity"));
+        assert!(store
+            .projection()
+            .status_menu
+            .competing_host_notice
+            .is_none());
+        store.config.isolated = true;
+        store.config.auto_connect_usb = false;
+    }
+
+    store.accessibility_trusted_override = Some(false);
+    store.foreground_changed(Some("com.openai.codex"));
+    assert!(!store.projection().status_menu.accessibility_trusted);
+    assert!(store.projection().header.banner.is_caution());
+    store.set_accessibility_trusted_for_test(Some(true));
+
+    store.set_competing_input_app_running_for_test(true);
+    let _ = store.poll_at(now + Duration::from_secs(20));
+    assert!(store
+        .projection()
+        .status_menu
+        .competing_host_notice
+        .is_some());
+    let before_quit_gen = store.projection_generation();
+
+    store
+        .applications
+        .insert("com.worklouder.input".to_string(), false);
+    assert!(store.poll_at(now + Duration::from_secs(21)));
+    let after_quit_gen = store.projection_generation();
+    assert!(after_quit_gen > before_quit_gen);
+    assert!(store
+        .projection()
+        .status_menu
+        .competing_host_notice
+        .is_none());
+    assert!(!store.poll_at(now + Duration::from_secs(22)));
+    assert_eq!(store.projection_generation(), after_quit_gen);
+}
+
+#[test]
+fn commit_local_update_reconciles_status_item_host_on_next_poll_then_idles() {
+    let (_dir, mut store, now) = active_store();
+    let panels = Arc::new(PanelSpy::default());
+    let status = Arc::new(StatusSpy::default());
+    store.set_hosts(panels, status.clone());
+    let _ = store.poll_at(now);
+
+    let codex = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
+        .unwrap();
+    let herdr = store
+        .find_canonical_profile_id(CanonicalAgent::Herdr)
+        .unwrap();
+    let before_calls = status.calls.load(Ordering::SeqCst);
+
+    store
+        .document_store
+        .set_host_active_profile(Some(codex))
+        .unwrap();
+    store.browse_profile(&herdr).unwrap();
+    assert_eq!(store.projection().status_menu.active_profile_name, "Codex");
+    assert_eq!(status.calls.load(Ordering::SeqCst), before_calls);
+
+    let t1 = now + Duration::from_millis(100);
+    let _ = store.poll_at(t1);
+    assert_eq!(status.calls.load(Ordering::SeqCst), before_calls + 1);
+    let settled_gen = store.projection_generation();
+
+    for step in 1..=10_u64 {
+        assert!(!store.poll_at(t1 + Duration::from_millis(step * 150)));
+        assert_eq!(store.projection_generation(), settled_gen);
+        assert_eq!(status.calls.load(Ordering::SeqCst), before_calls + 1);
+    }
+}
+
+#[test]
+fn observed_firmware_fallback_from_six_layer_none_to_device_session_commits_once() {
+    let (dir, mut store, now) = active_store();
+    let _ = store.poll_at(now);
+
+    let (vendorless_session, _link_a, responder_a) =
+        v070_hardware_store::tests::spawn_mock_v070_session(
+            &store.tokio_runtime,
+            "0.7.0-rc.16",
+            Arc::new(Mutex::new(Vec::new())),
+        );
+    let (versioned_session, _link_b, responder_b) =
+        v070_hardware_store::tests::spawn_mock_v070_session(
+            &store.tokio_runtime,
+            "0.7.0-rc.16",
+            Arc::new(Mutex::new(Vec::new())),
+        );
+    store.tokio_runtime.block_on(vendorless_session.shutdown());
+    responder_a.abort();
+    assert_eq!(vendorless_session.observed_firmware_version(), None);
+    assert_eq!(
+        versioned_session.observed_firmware_version().as_deref(),
+        Some("0.7.0-rc.16")
+    );
+
+    let mut running =
+        crate::six_layer_runtime::RunningSixLayer::isolated(vendorless_session, dir.path());
+    running.readiness.configuration_observed = true;
+    running.readiness.keyboard_grabbed = true;
+    assert!(running.observed_firmware_version().is_none());
+
+    store.six_layer_running = Some(running);
+    store.device_session = Some(versioned_session.clone());
+
+    let t1 = now + Duration::from_millis(100);
+    assert!(store.poll_at(t1));
+    assert_eq!(
+        store.projection().firmware.current_version.as_deref(),
+        Some("0.7.0-rc.16")
+    );
+    let settled_gen = store.projection_generation();
+
+    for step in 1..=10_u64 {
+        assert!(!store.poll_at(t1 + Duration::from_millis(step * 150)));
+        assert_eq!(store.projection_generation(), settled_gen);
+    }
+
+    if let Some(running) = store.six_layer_running.take() {
+        running.shutdown(&store.tokio_runtime).unwrap();
+    }
+    store.tokio_runtime.block_on(versioned_session.shutdown());
+    responder_a.abort();
+    responder_b.abort();
+}
+
+#[test]
+fn direct_v070_battery_percent_mutation_commits_on_poll_and_then_idles() {
+    let (_dir, mut store, now) = active_store();
+    let _ = store.poll_at(now);
+    let gen0 = store.projection_generation();
+
+    store.v070_hardware.projection.battery_percent = Some(77);
+    assert!(store.poll_at(now + Duration::from_millis(100)));
+    assert_eq!(store.projection().v070_hardware.battery_percent, Some(77));
+    let gen1 = store.projection_generation();
+    assert!(gen1 > gen0);
+
+    for step in 1..=10_u64 {
+        assert!(!store.poll_at(now + Duration::from_millis(100 + step * 150)));
+        assert_eq!(store.projection_generation(), gen1);
+    }
+}

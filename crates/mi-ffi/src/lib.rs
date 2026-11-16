@@ -177,22 +177,6 @@ pub unsafe extern "C" fn mi_core_dispatch_json(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mi_core_poll_json(ptr: *mut WorkbenchStore) -> *mut c_char {
-    if ptr.is_null() {
-        return ptr::null_mut();
-    }
-    let store = &mut *ptr;
-    if store.poll_hardware_events() {
-        match serde_json::to_string(store.projection()) {
-            Ok(json) => string_to_c_char(json),
-            Err(_) => ptr::null_mut(),
-        }
-    } else {
-        ptr::null_mut()
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn mi_core_projection_revision(ptr: *const WorkbenchStore) -> u64 {
     if ptr.is_null() {
         0

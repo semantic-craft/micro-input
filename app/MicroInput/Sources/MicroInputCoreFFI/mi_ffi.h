@@ -20,7 +20,6 @@ void mi_core_free(WorkbenchStore *ptr);
 
 char *mi_core_project_json(WorkbenchStore *ptr);
 char *mi_core_dispatch_json(WorkbenchStore *ptr, const char *cmd_utf8);
-char *mi_core_poll_json(WorkbenchStore *ptr);
 uint64_t mi_core_projection_revision(const WorkbenchStore *ptr);
 uint64_t mi_core_poll_revision(WorkbenchStore *ptr);
 

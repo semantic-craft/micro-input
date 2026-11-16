@@ -378,11 +378,14 @@ impl DocumentStore {
             .as_ref()
     }
     pub fn preferred_device_serial(&self) -> Option<String> {
+        self.preferred_device_serial_str().map(str::to_owned)
+    }
+    pub fn preferred_device_serial_str(&self) -> Option<&str> {
         self.host_store()
             .preferences
             .value
             .preferred_device_serial
-            .clone()
+            .as_deref()
     }
     pub fn set_preferred_device_serial(&mut self, serial: Option<String>) -> Result<bool, String> {
         if let Some(host) = &mut self.host {

@@ -3,24 +3,16 @@ import Foundation
 import SwiftUI
 
 public enum UITheme {
-    private static func adaptive(
-        light: (CGFloat, CGFloat, CGFloat),
-        dark: (CGFloat, CGFloat, CGFloat),
-        lightAlpha: CGFloat = 1.0,
-        darkAlpha: CGFloat = 1.0
-    ) -> Color {
+    private static func adaptive(light: (CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat), lightAlpha: CGFloat = 1.0, darkAlpha: CGFloat = 1.0) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let rgb = isDark ? dark : light
-            let alpha = isDark ? darkAlpha : lightAlpha
-            return NSColor(srgbRed: rgb.0 / 255.0, green: rgb.1 / 255.0, blue: rgb.2 / 255.0, alpha: alpha)
+            return NSColor(srgbRed: rgb.0 / 255.0, green: rgb.1 / 255.0, blue: rgb.2 / 255.0, alpha: isDark ? darkAlpha : lightAlpha)
         })
     }
-
     public static let accent = adaptive(light: (24, 24, 27), dark: (244, 244, 245))
     public static let accentSoft = adaptive(light: (0, 0, 0), dark: (255, 255, 255), lightAlpha: 0.05, darkAlpha: 0.08)
     public static let accentBorder = adaptive(light: (0, 0, 0), dark: (255, 255, 255), lightAlpha: 0.15, darkAlpha: 0.18)
-
     public static let pageBackground = adaptive(light: (250, 250, 250), dark: (24, 24, 26))
     public static let surface = adaptive(light: (255, 255, 255), dark: (34, 34, 37))
     public static let subtleSurface = adaptive(light: (244, 244, 245), dark: (42, 42, 46))
@@ -31,22 +23,17 @@ public enum UITheme {
     public static let switchOffFill = adaptive(light: (228, 228, 231), dark: (58, 58, 62))
     public static let switchThumbOnFill = adaptive(light: (255, 255, 255), dark: (24, 24, 26))
     public static let switchThumbOffFill = adaptive(light: (255, 255, 255), dark: (244, 244, 245))
-
     public static let hairlineBorder = adaptive(light: (0, 0, 0), dark: (255, 255, 255), lightAlpha: 0.08, darkAlpha: 0.10)
     public static let border = hairlineBorder
     public static let strongBorder = adaptive(light: (0, 0, 0), dark: (255, 255, 255), lightAlpha: 0.15, darkAlpha: 0.18)
     public static let rowDivider = adaptive(light: (0, 0, 0), dark: (255, 255, 255), lightAlpha: 0.05, darkAlpha: 0.07)
-
     public static let textPrimary = adaptive(light: (23, 23, 23), dark: (244, 244, 245))
     public static let textSecondary = adaptive(light: (113, 113, 122), dark: (161, 161, 170))
     public static let textMuted = adaptive(light: (142, 142, 147), dark: (142, 142, 152))
-
     public static let statusSuccess = adaptive(light: (22, 163, 74), dark: (74, 222, 128))
     public static let statusSuccessSoft = statusSuccess.opacity(0.10)
-
     public static let caution = textSecondary
     public static let cautionSoft = subtleSurface
-
     public static let title = Typography.title
     public static let heading = Typography.heading
     public static let sectionHeader = Typography.sectionHeader
@@ -110,11 +97,8 @@ public struct SelectOption<Value: Hashable>: Identifiable, Equatable {
     public let value: Value
     public let title: String
     public let subtitle: String?
-
     public init(value: Value, title: String, subtitle: String? = nil) {
-        self.value = value
-        self.title = title
-        self.subtitle = subtitle
+        self.value = value; self.title = title; self.subtitle = subtitle
     }
 }
 
@@ -126,18 +110,9 @@ public struct DropdownMenuCardView<Value: Hashable>: View {
     public let onSelect: (Value) -> Void
     @State private var hoveredValue: Value?
 
-    public init(
-        options: [SelectOption<Value>],
-        selectedValue: Value,
-        minWidth: CGFloat = 176,
-        hostedInPanel: Bool = false,
-        onSelect: @escaping (Value) -> Void
-    ) {
-        self.options = options
-        self.selectedValue = selectedValue
-        self.minWidth = minWidth
-        self.hostedInPanel = hostedInPanel
-        self.onSelect = onSelect
+    public init(options: [SelectOption<Value>], selectedValue: Value, minWidth: CGFloat = 176, hostedInPanel: Bool = false, onSelect: @escaping (Value) -> Void) {
+        self.options = options; self.selectedValue = selectedValue
+        self.minWidth = minWidth; self.hostedInPanel = hostedInPanel; self.onSelect = onSelect
     }
 
     private var hasSubtitles: Bool { options.contains { $0.subtitle?.isEmpty == false } }
@@ -382,29 +357,13 @@ public struct SelectDropdown<Value: Hashable>: View {
     @State private var isOpen = false
     @State private var controller = DropdownPanelController()
 
-    public init(
-        options: [SelectOption<Value>],
-        selection: Value,
-        overrideLabel: String? = nil,
-        minTriggerWidth: CGFloat = 0,
-        onSelect: @escaping (Value) -> Void
-    ) {
-        self.options = options
-        self.selection = selection
-        self.overrideLabel = overrideLabel
-        self.minTriggerWidth = minTriggerWidth
-        self.onSelect = onSelect
+    public init(options: [SelectOption<Value>], selection: Value, overrideLabel: String? = nil, minTriggerWidth: CGFloat = 0, onSelect: @escaping (Value) -> Void) {
+        self.options = options; self.selection = selection; self.overrideLabel = overrideLabel
+        self.minTriggerWidth = minTriggerWidth; self.onSelect = onSelect
     }
 
-    public init(
-        options: [SelectOption<Value>],
-        selection: Binding<Value>,
-        overrideLabel: String? = nil,
-        minTriggerWidth: CGFloat = 0
-    ) {
-        self.init(options: options, selection: selection.wrappedValue, overrideLabel: overrideLabel, minTriggerWidth: minTriggerWidth) {
-            selection.wrappedValue = $0
-        }
+    public init(options: [SelectOption<Value>], selection: Binding<Value>, overrideLabel: String? = nil, minTriggerWidth: CGFloat = 0) {
+        self.init(options: options, selection: selection.wrappedValue, overrideLabel: overrideLabel, minTriggerWidth: minTriggerWidth) { selection.wrappedValue = $0 }
     }
 
     private var currentTitle: String {
@@ -607,16 +566,8 @@ public struct NeutralTrackSlider: View {
     public let showsPercentage: Bool
     @Environment(\.isEnabled) private var isEnabled
 
-    public init(
-        value: Binding<Double>,
-        in range: ClosedRange<Double> = 0...100,
-        trackWidth: CGFloat = 156,
-        showsPercentage: Bool = true
-    ) {
-        self._value = value
-        self.range = range
-        self.trackWidth = trackWidth
-        self.showsPercentage = showsPercentage
+    public init(value: Binding<Double>, in range: ClosedRange<Double> = 0...100, trackWidth: CGFloat = 156, showsPercentage: Bool = true) {
+        self._value = value; self.range = range; self.trackWidth = trackWidth; self.showsPercentage = showsPercentage
     }
 
     private var normalized: CGFloat {
@@ -783,21 +734,17 @@ public struct PopoverActionRow: View {
     }
 }
 
+@MainActor
 public enum StatusItemIcon {
     private static let zhHansIcon = build(locale: .zhHans)
     private static let enIcon = build(locale: .en)
-
-    public static func make(locale: ResolvedLocale = .zhHans) -> NSImage {
-        locale == .en ? enIcon : zhHansIcon
-    }
+    public static func make(locale: ResolvedLocale = .zhHans) -> NSImage { locale == .en ? enIcon : zhHansIcon }
 
     private static func build(locale: ResolvedLocale) -> NSImage {
         let image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
-            NSColor.black.setStroke()
-            NSColor.black.setFill()
+            NSColor.black.setStroke(); NSColor.black.setFill()
             let body = NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 18, height: 13), xRadius: 2, yRadius: 2)
-            body.lineWidth = 1.25
-            body.stroke()
+            body.lineWidth = 1.25; body.stroke()
             for y in [7.0, 10.5] {
                 for x in [3.5, 7.0, 10.5] {
                     NSBezierPath(roundedRect: NSRect(x: x, y: y, width: 2, height: 2), xRadius: 0.35, yRadius: 0.35).fill()
@@ -805,8 +752,7 @@ public enum StatusItemIcon {
             }
             NSBezierPath(roundedRect: NSRect(x: 5, y: 4.5, width: 7.5, height: 1.25), xRadius: 0.4, yRadius: 0.4).fill()
             let knob = NSBezierPath(ovalIn: NSRect(x: 14, y: 10, width: 3, height: 3))
-            knob.lineWidth = 1
-            knob.stroke()
+            knob.lineWidth = 1; knob.stroke()
             NSBezierPath(roundedRect: NSRect(x: 14.5, y: 5, width: 2, height: 3), xRadius: 0.4, yRadius: 0.4).fill()
             return true
         }
@@ -819,17 +765,12 @@ public enum StatusItemIcon {
 public struct DesktopAgent: Identifiable {
     public static let otherAppsWildcardBundleID = "*"
     @MainActor private static var appURLCache: [String: URL?] = [:]
-
     public let name: String
     public let bundleID: String
     public let symbol: String
     public var id: String { name }
     public var isGeneralFallback: Bool { bundleID == Self.otherAppsWildcardBundleID }
-
-    @MainActor
-    public var installed: Bool {
-        isGeneralFallback || Self.cachedAppURL(for: bundleID) != nil
-    }
+    @MainActor public var installed: Bool { isGeneralFallback || Self.cachedAppURL(for: bundleID) != nil }
 
     @MainActor
     public static func cachedAppURL(for bundleID: String) -> URL? {
@@ -850,25 +791,17 @@ public struct DesktopAgent: Identifiable {
 
     public static func displayName(_ name: String, locale: ResolvedLocale = .zhHans) -> String {
         switch name {
-        case "DeepSeek Coder (DSH)", "DSH", "DeepSeek Harness":
-            return "DeepSeek Harness"
-        case "其他软件", "Other Apps":
-            return locale == .en ? "Other Apps" : "其他软件"
-        case "自定义方案", "Custom Profile":
-            return locale == .en ? "Custom Profile" : "自定义方案"
-        case "新建方案", "New Profile":
-            return locale == .en ? "New Profile" : "新建方案"
-        case "未分配", "Unassigned":
-            return locale == .en ? "Unassigned" : "未分配"
-        default:
-            return name
+        case "DeepSeek Coder (DSH)", "DSH", "DeepSeek Harness": return "DeepSeek Harness"
+        case "其他软件", "Other Apps": return locale == .en ? "Other Apps" : "其他软件"
+        case "自定义方案", "Custom Profile": return locale == .en ? "Custom Profile" : "自定义方案"
+        case "新建方案", "New Profile": return locale == .en ? "New Profile" : "新建方案"
+        case "未分配", "Unassigned": return locale == .en ? "Unassigned" : "未分配"
+        default: return name
         }
     }
 
     public static func named(_ name: String) -> DesktopAgent? {
-        if name == "Other Apps" || name == "其他软件" {
-            return all.first { $0.isGeneralFallback }
-        }
+        if name == "Other Apps" || name == "其他软件" { return all.first { $0.isGeneralFallback } }
         return all.first { $0.name == name || displayName($0.name) == displayName(name) }
     }
 }

@@ -201,10 +201,8 @@ public final class CoreStore {
     private func applyProjectionJSON(_ rawPtr: UnsafeMutablePointer<CChar>) -> Bool {
         defer { mi_core_string_free(rawPtr) }
         ViewRenderTelemetry.record("CoreStore.decodeProjection")
-        guard let jsonString = String(validatingUTF8: rawPtr),
-              let data = jsonString.data(using: .utf8),
-              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else {
+        let data = Data(bytesNoCopy: UnsafeMutableRawPointer(rawPtr), count: strlen(rawPtr), deallocator: .none)
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return false
         }
         let next = Self.parseProjection(root)

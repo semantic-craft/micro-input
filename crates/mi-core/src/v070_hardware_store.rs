@@ -1155,7 +1155,7 @@ impl WorkbenchStore {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1181,12 +1181,12 @@ mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq)]
-    pub(super) enum MockWireEvent {
+    pub(crate) enum MockWireEvent {
         SaRgb(Value),
         LinkClosed,
     }
 
-    pub(super) struct MockV070Link {
+    pub(crate) struct MockV070Link {
         in_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
         in_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>,
         out_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
@@ -1292,7 +1292,7 @@ mod tests {
         }
     }
 
-    pub(super) fn spawn_mock_v070_session(
+    pub(crate) fn spawn_mock_v070_session(
         runtime: &tokio::runtime::Runtime,
         version: &str,
         sent_methods: Arc<Mutex<Vec<String>>>,

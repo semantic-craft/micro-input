@@ -1,6 +1,6 @@
 # 开发与验证入口
 
-Micro Input 采用「纯 Rust 内核 + 极简 C-ABI 边界 + 原生 macOS 14+ SwiftUI/AppKit 薄壳」架构。七个 Rust 模块（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）承担协议分帧、配置模型、跨进程桥接、macOS 宿主执行与工作台状态机，`crates/mi-ffi` 暴露 7 函数静态库边界，`app/MicroInput` 仅负责 SwiftUI 单色中性工作台（契约见 [DESIGN](designs/DESIGN.md)）与菜单栏投影。
+Micro Input 采用「纯 Rust 内核 + 极简 C-ABI 边界 + 原生 macOS 14+ SwiftUI/AppKit 薄壳」架构。七个 Rust 模块（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）承担协议分帧、配置模型、跨进程桥接、macOS 宿主执行与工作台状态机，`crates/mi-ffi` 暴露 10 函数静态库边界，`app/MicroInput` 仅负责 SwiftUI 单色中性工作台（契约见 [DESIGN](designs/DESIGN.md)）与菜单栏投影。
 
 ## 阅读入口
 

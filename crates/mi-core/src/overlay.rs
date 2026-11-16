@@ -236,6 +236,58 @@ impl OverlayController {
         false
     }
 
+    pub(crate) fn state_stamp_hash(&self) -> u64 {
+        let mut h = crate::store::Fnv1a::new();
+        h.write_bool(self.main_workbench_window_active);
+        match &self.visibility {
+            HudVisibilityState::Hidden => h.write_u8(0),
+            HudVisibilityState::SuppressedByActiveWorkbench => h.write_u8(1),
+            HudVisibilityState::PassiveToast {
+                profile_name,
+                mode_summary,
+                frame,
+                ..
+            } => {
+                h.write_u8(2);
+                h.write_str(profile_name);
+                h.write_str(mode_summary);
+                h.write_rect(*frame);
+            }
+            HudVisibilityState::InteractiveCheatSheet { projection, frame } => {
+                h.write_u8(3);
+                h.write_rect(*frame);
+                h.write_str(&projection.profile_name);
+                h.write_str(&projection.routing_summary);
+                h.write_str(&projection.joystick_mode);
+                match &projection.target_agent_card {
+                    None => h.write_u8(0),
+                    Some(card) => {
+                        h.write_u8(1);
+                        h.write_str(&card.agent_name);
+                        h.write_str(&card.adapter);
+                        h.write_str(&card.phase_label);
+                        h.write_str(&card.phase_symbol);
+                        h.write_bool(card.is_recording);
+                        h.write_str(&card.voice_summary);
+                        h.write_u8(match card.confirm_mode {
+                            RadialConfirmMode::EncoderPress => 0,
+                            RadialConfirmMode::SpringBack => 1,
+                        });
+                    }
+                }
+                h.write_u64(projection.key_cells.len() as u64);
+                for cell in &projection.key_cells {
+                    h.write_str(&cell.binding_id);
+                    h.write_str(&cell.control_name);
+                    h.write_str(&cell.label);
+                    h.write_str(&cell.short_label);
+                    h.write_bool(cell.available);
+                }
+            }
+        }
+        h.finish()
+    }
+
     pub fn project(&self, screen: &ScreenGeometry, cursor: ScreenPoint) -> HostOverlayProjection {
         self.project_localized(screen, cursor, mi_model::ResolvedLocale::ZhHans)
     }

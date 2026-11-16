@@ -908,6 +908,7 @@ final class DesignSystemVerificationTests: XCTestCase {
         }
     }
 
+    @MainActor
     func testStatusItemIconCachingAndLocaleMetadata() {
         let zh1 = StatusItemIcon.make(locale: .zhHans)
         let zh2 = StatusItemIcon.make(locale: .zhHans)
