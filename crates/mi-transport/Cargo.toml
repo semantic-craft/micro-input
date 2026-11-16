@@ -2,6 +2,9 @@
 name = "mi-transport"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description.workspace = true
 [features]
 synthetic-backend = ["dep:base64", "dep:sha1"]
 [dependencies]

@@ -1196,20 +1196,20 @@ impl RoutingContext {
         }
     }
 
-    fn effective_profile_id(
-        &self,
-        plan: &AppliedSixLayerPlan,
+    fn effective_profile_id_str<'a>(
+        &'a self,
+        plan: &'a AppliedSixLayerPlan,
         physical_layer: u8,
-    ) -> Option<String> {
+    ) -> Option<&'a str> {
         match &self.mode {
-            SixLayerRoutingMode::Locked(pinned) => Some(pinned.profile_id.clone()),
+            SixLayerRoutingMode::Locked(pinned) => Some(pinned.profile_id.as_str()),
             SixLayerRoutingMode::ManualPinned(pinned) => {
                 if pinned.bundle_id.as_deref() == Some("com.openai.codex")
                     && !pinned.has_any_action()
                 {
                     None
                 } else {
-                    Some(pinned.profile_id.clone())
+                    Some(pinned.profile_id.as_str())
                 }
             }
             SixLayerRoutingMode::BoardLayers {
@@ -1217,18 +1217,27 @@ impl RoutingContext {
                 layer_two,
                 layer_three,
             } => match physical_layer {
-                1 => layer_one.as_ref().map(|p| p.profile_id.clone()),
+                1 => layer_one.as_ref().map(|p| p.profile_id.as_str()),
                 2 => layer_two
                     .as_ref()
-                    .map(|p| p.profile_id.clone())
-                    .or_else(|| plan.hosts.first().map(|h| h.profile_id.clone())),
+                    .map(|p| p.profile_id.as_str())
+                    .or_else(|| plan.hosts.first().map(|h| h.profile_id.as_str())),
                 3 => layer_three
                     .as_ref()
-                    .map(|p| p.profile_id.clone())
-                    .or_else(|| plan.hosts.get(1).map(|h| h.profile_id.clone())),
+                    .map(|p| p.profile_id.as_str())
+                    .or_else(|| plan.hosts.get(1).map(|h| h.profile_id.as_str())),
                 _ => None,
             },
         }
+    }
+
+    fn effective_profile_id(
+        &self,
+        plan: &AppliedSixLayerPlan,
+        physical_layer: u8,
+    ) -> Option<String> {
+        self.effective_profile_id_str(plan, physical_layer)
+            .map(str::to_owned)
     }
 
     fn resolve_control<'a>(
@@ -1473,6 +1482,15 @@ impl RunningSixLayer {
             .effective_profile_id(&self.installation.plan, layer)
     }
 
+    pub(crate) fn effective_profile_id_eq(&self, expected: Option<&str>) -> bool {
+        let layer = self.observed_layer.load(Ordering::Acquire);
+        self.routing
+            .lock()
+            .unwrap()
+            .effective_profile_id_str(&self.installation.plan, layer)
+            == expected
+    }
+
     #[cfg(test)]
     pub(crate) fn isolated(session: Arc<DeviceSession>, directory: &Path) -> Self {
         let mut draft = mi_model::draft::Draft::default();
@@ -1566,6 +1584,21 @@ impl RunningSixLayer {
             .as_ref()
             .and_then(|session| session.observed_firmware_version())
             .or_else(|| self.firmware_version.clone())
+    }
+
+    pub(crate) fn observed_firmware_version_eq(&self, expected: Option<&str>) -> bool {
+        if self.is_retired() || self.receiver.failure().is_some() {
+            return expected.is_none();
+        }
+        let guard = self.vendor_bridge.active_session.lock().unwrap();
+        if let Some(version) = guard
+            .as_ref()
+            .and_then(|session| session.observed_firmware_version())
+        {
+            Some(version.as_str()) == expected
+        } else {
+            self.firmware_version.as_deref() == expected
+        }
     }
 
     pub fn vendor_bridge_connected(&self) -> bool {

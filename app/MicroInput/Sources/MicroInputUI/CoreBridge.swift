@@ -136,19 +136,13 @@ public final class CoreStore {
     }
 
     public func refreshProjection() {
-        guard let h = handle else { return }
-        guard let cStr = mi_core_project_json(h) else { return }
-        defer { mi_core_string_free(cStr) }
-        let jsonString = String(cString: cStr)
-        applyProjectionJSON(jsonString)
+        guard let h = handle, let cStr = mi_core_project_json(h) else { return }
+        applyProjectionCStr(cStr)
     }
 
     public func pollHardware() {
-        guard let h = handle else { return }
-        guard let cStr = mi_core_poll_json(h) else { return }
-        defer { mi_core_string_free(cStr) }
-        let jsonString = String(cString: cStr)
-        applyProjectionJSON(jsonString)
+        guard let h = handle, let cStr = mi_core_poll_json(h) else { return }
+        applyProjectionCStr(cStr)
     }
 
     public func dispatch(_ domain: String, _ action: Any) {
@@ -213,16 +207,14 @@ public final class CoreStore {
             mi_core_dispatch_json(h, ptr)
         }
         guard let cStr = updatedPtr else { return }
-        defer { mi_core_string_free(cStr) }
-        let jsonString = String(cString: cStr)
-        applyProjectionJSON(jsonString)
+        applyProjectionCStr(cStr)
     }
 
-    private func applyProjectionJSON(_ jsonString: String) {
+    private func applyProjectionCStr(_ rawPtr: UnsafeMutablePointer<CChar>) {
+        defer { mi_core_string_free(rawPtr) }
         ViewRenderTelemetry.record("CoreStore.decodeProjection")
-        guard let data = jsonString.data(using: .utf8),
-              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else {
+        let data = Data(bytesNoCopy: UnsafeMutableRawPointer(rawPtr), count: Int(strlen(rawPtr)), deallocator: .none)
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return
         }
         let next = Self.parseProjection(root)

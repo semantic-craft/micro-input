@@ -92,12 +92,7 @@ public struct ClassicWorkbenchView: View {
         .font(UITheme.body)
         .tint(UITheme.accent)
         .sheet(isPresented: $showFullActionLibrarySheet) {
-            let rawName = store.sidebar.selectedRawName
-            ClassicActionLibrarySheet(
-                store: store,
-                rawProfileName: rawName,
-                agentKind: AgentProfileKind.from(profileName: rawName)
-            )
+            ClassicActionLibrarySheet(store: store)
         }
         .sheet(isPresented: $showMacroLibrarySheet) {
             ClassicMacroAndMultiLibrarySheet(store: store)

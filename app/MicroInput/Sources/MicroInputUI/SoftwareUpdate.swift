@@ -541,22 +541,6 @@ public enum LaunchOriginDetector {
     }
 }
 
-@MainActor
-@Observable
-public final class WorkbenchNavigationModel {
-    public var destination: WorkbenchDestination
-
-    public init(destination: WorkbenchDestination = .keyboard) {
-        self.destination = destination
-    }
-
-    public func openGeneral() {
-        if destination != .general {
-            destination = .general
-        }
-    }
-}
-
 public struct StartupAndLanguageSettingsSection: View {
     let store: CoreStore
     let launchAtLogin: LaunchAtLoginController

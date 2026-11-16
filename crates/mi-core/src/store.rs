@@ -114,6 +114,9 @@ use projection::{ProjectionInputs, ReusableInspectorCatalogs, SixLayerView};
 #[path = "runtime_inbox.rs"]
 pub(crate) mod runtime_inbox;
 use runtime_inbox::RuntimeInbox;
+#[path = "runtime_stamp.rs"]
+pub(crate) mod runtime_stamp;
+use runtime_stamp::RuntimeCommitStamp;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HardwareAutoAcceptanceReceipt {
@@ -507,6 +510,10 @@ pub struct WorkbenchStore {
     last_radial_panel: Option<Option<PassivePanelFrameSpec>>,
     applications: BTreeMap<String, bool>,
     six_layer_view: Option<SixLayerView>,
+    captured_app_cache_stamp: (usize, u64),
+    last_committed_stamp: Option<RuntimeCommitStamp>,
+    #[cfg(test)]
+    pub(crate) commit_local_update_count: u64,
     update_now: Instant,
     input_lost_session: Option<u64>,
     projection_generation: u64,
@@ -726,6 +733,10 @@ impl WorkbenchStore {
             last_radial_panel: None,
             applications: BTreeMap::new(),
             six_layer_view: None,
+            captured_app_cache_stamp: (0, 0),
+            last_committed_stamp: None,
+            #[cfg(test)]
+            commit_local_update_count: 0,
             update_now: now,
             input_lost_session: None,
             projection_generation: 0,
@@ -778,7 +789,7 @@ impl WorkbenchStore {
 
     pub fn set_accessibility_trusted_for_test(&mut self, trusted: Option<bool>) {
         self.accessibility_trusted_override = trusted;
-        self.refresh_accessibility_trusted();
+        let _ = self.refresh_accessibility_trusted();
         self.commit_runtime_update();
     }
 
@@ -788,20 +799,22 @@ impl WorkbenchStore {
         self.commit_runtime_update();
     }
 
-    fn refresh_accessibility_trusted(&mut self) {
-        self.accessibility_trusted = if let Some(override_val) = self.accessibility_trusted_override
-        {
+    fn refresh_accessibility_trusted(&mut self) -> bool {
+        let next = if let Some(override_val) = self.accessibility_trusted_override {
             override_val
         } else if !self.config.isolated && self.config.auto_connect_usb {
             self.live_executor.is_accessibility_trusted()
         } else {
             true
         };
+        let changed = self.accessibility_trusted != next;
+        self.accessibility_trusted = next;
+        changed
     }
 
-    fn refresh_competing_input_app_running(&mut self, force: bool) {
+    fn refresh_competing_input_app_running(&mut self, force: bool) -> bool {
         if self.config.isolated || !self.config.auto_connect_usb {
-            return;
+            return false;
         }
         if !force
             && self
@@ -809,16 +822,17 @@ impl WorkbenchStore {
                 .saturating_duration_since(self.last_competing_app_check_at)
                 < Duration::from_secs(5)
         {
-            return;
+            return false;
         }
         self.last_competing_app_check_at = self.update_now;
         let running = mi_macos::is_bundle_running("com.worklouder.input");
         self.applications
-            .insert("com.worklouder.input".to_string(), running);
+            .insert("com.worklouder.input".to_string(), running)
+            != Some(running)
     }
 
     pub fn open_accessibility_settings(&mut self) {
-        self.refresh_accessibility_trusted();
+        let _ = self.refresh_accessibility_trusted();
         let (outcome, detail) = if !self.config.isolated && self.config.auto_connect_usb {
             match self.live_executor.open_accessibility_settings() {
                 Ok(()) => ("executed", "已打开 macOS 辅助功能权限设置".to_string()),
@@ -923,23 +937,25 @@ impl WorkbenchStore {
     pub fn poll_at(&mut self, now: Instant) -> bool {
         self.update_now = now;
         let before_gen = self.projection_generation;
-        self.firmware_update.poll();
+        let mut dirty = self.firmware_update.poll();
         if now.saturating_duration_since(self.last_accessibility_check_at) >= Duration::from_secs(1)
         {
             self.last_accessibility_check_at = now;
-            self.refresh_accessibility_trusted();
+            dirty |= self.refresh_accessibility_trusted();
         }
-        self.refresh_competing_input_app_running(false);
+        dirty |= self.refresh_competing_input_app_running(false);
         self.poll_workspace_lifecycle();
         if self.system_lifecycle == SystemLifecycle::Awake && !self.firmware_update.reserved() {
             self.poll_six_layer_runtime();
         }
-        self.sync_live_session_source();
-        self.drain_pending_hardware_events(now);
-        self.poll_encoder_model_picker(now);
-        self.poll_session_navigation();
-        self.overlay_controller.expire_notice_if_due(now);
-        self.commit_runtime_update();
+        let _ = self.sync_live_session_source();
+        let _ = self.drain_pending_hardware_events(now);
+        dirty |= self.poll_encoder_model_picker(now);
+        dirty |= self.poll_session_navigation_with_commit(false);
+        dirty |= self.overlay_controller.expire_notice_if_due(now);
+        if dirty || self.external_runtime_dirty() {
+            self.commit_runtime_update();
+        }
         self.projection_generation != before_gen
     }
 
@@ -971,7 +987,7 @@ impl WorkbenchStore {
         self.live_executor.set_model_picker_mouse_capture(false);
     }
 
-    fn poll_encoder_model_picker(&mut self, now: Instant) {
+    fn poll_encoder_model_picker(&mut self, now: Instant) -> bool {
         if self.system_lifecycle != SystemLifecycle::Awake
             || !self.document_store.host_execution_enabled()
         {
@@ -980,12 +996,15 @@ impl WorkbenchStore {
                 || self.model_picker_mouse_capture_enabled
             {
                 self.cancel_encoder_model_picker();
+                return true;
             }
-            return;
+            return false;
         }
 
+        let mut dirty = false;
         if self.encoder_model_picker.expire_if_idle(now).is_some() {
             self.set_model_picker_mouse_capture(false);
+            dirty = true;
         }
 
         if let Some(hold) = self.encoder_model_picker.hold_state().cloned() {
@@ -994,7 +1013,13 @@ impl WorkbenchStore {
                 && now.saturating_duration_since(hold.pressed_at)
                     >= crate::encoder_model_picker::ENCODER_HOLD_THRESHOLD
             {
-                let _ = self.fire_due_encoder_hold(hold.session_id, hold.hold_generation, now);
+                let (_, hold_dirty) = self.fire_due_encoder_hold_with_commit(
+                    hold.session_id,
+                    hold.hold_generation,
+                    now,
+                    false,
+                );
+                dirty |= hold_dirty;
             }
         }
 
@@ -1011,15 +1036,18 @@ impl WorkbenchStore {
                     };
                     let profile_id = self.resolved_active_profile_id().unwrap_or_default();
                     let action = cmd.into_host_action(adapter);
-                    let _ = self.execute_resolved_physical_action_with_session(
+                    let _ = self.execute_resolved_physical_action_with_session_commit(
                         &profile_id,
                         "ENC_CLK",
                         0,
                         action,
+                        false,
                     );
+                    dirty = true;
                 }
             }
         }
+        dirty
     }
 
     pub fn projection_generation(&self) -> u64 {
@@ -1990,9 +2018,11 @@ impl WorkbenchStore {
                     self.sa_rgb_coordinator.clear_on_disconnect();
                     needs_commit = true;
                 }
+                let before_gen = self.projection_generation;
                 if !self.config.isolated && !self.device_session_connected() {
                     let _ = self.connect_default_usb_with_execution(false);
-                } else if needs_commit {
+                }
+                if needs_commit && self.projection_generation == before_gen {
                     self.commit_runtime_update();
                 }
                 None
@@ -2722,6 +2752,9 @@ impl WorkbenchStore {
         self.commit_runtime_update();
         if self.projection.header.banner.is_caution() {
             self.banner_flash_count += 1;
+            self.projection.banner_flash_count = self.banner_flash_count;
+            self.projection_generation = self.projection_generation.wrapping_add(1);
+            self.last_committed_stamp = Some(self.current_runtime_stamp());
         }
         Ok(())
     }
@@ -2736,12 +2769,15 @@ impl WorkbenchStore {
         let bundle_id = bundle_id
             .map(str::trim)
             .filter(|bundle| !bundle.is_empty() && *bundle != "*");
-        self.refresh_accessibility_trusted();
+        let before_gen = self.projection_generation;
+        let mut env_dirty = self.refresh_accessibility_trusted();
         if bundle_id == Some("com.worklouder.input") {
-            self.applications
-                .insert("com.worklouder.input".to_string(), true);
+            env_dirty |= self
+                .applications
+                .insert("com.worklouder.input".to_string(), true)
+                != Some(true);
         } else {
-            self.refresh_competing_input_app_running(false);
+            env_dirty |= self.refresh_competing_input_app_running(false);
         }
         self.navigation_foreground_changed(bundle_id);
         let bundle_changed = self.foreground_bundle_id.as_deref() != bundle_id;
@@ -2750,25 +2786,31 @@ impl WorkbenchStore {
         }
         self.foreground_bundle_id = bundle_id.map(str::to_owned);
         let unlocked = self.document_store.locked_profile_id().is_none();
-        if let Some(running) = &self.six_layer_running {
+        let updated = if let Some(running) = &self.six_layer_running {
             let running_updated = running.foreground_changed(bundle_id);
             if bundle_changed && unlocked {
                 self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
-                return running_updated;
+                running_updated
+            } else {
+                if bundle_id == Some("com.worklouder.input") {
+                    self.commit_runtime_update();
+                }
+                false
+            }
+        } else {
+            if unlocked && bundle_changed {
+                self.sync_v070_session_sa_rgb();
             }
             if bundle_id == Some("com.worklouder.input") {
                 self.commit_runtime_update();
             }
-            return false;
-        }
-        if unlocked && bundle_changed {
-            self.sync_v070_session_sa_rgb();
-        }
-        if bundle_id == Some("com.worklouder.input") {
+            false
+        };
+        if env_dirty && self.projection_generation == before_gen {
             self.commit_runtime_update();
         }
-        false
+        updated
     }
 
     pub fn set_host_execution_enabled(&mut self, enabled: bool) -> Result<(), WorkbenchError> {
@@ -4063,6 +4105,7 @@ impl WorkbenchStore {
         self.capture_runtime_view();
         self.commit_local_update();
         self.reconcile_presentation();
+        self.last_committed_stamp = Some(self.current_runtime_stamp());
     }
 
     fn observed_firmware_version(&self) -> Option<String> {
@@ -4083,6 +4126,10 @@ impl WorkbenchStore {
     }
 
     fn commit_local_update(&mut self) {
+        #[cfg(test)]
+        {
+            self.commit_local_update_count = self.commit_local_update_count.wrapping_add(1);
+        }
         self.normalize_view_state();
         let current_locale = self.effective_locale();
         let mut reused_keycaps = false;
@@ -4189,6 +4236,7 @@ impl WorkbenchStore {
         if changed {
             self.projection_generation = self.projection_generation.wrapping_add(1);
         }
+        self.last_committed_stamp = Some(self.current_runtime_stamp());
     }
 
     fn projection_inputs(&self) -> ProjectionInputs<'_> {
@@ -4305,6 +4353,10 @@ impl WorkbenchStore {
                 }
             }
         }
+        self.captured_app_cache_stamp = (
+            Arc::as_ptr(&self.app_cache) as usize,
+            self.app_cache.generation(),
+        );
         let current_revs = (
             self.document_store.draft.revision,
             self.document_store.host_revision(),
@@ -5199,16 +5251,27 @@ impl WorkbenchStore {
         hold_generation: u64,
         now: Instant,
     ) -> Option<HostActionReceipt> {
+        self.fire_due_encoder_hold_with_commit(session_id, hold_generation, now, true)
+            .0
+    }
+
+    fn fire_due_encoder_hold_with_commit(
+        &mut self,
+        session_id: u64,
+        hold_generation: u64,
+        now: Instant,
+        commit: bool,
+    ) -> (Option<HostActionReceipt>, bool) {
         if self.system_lifecycle != SystemLifecycle::Awake
             || !self.document_store.host_execution_enabled()
         {
-            return None;
+            return (None, false);
         }
         let Some(current) = self.encoder_model_picker.hold_state() else {
-            return None;
+            return (None, false);
         };
         if current.session_id != session_id || current.hold_generation != hold_generation {
-            return None;
+            return (None, false);
         }
         if self
             .device_session
@@ -5216,7 +5279,10 @@ impl WorkbenchStore {
             .is_some_and(|s| s.id != session_id || s.is_disconnected())
         {
             self.cancel_encoder_model_picker();
-            return None;
+            if commit {
+                self.commit_runtime_update();
+            }
+            return (None, !commit);
         }
         let hold_profile = self
             .encoder_hold_profile_id
@@ -5226,7 +5292,10 @@ impl WorkbenchStore {
         if let Some(active_pid) = self.resolved_active_profile_id() {
             if !hold_profile.is_empty() && active_pid != hold_profile {
                 self.cancel_encoder_model_picker();
-                return None;
+                if commit {
+                    self.commit_runtime_update();
+                }
+                return (None, !commit);
             }
         }
         let hold_action = self.resolve_encoder_hold_physical_action(&hold_profile);
@@ -5242,17 +5311,21 @@ impl WorkbenchStore {
             target_kind,
             now,
         ) {
-            crate::encoder_model_picker::EncoderHoldTimerOutcome::Ignored => None,
+            crate::encoder_model_picker::EncoderHoldTimerOutcome::Ignored => (None, false),
             crate::encoder_model_picker::EncoderHoldTimerOutcome::FiredHold {
                 overlay_kind,
                 ..
-            } => self.execute_encoder_hold_outcome(
-                overlay_kind,
-                &hold_profile,
-                session_id,
-                hold_action,
-                target_adapter,
-                now,
+            } => (
+                self.execute_encoder_hold_outcome_with_commit(
+                    overlay_kind,
+                    &hold_profile,
+                    session_id,
+                    hold_action,
+                    target_adapter,
+                    now,
+                    commit,
+                ),
+                !commit,
             ),
         }
     }
@@ -5276,22 +5349,31 @@ impl WorkbenchStore {
         transition: crate::encoder_model_picker::OverlayTransition,
         receipt: Option<&HostActionReceipt>,
     ) {
+        self.apply_overlay_transition_with_commit(transition, receipt, true);
+    }
+
+    fn apply_overlay_transition_with_commit(
+        &mut self,
+        transition: crate::encoder_model_picker::OverlayTransition,
+        receipt: Option<&HostActionReceipt>,
+        commit: bool,
+    ) {
         match transition {
             crate::encoder_model_picker::OverlayTransition::Entered(kind) => {
                 self.set_model_picker_mouse_capture(kind.captures_mouse());
                 if let Some(r) = receipt {
                     self.status_message = Self::format_overlay_status_message(kind, &r.detail);
                 }
-                self.commit_runtime_update();
             }
             crate::encoder_model_picker::OverlayTransition::Cancelled => {
                 self.cancel_encoder_model_picker();
-                self.commit_runtime_update();
             }
             crate::encoder_model_picker::OverlayTransition::None => {
                 self.set_model_picker_mouse_capture(false);
-                self.commit_runtime_update();
             }
+        }
+        if commit {
+            self.commit_runtime_update();
         }
     }
 
@@ -5356,6 +5438,28 @@ impl WorkbenchStore {
         target_adapter: Option<String>,
         now: Instant,
     ) -> Option<HostActionReceipt> {
+        self.execute_encoder_hold_outcome_with_commit(
+            overlay_kind,
+            hold_profile,
+            session_id,
+            hold_action,
+            target_adapter,
+            now,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_encoder_hold_outcome_with_commit(
+        &mut self,
+        overlay_kind: Option<crate::encoder_model_picker::EncoderOverlayKind>,
+        hold_profile: &str,
+        session_id: u64,
+        hold_action: Option<ResolvedHostAction>,
+        target_adapter: Option<String>,
+        now: Instant,
+        commit: bool,
+    ) -> Option<HostActionReceipt> {
         let must_esc = self
             .encoder_model_picker
             .prepare_for_hold_action(overlay_kind);
@@ -5364,18 +5468,24 @@ impl WorkbenchStore {
                 let cancel_action =
                     crate::encoder_model_picker::ModelPickerCommand::ModelPickerCancel
                         .into_host_action(adapter.clone());
-                let _ = self.execute_resolved_physical_action_with_session(
+                let _ = self.execute_resolved_physical_action_with_session_commit(
                     hold_profile,
                     "ENC_CLK",
                     session_id,
                     cancel_action,
+                    false,
                 );
             }
         }
         if overlay_kind != Some(crate::encoder_model_picker::EncoderOverlayKind::ModelPicker) {
             self.set_model_picker_mouse_capture(false);
         }
-        let mut action = hold_action?;
+        let Some(mut action) = hold_action else {
+            if commit {
+                self.commit_runtime_update();
+            }
+            return None;
+        };
         if let ResolvedHostAction::AgentCommand { adapter, .. } = &mut action {
             if matches!(adapter.as_str(), "host" | "active-agent") {
                 if let Some(ref resolved) = target_adapter {
@@ -5383,11 +5493,12 @@ impl WorkbenchStore {
                 }
             }
         }
-        let receipt = self.execute_resolved_physical_action_with_session(
+        let receipt = self.execute_resolved_physical_action_with_session_commit(
             hold_profile,
             "ENC_CLK",
             session_id,
             action,
+            false,
         );
         let succeeded = receipt.as_ref().is_some_and(|r| r.succeeded());
         let adapter = target_adapter.unwrap_or_else(|| "antigravity".to_string());
@@ -5397,7 +5508,7 @@ impl WorkbenchStore {
             succeeded,
             now,
         );
-        self.apply_overlay_transition(transition, receipt.as_ref());
+        self.apply_overlay_transition_with_commit(transition, receipt.as_ref(), commit);
         receipt
     }
 
@@ -5755,7 +5866,20 @@ impl WorkbenchStore {
         profile_id: &str,
         binding_id: &str,
         session_id: u64,
+        action: ResolvedHostAction,
+    ) -> Option<HostActionReceipt> {
+        self.execute_resolved_physical_action_with_session_commit(
+            profile_id, binding_id, session_id, action, true,
+        )
+    }
+
+    fn execute_resolved_physical_action_with_session_commit(
+        &mut self,
+        profile_id: &str,
+        binding_id: &str,
+        session_id: u64,
         mut action: ResolvedHostAction,
+        commit: bool,
     ) -> Option<HostActionReceipt> {
         if matches!(
             binding_id,
@@ -5791,7 +5915,9 @@ impl WorkbenchStore {
                 ) {
                     self.status_message = format!("已触发 {} · {}", binding_id, receipt.detail);
                     self.record_host_action_receipt(receipt.clone());
-                    self.commit_runtime_update();
+                    if commit {
+                        self.commit_runtime_update();
+                    }
                     return Some(receipt);
                 }
                 return None;
@@ -5821,12 +5947,13 @@ impl WorkbenchStore {
                     command: command.clone(),
                 })
             {
-                self.request_navigation_command(
+                self.request_navigation_command_with_commit(
                     command,
                     None,
                     Some(NavigationInputLease::Vendor(session_id)),
                     profile_id.to_string(),
                     binding_id.to_string(),
+                    commit,
                 );
                 return None;
             }
@@ -5882,7 +6009,9 @@ impl WorkbenchStore {
                     format!("听写未启动 · {detail}")
                 };
                 self.record_host_action_receipt(receipt.clone());
-                self.commit_runtime_update();
+                if commit {
+                    self.commit_runtime_update();
+                }
                 return Some(receipt);
             }
         }
@@ -5909,7 +6038,9 @@ impl WorkbenchStore {
             format!("未执行 {} · {}", binding_id, receipt.detail)
         };
         self.record_host_action_receipt(receipt.clone());
-        self.commit_runtime_update();
+        if commit {
+            self.commit_runtime_update();
+        }
         Some(receipt)
     }
 

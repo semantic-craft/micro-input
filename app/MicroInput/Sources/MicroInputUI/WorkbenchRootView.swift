@@ -6,9 +6,9 @@ public struct WorkbenchRootView: View {
     private let injectedNavigation: WorkbenchNavigationModel?
     private let injectedUpdater: SoftwareUpdateController?
     private let injectedLaunchAtLogin: LaunchAtLoginController?
-    @State private var fallbackNavigation = WorkbenchNavigationModel()
-    @State private var fallbackUpdater = SoftwareUpdateController()
-    @State private var fallbackLaunchAtLogin = LaunchAtLoginController()
+    @State private var fallbackNavigation: WorkbenchNavigationModel?
+    @State private var fallbackUpdater: SoftwareUpdateController?
+    @State private var fallbackLaunchAtLogin: LaunchAtLoginController?
 
     @MainActor
     public init(
@@ -21,13 +21,16 @@ public struct WorkbenchRootView: View {
         self.injectedNavigation = navigation
         self.injectedUpdater = updater
         self.injectedLaunchAtLogin = launchAtLogin
+        self._fallbackNavigation = State(initialValue: navigation == nil ? WorkbenchNavigationModel() : nil)
+        self._fallbackUpdater = State(initialValue: updater == nil ? SoftwareUpdateController() : nil)
+        self._fallbackLaunchAtLogin = State(initialValue: launchAtLogin == nil ? LaunchAtLoginController() : nil)
     }
 
     public var body: some View {
         let _ = ViewRenderTelemetry.record("WorkbenchRootView")
-        let navigation = injectedNavigation ?? fallbackNavigation
-        let updater = injectedUpdater ?? fallbackUpdater
-        let launchAtLogin = injectedLaunchAtLogin ?? fallbackLaunchAtLogin
+        let navigation = injectedNavigation ?? fallbackNavigation ?? WorkbenchNavigationModel()
+        let updater = injectedUpdater ?? fallbackUpdater ?? SoftwareUpdateController()
+        let launchAtLogin = injectedLaunchAtLogin ?? fallbackLaunchAtLogin ?? LaunchAtLoginController()
         let overlay = store.overlay
         let modal = store.activeModal
         ZStack {
@@ -37,18 +40,7 @@ public struct WorkbenchRootView: View {
                 updater: updater,
                 launchAtLogin: launchAtLogin
             )
-            .sheet(
-                item: Binding(
-                    get: { store.statusMenu.pendingImport },
-                    set: { newVal in
-                        if newVal == nil {
-                            store.dispatch("status_menu", "CancelStagedPresetImport")
-                        }
-                    }
-                )
-            ) { preview in
-                StagedPresetImportSheet(store: store, preview: preview)
-            }
+            .background(StagedPresetImportPresenter(store: store))
 
             if overlay.cheatSheetVisible, let cs = overlay.cheatSheet {
                 CheatSheetOverlayView(store: store, sheet: cs)
@@ -67,6 +59,45 @@ public struct WorkbenchRootView: View {
         ) { activeModal in
             ActiveModalSheetView(store: store, modal: activeModal)
         }
+    }
+}
+
+@MainActor
+@Observable
+public final class WorkbenchNavigationModel {
+    public var destination: WorkbenchDestination
+
+    public init(destination: WorkbenchDestination = .keyboard) {
+        self.destination = destination
+    }
+
+    public func openGeneral() {
+        if destination != .general {
+            destination = .general
+        }
+    }
+}
+
+private struct StagedPresetImportPresenter: View {
+    let store: CoreStore
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .sheet(
+                item: Binding(
+                    get: { store.statusMenu.pendingImport },
+                    set: { newVal in
+                        if newVal == nil {
+                            store.dispatch("status_menu", "CancelStagedPresetImport")
+                        }
+                    }
+                )
+            ) { preview in
+                StagedPresetImportSheet(store: store, preview: preview)
+            }
     }
 }
 

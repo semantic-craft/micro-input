@@ -162,7 +162,8 @@ impl FirmwareUpdater {
         });
         Ok(())
     }
-    pub fn poll(&mut self) {
+    pub fn poll(&mut self) -> bool {
+        let mut dirty = false;
         loop {
             let event = match self.events.as_ref().map(|rx| rx.try_recv()) {
                 Some(Ok(event)) => event,
@@ -170,13 +171,16 @@ impl FirmwareUpdater {
                     self.events = None;
                     if self.projection.busy {
                         self.fail("后台操作中断；设备状态尚未确认".into());
+                        dirty = true;
                     }
                     break;
                 }
                 _ => break,
             };
             self.accept(event);
+            dirty = true;
         }
+        dirty
     }
     fn fail(&mut self, error: String) {
         self.projection.busy = false;

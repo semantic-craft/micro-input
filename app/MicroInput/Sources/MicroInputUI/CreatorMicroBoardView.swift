@@ -20,7 +20,7 @@ struct CreatorMicroStageView: View {
                     Text(store.tr("当前控制"))
                         .font(UITheme.caption)
                         .foregroundStyle(UITheme.textSecondary)
-                    Text(h.hostExecutionEnabled ? DesktopAgent.displayName(store.statusMenu.activeProfileName, locale: locale) : store.tr("已暂停软件按键映射"))
+                    Text(h.hostExecutionEnabled ? DesktopAgent.displayName(s.activeHostProfileName, locale: locale) : store.tr("已暂停软件按键映射"))
                         .font(UITheme.title)
                         .foregroundStyle(UITheme.textPrimary)
                     Text(s.boardLayers.observedStatus)
@@ -84,6 +84,7 @@ struct CreatorMicroStageView: View {
                         }
                     }
                     CreatorMicroBoardView(store: store, agentKind: agentKind)
+                        .equatable()
                         .frame(maxWidth: .infinity)
                         .frame(height: 420)
                         .background(UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -155,10 +156,14 @@ struct CreatorMicroStageView: View {
     }
 }
 
-struct CreatorMicroBoardView: View {
+struct CreatorMicroBoardView: View, Equatable {
     let store: CoreStore
     let agentKind: AgentProfileKind
     @AppStorage("mi.jumpDirectlyOnGlowingSlotTap") private var jumpDirectlyOnGlowingSlotTap = true
+
+    static func == (lhs: CreatorMicroBoardView, rhs: CreatorMicroBoardView) -> Bool {
+        lhs.store === rhs.store && lhs.agentKind == rhs.agentKind
+    }
 
     private let cellSize: CGFloat = 68
     private let gridSpacing: CGFloat = 8
@@ -196,7 +201,7 @@ struct CreatorMicroBoardView: View {
                 }
             }
             HStack(spacing: gridSpacing) {
-                statusIndicatorClusterCell(c: c)
+                StatusIndicatorClusterCellView(store: store, c: c, cellSize: cellSize)
                 if c.bottomRowLayout == "split" {
                     programmableKeyCell(slot: 10, c: c, ss: ss)
                     programmableKeyCell(slot: 11, c: c, ss: ss)
@@ -329,35 +334,6 @@ struct CreatorMicroBoardView: View {
             : (locale == .en
                 ? "8-way stick (click to cycle Up / Left / Down / Right)"
                 : "8 向摇杆（点击切换上 / 左 / 下 / 右方向配置）"))
-    }
-
-    private func statusIndicatorClusterCell(c: CanvasSliceModel) -> some View {
-        let board = store.sidebar.boardLayers
-        let matchesLayer = board.layers.contains { $0.layer == c.boardPreviewLayer && $0.profileId == c.selectedProfileId }
-        let matchesUsb = c.boardPreviewLayer == nil && board.usbStartupProfileId == c.selectedProfileId
-        let isBoardPreview = c.selectedProfileId != nil && (matchesLayer || matchesUsb)
-        let previewLabel = isBoardPreview ? c.boardPreviewLabel : store.tr("本机方案，没有选择物理层")
-        let leds = isBoardPreview && c.touchLedStates.count == 3 ? c.touchLedStates : [false, false, false]
-        return VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                ForEach(0..<3, id: \.self) { index in
-                    Circle()
-                        .fill(leds[index] ? UITheme.textPrimary : UITheme.strongBorder)
-                        .frame(width: 5.5, height: 5.5)
-                }
-            }
-            Text(isBoardPreview ? (c.boardPreviewLayer.map { "L\($0)" } ?? "USB") : store.tr("本机"))
-                .font(UITheme.monoBadge)
-                .foregroundStyle(UITheme.textPrimary)
-            Text(isBoardPreview ? store.tr("预览") : store.tr("方案"))
-                .font(UITheme.micro)
-                .foregroundStyle(UITheme.textMuted)
-        }
-        .frame(width: cellSize, height: cellSize)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(UITheme.subtleSurface))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
-        .help(previewLabel)
-        .accessibilityLabel(previewLabel)
     }
 
     private func programmableKeyCell(slot: Int, c: CanvasSliceModel, ss: SessionStripSliceModel) -> some View {
@@ -806,6 +782,41 @@ private struct BoardKeycapCellButton: View, Equatable {
                 .stroke(isSelected ? UITheme.accent : UITheme.strongBorder, lineWidth: isSelected ? 2.5 : 1.0)
         )
         .contentShape(Rectangle())
+    }
+}
+
+private struct StatusIndicatorClusterCellView: View {
+    let store: CoreStore
+    let c: CanvasSliceModel
+    var cellSize: CGFloat = 68
+
+    var body: some View {
+        let board = store.sidebar.boardLayers
+        let matchesLayer = board.layers.contains { $0.layer == c.boardPreviewLayer && $0.profileId == c.selectedProfileId }
+        let matchesUsb = c.boardPreviewLayer == nil && board.usbStartupProfileId == c.selectedProfileId
+        let isBoardPreview = c.selectedProfileId != nil && (matchesLayer || matchesUsb)
+        let previewLabel = isBoardPreview ? c.boardPreviewLabel : store.tr("本机方案，没有选择物理层")
+        let leds = isBoardPreview && c.touchLedStates.count == 3 ? c.touchLedStates : [false, false, false]
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(leds[index] ? UITheme.textPrimary : UITheme.strongBorder)
+                        .frame(width: 5.5, height: 5.5)
+                }
+            }
+            Text(isBoardPreview ? (c.boardPreviewLayer.map { "L\($0)" } ?? "USB") : store.tr("本机"))
+                .font(UITheme.monoBadge)
+                .foregroundStyle(UITheme.textPrimary)
+            Text(isBoardPreview ? store.tr("预览") : store.tr("方案"))
+                .font(UITheme.micro)
+                .foregroundStyle(UITheme.textMuted)
+        }
+        .frame(width: cellSize, height: cellSize)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(UITheme.subtleSurface))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+        .help(previewLabel)
+        .accessibilityLabel(previewLabel)
     }
 }
 

@@ -247,6 +247,114 @@ final class MicroInputTests: XCTestCase {
     }
 
     @MainActor
+    func testDomainSliceIsolationAndIdlePollZeroDecode() throws {
+        let dir = try makeIsolatedTempDir("slice-isolation")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        defer { store.stopEventLoops() }
+
+        let nav = WorkbenchNavigationModel()
+        let updater = SoftwareUpdateController()
+        let launchAtLogin = LaunchAtLoginController()
+        let rootView = WorkbenchRootView(
+            store: store,
+            navigation: nav,
+            updater: updater,
+            launchAtLogin: launchAtLogin
+        )
+        let mainHosting = NSHostingView(rootView: rootView)
+        mainHosting.frame = NSRect(x: 0, y: 0, width: 1180, height: 740)
+        mainHosting.layoutSubtreeIfNeeded()
+
+        store.dispatch("canvas", ["SelectLogicalSlot": 0])
+        mainHosting.layoutSubtreeIfNeeded()
+
+        ViewRenderTelemetry.isEnabled = true
+        defer { ViewRenderTelemetry.isEnabled = false }
+
+        ViewRenderTelemetry.reset()
+        for _ in 0..<5 {
+            store.pollHardware()
+        }
+        mainHosting.layoutSubtreeIfNeeded()
+        XCTAssertEqual(
+            ViewRenderTelemetry.count("CoreStore.decodeProjection"),
+            0,
+            "Idle pollHardware() calls must trigger 0 CoreStore.decodeProjection decodes, got \(ViewRenderTelemetry.counts)"
+        )
+        XCTAssertTrue(
+            ViewRenderTelemetry.counts.isEmpty,
+            "Idle pollHardware() calls must trigger 0 SwiftUI body evaluations, got \(ViewRenderTelemetry.counts)"
+        )
+
+        ViewRenderTelemetry.reset()
+        let initialFavorites = store.statusMenu.favorites2x2
+        if let alternateProfileId = store.sidebar.sidebarRows.first(where: { $0.id != initialFavorites.first?.profileId })?.id {
+            store.dispatch("status_menu", ["PinFavoriteSlot": ["slot": 0, "profile_id": alternateProfileId]])
+            XCTAssertNotEqual(store.statusMenu.favorites2x2, initialFavorites)
+        }
+        let initialLighting = store.statusMenu.lightingEnabled
+        store.dispatch("session_strip", ["SetLightingEnabled": !initialLighting])
+        XCTAssertEqual(store.statusMenu.lightingEnabled, !initialLighting)
+        store.dispatch("status_menu", ["SetRadialMenuEnabled": !store.statusMenu.radialMenuEnabled])
+        mainHosting.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(
+            ViewRenderTelemetry.count("WorkbenchRootView"),
+            0,
+            "Mutating statusMenu must not re-render WorkbenchRootView, got \(ViewRenderTelemetry.counts)"
+        )
+        XCTAssertEqual(
+            ViewRenderTelemetry.count("CreatorMicroStageView"),
+            0,
+            "Mutating statusMenu must not re-render CreatorMicroStageView, got \(ViewRenderTelemetry.counts)"
+        )
+        XCTAssertEqual(
+            ViewRenderTelemetry.count("CreatorMicroInlineInspectorView"),
+            0,
+            "Mutating statusMenu must not re-render CreatorMicroInlineInspectorView, got \(ViewRenderTelemetry.counts)"
+        )
+
+        ViewRenderTelemetry.reset()
+        let beforeSessionStrip = store.sessionStrip
+        store.dispatch("session_strip", ["SetAutoOffTimeout": "FiveMinutes"])
+        store.dispatch("session_strip", ["SetWorkingColor": "AmberGold"])
+        store.dispatch("session_strip", ["TriggerTestLighting": "thinking"])
+        store.dispatch("session_strip", ["TriggerTestLighting": NSNull()])
+        XCTAssertNotEqual(store.sessionStrip, beforeSessionStrip)
+        mainHosting.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(
+            ViewRenderTelemetry.count("CreatorMicroInlineInspectorView"),
+            0,
+            "Mutating sessionStrip must not re-render CreatorMicroInlineInspectorView, got \(ViewRenderTelemetry.counts)"
+        )
+        XCTAssertEqual(
+            ViewRenderTelemetry.count("WorkbenchRootView"),
+            0,
+            "Mutating sessionStrip must not re-render WorkbenchRootView, got \(ViewRenderTelemetry.counts)"
+        )
+
+        ViewRenderTelemetry.reset()
+        let beforeShowOtherProfiles = store.sidebar.showOtherProfiles
+        store.dispatch("sidebar", ["SetShowOtherProfiles": !beforeShowOtherProfiles])
+        XCTAssertEqual(store.sidebar.showOtherProfiles, !beforeShowOtherProfiles)
+        mainHosting.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(
+            ViewRenderTelemetry.count("CreatorMicroBoardView"),
+            0,
+            "Mutating sidebar.showOtherProfiles must not re-render CreatorMicroBoardView, got \(ViewRenderTelemetry.counts)"
+        )
+        XCTAssertEqual(
+            ViewRenderTelemetry.count("WorkbenchRootView"),
+            0,
+            "Mutating sidebar.showOtherProfiles must not re-render WorkbenchRootView, got \(ViewRenderTelemetry.counts)"
+        )
+    }
+
+    @MainActor
     func testSixBoardLayersPreviewAndReassignWithoutActivation() throws {
         let dir = try makeIsolatedTempDir("board-layers")
         defer { try? FileManager.default.removeItem(at: dir) }

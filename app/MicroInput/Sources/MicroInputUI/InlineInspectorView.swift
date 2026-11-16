@@ -102,7 +102,7 @@ struct CreatorMicroInlineInspectorView: View {
                         }
 
                         if showTaskControls {
-                            sessionSlotExplanationCard(slot: slot, ss: store.sessionStrip, locale: locale)
+                            SessionSlotExplanationSection(store: store, slot: slot, locale: locale)
                         }
 
                         VStack(alignment: .leading, spacing: 14) {
@@ -536,10 +536,18 @@ struct CreatorMicroInlineInspectorView: View {
         }
     }
 
-    private func sessionSlotExplanationCard(slot: Int, ss: SessionStripSliceModel, locale: ResolvedLocale) -> some View {
+}
+
+private struct SessionSlotExplanationSection: View {
+    let store: CoreStore
+    let slot: Int
+    let locale: ResolvedLocale
+
+    var body: some View {
+        let ss = store.sessionStrip
         let sessionSlot = ss.sessionSlots.first(where: { $0.slotIndex == slot })
         let slotTitle = sessionSlot?.title.isEmpty == false ? sessionSlot!.title : store.tr("等待关联活跃会话")
-        return VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
             Text(store.tr("实时会话槽位（自动跟灯）"))
                 .font(UITheme.bodySemibold)
                 .foregroundStyle(UITheme.textPrimary)
@@ -780,8 +788,6 @@ private struct ActionCatalogRowButton: View, Equatable {
 
 struct ClassicActionLibrarySheet: View {
     let store: CoreStore
-    let rawProfileName: String
-    let agentKind: AgentProfileKind
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
