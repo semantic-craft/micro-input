@@ -156,7 +156,7 @@ struct CreatorMicroStageView: View {
     }
 }
 
-struct CreatorMicroBoardView: View, Equatable {
+struct CreatorMicroBoardView: View, @MainActor Equatable {
     let store: CoreStore
     let agentKind: AgentProfileKind
     @AppStorage("mi.jumpDirectlyOnGlowingSlotTap") private var jumpDirectlyOnGlowingSlotTap = true
@@ -665,7 +665,7 @@ struct SimpleLightingControlCard: View {
     }
 }
 
-private struct BoardKeycapCellButton: View, Equatable {
+private struct BoardKeycapCellButton: View, @MainActor Equatable {
     let store: CoreStore
     let slot: Int
     let width: CGFloat
@@ -961,7 +961,7 @@ struct SessionKeyStatusView: View {
     let sessionSlot: SessionSlotModel?
     var locale: ResolvedLocale = .zhHans
 
-    static func label(for slot: SessionSlotModel?, locale: ResolvedLocale = .zhHans) -> String {
+    nonisolated static func label(for slot: SessionSlotModel?, locale: ResolvedLocale = .zhHans) -> String {
         guard let slot else { return L10n.tr("未分配", locale) }
         if slot.title.isEmpty && !slot.hasAssignedPlace { return L10n.tr("未分配", locale) }
         switch slot.kind {

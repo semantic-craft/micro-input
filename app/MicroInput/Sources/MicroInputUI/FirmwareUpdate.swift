@@ -14,7 +14,7 @@ public struct FirmwarePortModel: Equatable, Identifiable {
     }
 }
 
-public struct FirmwareSliceModel: Equatable {
+public struct FirmwareSliceModel: Equatable, Decodable {
     public var channel = "stable"
     public var currentVersion: String?
     public var releaseTag: String?
@@ -34,29 +34,13 @@ public struct FirmwareSliceModel: Equatable {
 
     public init() {}
 
+    public init(from decoder: Decoder) throws {
+        let dto = try FirmwareProjectionDTO(from: decoder)
+        self = dto.toModel()
+    }
+
     public init(json: [String: Any]) {
-        channel = json["channel"] as? String ?? "stable"
-        currentVersion = json["current_version"] as? String
-        if let release = json["release"] as? [String: Any] {
-            releaseTag = release["tag"] as? String
-            releaseNotes = release["notes"] as? String ?? ""
-            prerelease = release["prerelease"] as? Bool ?? false
-        }
-        versionStatus = json["version_status"] as? String ?? ""
-        phase = json["phase"] as? String ?? "idle"
-        message = json["message"] as? String ?? message
-        busy = json["busy"] as? Bool ?? false
-        downloaded = json["downloaded"] as? Bool ?? false
-        digestVerified = json["digest_verified"] as? Bool ?? false
-        deviceReserved = json["device_reserved"] as? Bool ?? false
-        selectedPort = json["selected_port"] as? String
-        progress = json["progress"] as? Double
-        backupPath = json["backup_path"] as? String
-        ports = (json["ports"] as? [[String: Any]] ?? []).compactMap {
-            guard let path = $0["path"] as? String else { return nil }
-            let product = $0["product"] as? String ?? $0["manufacturer"] as? String ?? "USB 设备"
-            return FirmwarePortModel(path: path, product: product, label: "\(product) · \(path)")
-        }
+        self = CoreStore.decodeJSONSlice(Self.self, from: json) ?? Self()
     }
 
     public var canCheck: Bool { !busy && !deviceReserved }
@@ -272,119 +256,156 @@ public struct FirmwareUpdateSettingsSection: View {
     }
 }
 
-private func v070Int(_ value: Any?) -> Int? {
-    guard let value, !(value is Bool) else { return nil }
-    return (value as? NSNumber)?.intValue
+private extension KeyedDecodingContainer {
+    func lossy<T: Decodable>(_ key: Key, _ fallback: T) -> T {
+        ((try? decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
+    }
+    func lossyOpt<T: Decodable>(_ key: Key) -> T? {
+        (try? decodeIfPresent(T.self, forKey: key)) ?? nil
+    }
 }
 
-private func v070Double(_ value: Any?) -> Double? {
-    guard let value, !(value is Bool), let d = (value as? NSNumber)?.doubleValue, d.isFinite else { return nil }
-    return d
+private struct FirmwareProjectionDTO: Decodable {
+    struct ReleaseDTO: Decodable { let tag, notes: String?; let prerelease: Bool? }
+    struct PortDTO: Decodable { let path, product, manufacturer: String? }
+    let channel, currentVersion, versionStatus, phase, message, selectedPort, backupPath: String?
+    let busy, downloaded, digestVerified, deviceReserved: Bool?
+    let release: ReleaseDTO?; let ports: [PortDTO]?; let progress: Double?
+
+    func toModel() -> FirmwareSliceModel {
+        var m = FirmwareSliceModel()
+        m.channel = channel ?? "stable"
+        m.currentVersion = currentVersion
+        if let release {
+            m.releaseTag = release.tag
+            m.releaseNotes = release.notes ?? ""
+            m.prerelease = release.prerelease ?? false
+        }
+        m.versionStatus = versionStatus ?? ""
+        m.phase = phase ?? "idle"
+        m.message = message ?? m.message
+        m.busy = busy ?? false
+        m.downloaded = downloaded ?? false
+        m.digestVerified = digestVerified ?? false
+        m.deviceReserved = deviceReserved ?? false
+        m.selectedPort = selectedPort
+        m.progress = progress
+        m.backupPath = backupPath
+        m.ports = (ports ?? []).compactMap {
+            guard let path = $0.path else { return nil }
+            let product = $0.product ?? $0.manufacturer ?? "USB 设备"
+            return FirmwarePortModel(path: path, product: product, label: "\(product) · \(path)")
+        }
+        return m
+    }
 }
 
-public struct V070MouseConfigModel: Equatable {
+public struct V070MouseConfigModel: Equatable, Decodable {
     public var preset = "standard"
     public var delayMs = 70, intervalMs = 14, moveDelta = 14, maxSpeed = 22, timeToMax = 22
     public var wheelDelayMs = 70, wheelIntervalMs = 55, wheelDelta = 2, wheelMaxSpeed = 14, wheelTimeToMax = 28
     public var stickSpeed = 24, stickRegulator = 10, stickScroll = 25
     public var deadzone = 0.15
 
-    public init() {}
-    public init(json: [String: Any]) {
-        preset = json["preset"] as? String ?? "standard"
-        delayMs = v070Int(json["delay_ms"]) ?? delayMs
-        intervalMs = v070Int(json["interval_ms"]) ?? intervalMs
-        moveDelta = v070Int(json["move_delta"]) ?? moveDelta
-        maxSpeed = v070Int(json["max_speed"]) ?? maxSpeed
-        timeToMax = v070Int(json["time_to_max"]) ?? timeToMax
-        wheelDelayMs = v070Int(json["wheel_delay_ms"]) ?? wheelDelayMs
-        wheelIntervalMs = v070Int(json["wheel_interval_ms"]) ?? wheelIntervalMs
-        wheelDelta = v070Int(json["wheel_delta"]) ?? wheelDelta
-        wheelMaxSpeed = v070Int(json["wheel_max_speed"]) ?? wheelMaxSpeed
-        wheelTimeToMax = v070Int(json["wheel_time_to_max"]) ?? wheelTimeToMax
-        stickSpeed = v070Int(json["stick_speed"]) ?? stickSpeed
-        stickRegulator = v070Int(json["stick_regulator"]) ?? stickRegulator
-        stickScroll = v070Int(json["stick_scroll"]) ?? stickScroll
-        deadzone = v070Double(json["deadzone"]) ?? deadzone
+    private enum CodingKeys: String, CodingKey {
+        case preset, delayMs, intervalMs, moveDelta, maxSpeed, timeToMax
+        case wheelDelayMs, wheelIntervalMs, wheelDelta, wheelMaxSpeed, wheelTimeToMax
+        case stickSpeed, stickRegulator, stickScroll, deadzone
     }
+    public init() {}
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        preset = c.lossy(.preset, preset)
+        delayMs = c.lossy(.delayMs, delayMs); intervalMs = c.lossy(.intervalMs, intervalMs)
+        moveDelta = c.lossy(.moveDelta, moveDelta); maxSpeed = c.lossy(.maxSpeed, maxSpeed); timeToMax = c.lossy(.timeToMax, timeToMax)
+        wheelDelayMs = c.lossy(.wheelDelayMs, wheelDelayMs); wheelIntervalMs = c.lossy(.wheelIntervalMs, wheelIntervalMs)
+        wheelDelta = c.lossy(.wheelDelta, wheelDelta); wheelMaxSpeed = c.lossy(.wheelMaxSpeed, wheelMaxSpeed); wheelTimeToMax = c.lossy(.wheelTimeToMax, wheelTimeToMax)
+        stickSpeed = c.lossy(.stickSpeed, stickSpeed); stickRegulator = c.lossy(.stickRegulator, stickRegulator); stickScroll = c.lossy(.stickScroll, stickScroll)
+        if let dz: Double = c.lossyOpt(.deadzone), dz.isFinite { deadzone = dz }
+    }
+    public init(json: [String: Any]) { self = CoreStore.decodeJSONSlice(Self.self, from: json) ?? Self() }
 }
 
-public struct V070PmConfigModel: Equatable {
+public struct V070PmConfigModel: Equatable, Decodable {
     public var autoSleep = true, hostSleep = true
     public var sleepAfterMin = 15
 
+    private enum CodingKeys: String, CodingKey { case autoSleep, hostSleep, sleepAfterMin }
     public init() {}
-    public init(json: [String: Any]) {
-        autoSleep = json["auto_sleep"] as? Bool ?? autoSleep
-        hostSleep = json["host_sleep"] as? Bool ?? hostSleep
-        sleepAfterMin = v070Int(json["sleep_after_min"]) ?? sleepAfterMin
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        autoSleep = c.lossy(.autoSleep, autoSleep); hostSleep = c.lossy(.hostSleep, hostSleep)
+        sleepAfterMin = c.lossy(.sleepAfterMin, sleepAfterMin)
     }
+    public init(json: [String: Any]) { self = CoreStore.decodeJSONSlice(Self.self, from: json) ?? Self() }
 }
 
-public struct V070PmHoldModel: Equatable, Identifiable {
+public struct V070PmHoldModel: Equatable, Identifiable, Decodable {
     public var id: String { "\(owner):\(floor):\(ageMs)" }
     public var owner = "", floor = ""
     public var ageMs = 0
 
+    private enum CodingKeys: String, CodingKey { case owner, floor, ageMs }
     public init() {}
-    public init(json: [String: Any]) {
-        owner = json["owner"] as? String ?? ""
-        floor = json["floor"] as? String ?? ""
-        ageMs = v070Int(json["age_ms"]) ?? 0
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        owner = c.lossy(.owner, ""); floor = c.lossy(.floor, ""); ageMs = c.lossy(.ageMs, 0)
     }
+    public init(json: [String: Any]) { self = CoreStore.decodeJSONSlice(Self.self, from: json) ?? Self() }
 }
 
-public struct V070PmStateModel: Equatable {
+public struct V070PmStateModel: Equatable, Decodable {
     public var state = "", floor = "", baseFloor = ""
     public var linePowered = false, autoSleep = false, usbHostHold = false
     public var sleepAfterS = 0, idleS = 0, standbyS = 0, creditS = 0
     public var holds: [V070PmHoldModel] = []
 
-    public init() {}
-    public init(json: [String: Any]) {
-        state = json["state"] as? String ?? ""
-        floor = json["floor"] as? String ?? ""
-        baseFloor = json["base_floor"] as? String ?? ""
-        linePowered = json["line_powered"] as? Bool ?? false
-        autoSleep = json["auto_sleep"] as? Bool ?? false
-        sleepAfterS = v070Int(json["sleep_after_s"]) ?? 0
-        idleS = v070Int(json["idle_s"]) ?? 0
-        standbyS = v070Int(json["standby_s"]) ?? 0
-        creditS = v070Int(json["credit_s"]) ?? 0
-        usbHostHold = json["usb_host_hold"] as? Bool ?? false
-        holds = (json["holds"] as? [[String: Any]] ?? []).map(V070PmHoldModel.init(json:))
+    private enum CodingKeys: String, CodingKey {
+        case state, floor, baseFloor, linePowered, autoSleep, usbHostHold, sleepAfterS, idleS, standbyS, creditS, holds
     }
+    public init() {}
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        state = c.lossy(.state, ""); floor = c.lossy(.floor, ""); baseFloor = c.lossy(.baseFloor, "")
+        linePowered = c.lossy(.linePowered, false); autoSleep = c.lossy(.autoSleep, false); usbHostHold = c.lossy(.usbHostHold, false)
+        sleepAfterS = c.lossy(.sleepAfterS, 0); idleS = c.lossy(.idleS, 0); standbyS = c.lossy(.standbyS, 0); creditS = c.lossy(.creditS, 0)
+        holds = c.lossy(.holds, [])
+    }
+    public init(json: [String: Any]) { self = CoreStore.decodeJSONSlice(Self.self, from: json) ?? Self() }
 }
 
-public struct V070DeviceNameModel: Equatable {
+public struct V070DeviceNameModel: Equatable, Decodable {
     public var name = "", factoryName = ""
     public var maxLength = 15
 
+    private enum CodingKeys: String, CodingKey { case name, factoryName, maxLength }
     public init() {}
-    public init(json: [String: Any]) {
-        name = json["name"] as? String ?? ""
-        factoryName = json["factory_name"] as? String ?? ""
-        maxLength = v070Int(json["max_length"]) ?? 15
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = c.lossy(.name, ""); factoryName = c.lossy(.factoryName, ""); maxLength = c.lossy(.maxLength, 15)
     }
+    public init(json: [String: Any]) { self = CoreStore.decodeJSONSlice(Self.self, from: json) ?? Self() }
 }
 
-public struct V070SaRgbModel: Equatable {
+public struct V070SaRgbModel: Equatable, Decodable {
     public var sa: Int?
     public var colorHex = "#FFFFFF"
     public var brightness = 1.0, speed = 0.5
     public var effect = 1
 
+    private enum CodingKeys: String, CodingKey { case sa, colorHex, brightness, speed, effect }
     public init() {}
-    public init(json: [String: Any]) {
-        sa = v070Int(json["sa"])
-        colorHex = json["color_hex"] as? String ?? "#FFFFFF"
-        brightness = v070Double(json["brightness"]) ?? 1.0
-        speed = v070Double(json["speed"]) ?? 0.5
-        effect = v070Int(json["effect"]) ?? 1
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sa = c.lossyOpt(.sa); colorHex = c.lossy(.colorHex, "#FFFFFF")
+        if let b: Double = c.lossyOpt(.brightness), b.isFinite { brightness = b }
+        if let s: Double = c.lossyOpt(.speed), s.isFinite { speed = s }
+        effect = c.lossy(.effect, 1)
     }
+    public init(json: [String: Any]) { self = CoreStore.decodeJSONSlice(Self.self, from: json) ?? Self() }
 }
 
-public struct V070HardwareSliceModel: Equatable {
+public struct V070HardwareSliceModel: Equatable, Decodable {
     public var supported = false, busy = false, synced = false
     public var activeProfile: Int?, activeLayer: Int?, activeJoystickMode: String?, batteryPercent: Int?, isCharging: Bool?
     public var hostSleepStatus = "awake"
@@ -399,28 +420,29 @@ public struct V070HardwareSliceModel: Equatable {
     public var deviceName = V070DeviceNameModel()
     public var saRgb = V070SaRgbModel()
 
-    public init() {}
-    public init(json: [String: Any]) {
-        supported = json["supported"] as? Bool ?? false
-        busy = json["busy"] as? Bool ?? false
-        synced = json["synced"] as? Bool ?? false
-        activeProfile = v070Int(json["active_profile"])
-        activeLayer = v070Int(json["active_layer"])
-        activeJoystickMode = json["active_joystick_mode"] as? String
-        batteryPercent = v070Int(json["battery_percent"])
-        isCharging = json["is_charging"] as? Bool
-        hostSleepStatus = json["host_sleep_status"] as? String ?? hostSleepStatus
-        statusMessage = json["status_message"] as? String ?? statusMessage
-        lastError = json["last_error"] as? String
-        autoLayerSyncEnabled = json["auto_layer_sync_enabled"] as? Bool ?? false
-        sessionSaRgbSyncEnabled = json["session_sa_rgb_sync_enabled"] as? Bool ?? false
-        preferredDeviceSerial = json["preferred_device_serial"] as? String
-        mouse = V070MouseConfigModel(json: json["mouse"] as? [String: Any] ?? [:])
-        pmConfig = V070PmConfigModel(json: json["pm_config"] as? [String: Any] ?? [:])
-        pmState = V070PmStateModel(json: json["pm_state"] as? [String: Any] ?? [:])
-        deviceName = V070DeviceNameModel(json: json["device_name"] as? [String: Any] ?? [:])
-        saRgb = V070SaRgbModel(json: json["sa_rgb"] as? [String: Any] ?? [:])
+    private enum CodingKeys: String, CodingKey {
+        case supported, busy, synced, activeProfile, activeLayer, activeJoystickMode, batteryPercent, isCharging
+        case hostSleepStatus, statusMessage, lastError, autoLayerSyncEnabled, sessionSaRgbSyncEnabled
+        case preferredDeviceSerial, mouse, pmConfig, pmState, deviceName, saRgb
     }
+    public init() {}
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        supported = c.lossy(.supported, false); busy = c.lossy(.busy, false); synced = c.lossy(.synced, false)
+        activeProfile = c.lossyOpt(.activeProfile); activeLayer = c.lossyOpt(.activeLayer)
+        activeJoystickMode = c.lossyOpt(.activeJoystickMode); batteryPercent = c.lossyOpt(.batteryPercent)
+        isCharging = c.lossyOpt(.isCharging); hostSleepStatus = c.lossy(.hostSleepStatus, hostSleepStatus)
+        statusMessage = c.lossy(.statusMessage, statusMessage); lastError = c.lossyOpt(.lastError)
+        autoLayerSyncEnabled = c.lossy(.autoLayerSyncEnabled, false)
+        sessionSaRgbSyncEnabled = c.lossy(.sessionSaRgbSyncEnabled, false)
+        preferredDeviceSerial = c.lossyOpt(.preferredDeviceSerial)
+        mouse = c.lossy(.mouse, V070MouseConfigModel())
+        pmConfig = c.lossy(.pmConfig, V070PmConfigModel())
+        pmState = c.lossy(.pmState, V070PmStateModel())
+        deviceName = c.lossy(.deviceName, V070DeviceNameModel())
+        saRgb = c.lossy(.saRgb, V070SaRgbModel())
+    }
+    public init(json: [String: Any]) { self = CoreStore.decodeJSONSlice(Self.self, from: json) ?? Self() }
 }
 
 public enum V070HardwareCommand {

@@ -4,19 +4,30 @@ import MicroInputCoreFFI
 import Observation
 import SwiftUI
 
-private struct CoreTeardownResources: @unchecked Sendable {
-    let timer: Timer?
-    let observer: NSObjectProtocol?
+private final class CoreTeardownBox: @unchecked Sendable {
+    var timer: Timer?
+    var observer: NSObjectProtocol?
     let center: NotificationCenter
-    let handle: OpaquePointer?
+    var handle: OpaquePointer?
 
-    func releaseAll() {
+    init(center: NotificationCenter) {
+        self.center = center
+    }
+
+    func stopLoops() {
         timer?.invalidate()
+        timer = nil
         if let observer {
             center.removeObserver(observer)
+            self.observer = nil
         }
+    }
+
+    func releaseAll() {
+        stopLoops()
         if let handle {
             mi_core_free(handle)
+            self.handle = nil
         }
     }
 }
@@ -24,12 +35,11 @@ private struct CoreTeardownResources: @unchecked Sendable {
 @MainActor
 @Observable
 public final class CoreStore {
-    @ObservationIgnored private var handle: OpaquePointer?
-    @ObservationIgnored private var pollTimer: Timer?
-    @ObservationIgnored private var workspaceObserver: NSObjectProtocol?
+    @ObservationIgnored private let lifecycle: CoreTeardownBox
     @ObservationIgnored private var workspaceLifecycle: WorkspaceLifecycle?
-    @ObservationIgnored private let workspaceNotificationCenter: NotificationCenter
     @ObservationIgnored private var lastObservedBundleId: String?
+
+    @ObservationIgnored private let projectionDecoder = CoreStore.makeProjectionDecoder()
 
     @ObservationIgnored public private(set) var model: ProjectionModel = ProjectionModel()
 
@@ -51,14 +61,15 @@ public final class CoreStore {
         pollInIsolation: Bool = false,
         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter
     ) {
-        self.workspaceNotificationCenter = workspaceNotificationCenter
+        let box = CoreTeardownBox(center: workspaceNotificationCenter)
         if let dir = isolatedDirectory {
-            self.handle = dir.withCString { ptr in
+            box.handle = dir.withCString { ptr in
                 mi_core_new(ptr)
             }
         } else {
-            self.handle = mi_core_new(nil)
+            box.handle = mi_core_new(nil)
         }
+        self.lifecycle = box
         refreshProjection()
         if isolatedDirectory == nil && !LaunchOriginDetector.isIsolatedOrVerifyEnvironment() {
             syncSystemLocale(Locale.preferredLanguages)
@@ -72,17 +83,12 @@ public final class CoreStore {
     }
 
     deinit {
-        let resources = CoreTeardownResources(
-            timer: pollTimer,
-            observer: workspaceObserver,
-            center: workspaceNotificationCenter,
-            handle: handle
-        )
+        let box = lifecycle
         if Thread.isMainThread {
-            resources.releaseAll()
+            box.releaseAll()
         } else {
             DispatchQueue.main.async {
-                resources.releaseAll()
+                box.releaseAll()
             }
         }
     }
@@ -90,35 +96,30 @@ public final class CoreStore {
     public func stopEventLoops() {
         workspaceLifecycle?.stop()
         workspaceLifecycle = nil
-        pollTimer?.invalidate()
-        pollTimer = nil
-        if let observer = workspaceObserver {
-            workspaceNotificationCenter.removeObserver(observer)
-            workspaceObserver = nil
-        }
+        lifecycle.stopLoops()
     }
 
     private func startEventLoops(observeWorkspace: Bool) {
         let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.pollTimer != nil else { return }
+                guard let self, self.lifecycle.timer != nil else { return }
                 self.pollHardware()
             }
         }
         timer.tolerance = 0.03
         RunLoop.main.add(timer, forMode: .common)
-        pollTimer = timer
+        lifecycle.timer = timer
 
         guard observeWorkspace else { return }
 
-        workspaceObserver = workspaceNotificationCenter.addObserver(
+        lifecycle.observer = lifecycle.center.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
         ) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             MainActor.assumeIsolated {
-                guard let self, self.workspaceObserver != nil else { return }
+                guard let self, self.lifecycle.observer != nil else { return }
                 self.observeForeground(app?.bundleIdentifier)
             }
         }
@@ -136,12 +137,12 @@ public final class CoreStore {
     }
 
     public func refreshProjection() {
-        guard let h = handle, let cStr = mi_core_project_json(h) else { return }
+        guard let h = lifecycle.handle, let cStr = mi_core_project_json(h) else { return }
         applyProjectionCStr(cStr)
     }
 
     public func pollHardware() {
-        guard let h = handle, let cStr = mi_core_poll_json(h) else { return }
+        guard let h = lifecycle.handle, let cStr = mi_core_poll_json(h) else { return }
         applyProjectionCStr(cStr)
     }
 
@@ -196,7 +197,7 @@ public final class CoreStore {
     }
 
     public func dispatchRaw(_ payload: [String: Any]) {
-        guard let h = handle else { return }
+        guard let h = lifecycle.handle else { return }
         guard JSONSerialization.isValidJSONObject(payload),
               let data = try? JSONSerialization.data(withJSONObject: payload),
               let cmdString = String(data: data, encoding: .utf8)
@@ -214,10 +215,14 @@ public final class CoreStore {
         defer { mi_core_string_free(rawPtr) }
         ViewRenderTelemetry.record("CoreStore.decodeProjection")
         let data = Data(bytesNoCopy: UnsafeMutableRawPointer(rawPtr), count: Int(strlen(rawPtr)), deallocator: .none)
-        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+        let dto: WorkbenchProjectionDTO
+        do {
+            dto = try projectionDecoder.decode(WorkbenchProjectionDTO.self, from: data)
+        } catch {
+            NSLog("WorkbenchProjectionDTO decode error: \(error)")
             return
         }
-        let next = Self.parseProjection(root)
+        let next = dto.toModel()
         self.model = next
         commitDomainSlices(from: next)
     }
@@ -254,664 +259,638 @@ public final class CoreStore {
         if self.locale != m.resolvedLocale { self.locale = m.resolvedLocale }
     }
 
-    static func parseProjection(_ root: [String: Any]) -> ProjectionModel {
+    nonisolated static func makeProjectionDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }
+
+    nonisolated static func decodeJSONSlice<T: Decodable>(_ type: T.Type, from json: [String: Any]) -> T? {
+        guard JSONSerialization.isValidJSONObject(json),
+              let data = try? JSONSerialization.data(withJSONObject: json)
+        else { return nil }
+        return try? makeProjectionDecoder().decode(T.self, from: data)
+    }
+
+    nonisolated static func parseProjection(_ root: [String: Any]) -> ProjectionModel {
+        decodeJSONSlice(WorkbenchProjectionDTO.self, from: root)?.toModel() ?? ProjectionModel()
+    }
+}
+
+private struct JSONPresence: Decodable {
+    init(from decoder: Decoder) throws {}
+}
+
+private struct WorkbenchProjectionDTO: Decodable {
+    let firmware: FirmwareSliceModel?
+    let v070Hardware: V070HardwareSliceModel?
+    let statusMessage, lastExportedDiagnosticsPath, lastExportedPreset, deviceSummary: String?
+    let deviceConnected: Bool?
+    let documentRevision, hostRevision: Int?
+    let header: HeaderDTO?
+    let sidebar: SidebarDTO?
+    let canvas: CanvasDTO?
+    let sessionStrip: SessionStripDTO?
+    let inspector: InspectorDTO?
+    let statusMenu: StatusMenuDTO?
+    let radial: RadialDTO?
+    let radialSlotConfigs: [RadialSlotConfigDTO]?
+    let overlay: OverlayDTO?
+    let activeModal: ActiveModalDTO?
+
+    func toModel() -> ProjectionModel {
         var m = ProjectionModel()
-        m.firmware = FirmwareSliceModel(json: root["firmware"] as? [String: Any] ?? [:])
-        m.v070Hardware = V070HardwareSliceModel(json: root["v070_hardware"] as? [String: Any] ?? [:])
-        m.statusMessage = root["status_message"] as? String ?? "已就绪"
-        m.lastExportedDiagnosticsPath = root["last_exported_diagnostics_path"] as? String
-        m.lastExportedPreset = root["last_exported_preset"] as? String
-        m.deviceConnected = root["device_connected"] as? Bool ?? false
-        m.deviceSummary = root["device_summary"] as? String ?? "Creator Micro 2 (303A:8298) · 离线草稿模式"
-        m.documentRevision = root["document_revision"] as? Int ?? 0
-        m.hostRevision = root["host_revision"] as? Int ?? 0
+        if let firmware { m.firmware = firmware }
+        if let v070Hardware { m.v070Hardware = v070Hardware }
+        m.statusMessage = statusMessage ?? "已就绪"
+        m.lastExportedDiagnosticsPath = lastExportedDiagnosticsPath
+        m.lastExportedPreset = lastExportedPreset
+        m.deviceConnected = deviceConnected ?? false
+        m.deviceSummary = deviceSummary ?? "Creator Micro 2 (303A:8298) · 离线草稿模式"
+        m.documentRevision = documentRevision ?? 0
+        m.hostRevision = hostRevision ?? 0
 
-        let hasHeader = root["header"] != nil
-        if let header = root["header"] as? [String: Any] {
-            m.engineVersion = header["engine_version"] as? String ?? "0.2.0"
-            if let rs = header["ready_state"] as? [String: [String: Any]] {
-                if let r = rs["Ready"] {
-                    m.readyKind = "Ready"
-                    m.readyText = r["text"] as? String ?? "已就绪"
-                } else if let mn = rs["ModeNotice"] {
-                    m.readyKind = "ModeNotice"
-                    m.readyText = mn["text"] as? String ?? ""
-                } else if let c = rs["Caution"] {
-                    m.readyKind = "Caution"
-                    m.readyText = c["text"] as? String ?? ""
-                }
-            }
-            if let bn = header["banner"] as? [String: [String: Any]] {
-                if let r = bn["Ready"] {
-                    m.bannerKind = "Ready"
-                    m.bannerText = r["summary"] as? String ?? "就绪"
-                } else if let nh = bn["NativeHeld"] {
-                    m.bannerKind = "NativeHeld"
-                    m.bannerText = nh["summary"] as? String ?? "原生接管"
-                } else if let c = bn["Caution"] {
-                    m.bannerKind = "Caution"
-                    m.bannerText = c["reason"] as? String ?? "需注意"
-                }
-            }
-            m.showConnectButton = header["show_connect_button"] as? Bool ?? true
-            m.showReturnToHostButton = header["show_return_to_host_button"] as? Bool ?? false
-            m.hostExecutionEnabled = header["host_execution_enabled"] as? Bool ?? false
-            m.accessibilityTrusted = header["accessibility_trusted"] as? Bool ?? true
-            m.canEditDraft = header["can_edit_draft"] as? Bool ?? true
-            m.canUndo = header["can_undo"] as? Bool ?? false
-            m.canRedo = header["can_redo"] as? Bool ?? false
-            m.busy = header["busy"] as? Bool ?? false
-            m.powerStatus = (header["power_status"] as? [String: Any]).map(parsePowerStatus)
-            if let devs = header["candidate_devices"] as? [[String: Any]] {
-                m.candidateDevices = parseCandidateDevices(devs)
-            }
-            m.preferredDeviceSerial = header["preferred_device_serial"] as? String
-            m.uiLanguage = (header["ui_language"] as? String).flatMap(UiLanguagePreference.init(rawValue:)) ?? .system
-            m.resolvedLocale = (header["resolved_locale"] as? String).flatMap(ResolvedLocale.init(rawValue:)) ?? .zhHans
-            m.silentAtLogin = header["silent_at_login"] as? Bool ?? true
+        let hasHeader = header != nil
+        if let header { header.apply(to: &m) }
+        if let sidebar { sidebar.apply(to: &m, hasHeader: hasHeader) }
+        if let canvas { canvas.apply(to: &m) }
+        if let sessionStrip { sessionStrip.apply(to: &m) }
+        if let inspector { inspector.apply(to: &m) }
+        if let statusMenu { statusMenu.apply(to: &m, hasHeader: hasHeader) }
+        if let radial { m.radialReadiness = radial.readiness ?? "Ready" }
+        if let radialSlotConfigs {
+            m.radialSlots = radialSlotConfigs.enumerated().map { idx, rs in rs.toModel(id: idx) }
         }
-
-        if let sidebar = root["sidebar"] as? [String: Any] {
-            m.selectedProfileId = sidebar["selected_profile_id"] as? String
-            m.selectedDisplayName = sidebar["selected_display_name"] as? String ?? "未选择方案"
-            m.activeHostProfileId = sidebar["active_host_profile_id"] as? String
-            m.isProfileLocked = sidebar["is_profile_locked"] as? Bool ?? false
-            m.lockedProfileId = sidebar["locked_profile_id"] as? String
-            if !hasHeader, let trusted = sidebar["accessibility_trusted"] as? Bool {
-                m.accessibilityTrusted = trusted
-            }
-            m.showOtherProfiles = sidebar["show_other_profiles"] as? Bool ?? false
-            m.editingDevice = sidebar["editing_device"] as? Bool ?? false
-            m.canMoveUp = sidebar["can_move_up"] as? Bool ?? false
-            m.canMoveDown = sidebar["can_move_down"] as? Bool ?? false
-            m.canDelete = sidebar["can_delete"] as? Bool ?? false
-            if let rows = sidebar["rows"] as? [[String: Any]] {
-                m.sidebarRows = rows.map { r in
-                    SidebarRowModel(
-                        profileId: r["profile_id"] as? String ?? "",
-                        rawName: r["raw_name"] as? String ?? "",
-                        displayName: r["display_name"] as? String ?? "",
-                        badgeMonogram: r["badge_monogram"] as? String ?? "",
-                        canonicalAgent: r["canonical_agent"] as? String,
-                        isSelected: r["is_selected"] as? Bool ?? false,
-                        isActiveHost: r["is_active_host"] as? Bool ?? false,
-                        isProtectedOai: r["is_protected_oai"] as? Bool ?? false,
-                        appInstalled: r["app_installed"] as? Bool ?? true,
-                        isManualFallback: r["is_manual_fallback"] as? Bool ?? false
-                    )
-                }
-            }
-            if let board = sidebar["board_layers"] as? [String: Any] {
-                if let layers = board["layers"] as? [[String: Any]] {
-                    m.boardLayers.layers = layers.compactMap { row in
-                        guard let layer = row["layer"] as? Int,
-                              let leds = row["leds"] as? [Bool], leds.count == 3 else { return nil }
-                        return BoardLayerModel(
-                            layer: layer, leds: leds,
-                            profileId: row["profile_id"] as? String,
-                            displayName: row["display_name"] as? String ?? "未分配",
-                            owner: row["owner"] as? String ?? "Unassigned",
-                            isPreviewSelected: row["is_preview_selected"] as? Bool ?? false,
-                            assignmentIssue: row["assignment_issue"] as? String
-                        )
-                    }
-                }
-                if let choices = board["profile_choices"] as? [[String: Any]] {
-                    m.boardLayers.profileChoices = choices.compactMap { row in
-                        guard let id = row["profile_id"] as? String, let name = row["display_name"] as? String else { return nil }
-                        return BoardProfileChoiceModel(profileId: id, displayName: name)
-                    }
-                }
-                m.boardLayers.usbStartupProfileId = board["usb_startup_profile_id"] as? String
-                m.boardLayers.usbStartupDisplayName = board["usb_startup_display_name"] as? String ?? "未分配"
-                m.boardLayers.usbPreviewSelected = board["usb_preview_selected"] as? Bool ?? false
-                m.boardLayers.observedLayer = board["observed_layer"] as? Int
-                m.boardLayers.observedProfileKind = board["observed_profile_kind"] as? String
-                m.boardLayers.observedStatus = board["observed_status"] as? String ?? "设备层未确认"
-                m.boardLayers.applyBlockReason = board["apply_block_reason"] as? String ?? "六层应用尚未可用"
-                m.boardLayers.canApply = board["can_apply"] as? Bool ?? false
-                m.boardLayers.configurationObserved = board["configuration_observed"] as? Bool ?? false
-                m.boardLayers.keyboardGrabbed = board["keyboard_grabbed"] as? Bool ?? false
-                m.boardLayers.firstEventVerified = board["first_event_verified"] as? Bool ?? false
-                m.boardLayers.runtimeReady = board["runtime_ready"] as? Bool ?? false
-                m.boardLayers.restoreAvailable = board["restore_available"] as? Bool ?? false
-            }
-        }
-
-        if let canvas = root["canvas"] as? [String: Any] {
-            m.selectedLayerId = canvas["selected_layer_id"] as? String
-            m.selectedSurface = canvas["selected_surface"] as? String ?? "Key0"
-            m.selectedLogicalSlot = canvas["selected_logical_slot"] as? Int ?? 0
-            m.selectedJoystickDirection = canvas["selected_joystick_direction"] as? String ?? "North"
-            m.bottomRowLayout = canvas["bottom_row_layout"] as? String ?? "split"
-            m.showKeycapIcons = canvas["show_keycap_icons"] as? Bool ?? true
-            m.showKeycapLabels = canvas["show_keycap_labels"] as? Bool ?? true
-            m.statusLedHex = canvas["status_led_hex"] as? String ?? "#14C76B"
-            m.underglowHex = canvas["underglow_hex"] as? String ?? "#3B82F6"
-            if let leds = canvas["touch_led_states"] as? [Bool], leds.count == 3 {
-                m.touchLedStates = leds
-            }
-            m.boardPreviewLayer = canvas["board_preview_layer"] as? Int
-            m.boardPreviewLabel = canvas["board_preview_label"] as? String ?? "USB 启动方案预览"
-            m.canEditBindings = canvas["can_edit_bindings"] as? Bool ?? true
-            m.canAddLighting = canvas["can_add_lighting"] as? Bool ?? true
-            m.canExportOrCopyLayer = canvas["can_export_or_copy_layer"] as? Bool ?? true
-
-            if let tabs = canvas["layer_tabs"] as? [[String: Any]] {
-                m.layerTabs = tabs.map { t in
-                    LayerTabModel(
-                        layerId: t["layer_id"] as? String ?? "",
-                        name: t["name"] as? String ?? "",
-                        isSelected: t["is_selected"] as? Bool ?? false,
-                        isProtectedOai: t["is_protected_oai"] as? Bool ?? false
-                    )
-                }
-            }
-            if let enc = canvas["encoder"] as? [String: Any] {
-                m.encoderCcwLabel = enc["ccw_label"] as? String ?? "上滚"
-                m.encoderCwLabel = enc["cw_label"] as? String ?? "下滚"
-                m.encoderPressLabel = enc["press_label"] as? String ?? "按压"
-                m.encoderHoldLabel = enc["hold_label"] as? String ?? ""
-                m.encoderSelectedSlot = enc["selected_slot"] as? Int
-                m.encoderRingGlowHex = enc["ring_glow_hex"] as? String ?? "#14C76B"
-            }
-            if let joy = canvas["joystick"] as? [String: Any] {
-                m.joystickMode = joy["mode"] as? String ?? "logical_sectors"
-                m.joystickModeLabel = joy["mode_label"] as? String ?? "八向摇杆"
-                m.joystickActiveDirection = joy["active_direction"] as? String ?? "North"
-                m.joystickIsSelected = joy["is_selected"] as? Bool ?? false
-                if let secs = joy["sectors"] as? [[String: Any]] {
-                    m.joystickSectors = secs.map { s in
-                        JoystickSectorModel(
-                            direction: s["direction"] as? String ?? "North",
-                            logicalSlot: s["logical_slot"] as? Int ?? 16,
-                            conciseLabel: s["concise_label"] as? String ?? "",
-                            isSelected: s["is_selected"] as? Bool ?? false
-                        )
-                    }
-                }
-            }
-            if let cells = canvas["keycap_cells"] as? [[String: Any]] {
-                m.keycapCells = cells.map { c in
-                    KeycapCellModel(
-                        surface: c["surface"] as? String ?? "Key0",
-                        primarySlot: c["primary_slot"] as? Int ?? 0,
-                        effectiveSlot: c["effective_slot"] as? Int ?? 0,
-                        bindingId: c["binding_id"] as? String ?? "AG00",
-                        row: c["row"] as? Int ?? 0,
-                        col: c["col"] as? Int ?? 0,
-                        spanCols: c["span_cols"] as? Int ?? 1,
-                        silkscreenIcon: c["silkscreen_icon"] as? String ?? "⌘",
-                        keycapId: c["keycap_id"] as? String ?? "Blank",
-                        slotRole: c["slot_role"] as? String ?? "ActionKey",
-                        conciseCaption: c["concise_caption"] as? String ?? "未绑定",
-                        fullActionTitle: c["full_action_title"] as? String ?? "未绑定",
-                        isSessionSlot: c["is_session_slot"] as? Int,
-                        isSelected: c["is_selected"] as? Bool ?? false,
-                        isAvailable: c["is_available"] as? Bool ?? true,
-                        perKeyLedHex: c["per_key_led_hex"] as? String ?? "#222222"
-                    )
-                }
-            }
-            if let lock = canvas["protected_lock"] as? [String: Any] {
-                m.protectedLock = parseProtectedLock(lock)
-            }
-        }
-
-        if let strip = root["session_strip"] as? [String: Any] {
-            m.unreadCompletedCount = strip["unread_completed_count"] as? Int ?? 0
-            m.workingCount = strip["working_count"] as? Int ?? 0
-            m.topSixBoundAsSessionKeys = strip["top_six_bound_as_session_keys"] as? Bool ?? false
-            m.canMutateSessionLayout = strip["can_mutate_layout"] as? Bool ?? true
-            if let slots = strip["slots"] as? [[String: Any]] {
-                m.sessionSlots = slots.map { s in
-                    SessionSlotModel(
-                        slotIndex: s["slot_index"] as? Int ?? 0,
-                        keyBindingId: s["key_binding_id"] as? String ?? "AG00",
-                        mode: s["mode"] as? String ?? "Recent",
-                        status: s["status"] as? String ?? "Idle",
-                        kind: s["kind"] as? String ?? "Idle",
-                        agentMonogram: s["agent_monogram"] as? String ?? "",
-                        title: s["title"] as? String ?? "",
-                        subtitle: s["subtitle"] as? String ?? "",
-                        isUnreadBlueDot: s["is_unread_blue_dot"] as? Bool ?? false,
-                        isWorkingAnimated: s["is_working_animated"] as? Bool ?? false,
-                        isBoundToTopKey: s["is_bound_to_top_key"] as? Bool ?? false,
-                        ledColorHex: s["led_color_hex"] as? String ?? "#222222",
-                        hasAssignedPlace: s["place"] != nil && !(s["place"] is NSNull)
-                    )
-                }
-            }
-            if let lp = strip["lighting_popover"] as? [String: Any] {
-                m.simpleLighting = SimpleLightingModel(
-                    isOpen: lp["is_open"] as? Bool ?? false,
-                    lightingEnabled: lp["lighting_enabled"] as? Bool ?? true,
-                    autoSessionColor: lp["auto_session_color"] as? Bool ?? true,
-                    onlyGlowOnAttentionOrCompleted: lp["only_glow_on_attention_or_completed"] as? Bool ?? true,
-                    glowOnWorking: lp["glow_on_working"] as? Bool ?? true,
-                    ambientColor: lp["ambient_color"] as? String ?? "OceanBlue",
-                    workingColor: lp["working_color"] as? String ?? "EmeraldGreen",
-                    brightness: lp["brightness"] as? String ?? "Standard",
-                    autoOffTimeout: lp["auto_off_timeout"] as? String ?? "ThreeMinutes",
-                    manualPreviewPhase: lp["manual_preview_phase"] as? String,
-                    suspendedByProtectedLayer: lp["suspended_by_protected_layer"] as? Bool ?? false
-                )
-            }
-        }
-
-        if let insp = root["inspector"] as? [String: Any] {
-            m.inspectorLayerName = insp["layer_name"] as? String ?? "默认层"
-            m.isProtectedLayer = insp["is_protected_layer"] as? Bool ?? false
-            if let body = insp["body"] as? [String: Any] {
-                if let lock = body["ProtectedLocked"] as? [String: Any] {
-                    m.protectedLock = parseProtectedLock(lock)
-                    m.editableInspector = nil
-                } else if let edit = body["Editable"] as? [String: Any] {
-                    m.editableInspector = parseEditableInspector(edit)
-                }
-            }
-        }
-
-        if let sm = root["status_menu"] as? [String: Any] {
-            m.activeProfileName = sm["active_profile_name"] as? String ?? "未选择方案"
-            m.routingModeSummary = sm["routing_mode_summary"] as? String ?? "手动选择方案 · 按键映射已启用"
-            m.isProfileLocked = sm["is_profile_locked"] as? Bool ?? m.isProfileLocked
-            m.lockedProfileId = (sm["locked_profile_id"] as? String) ?? m.lockedProfileId
-            if !hasHeader, let trusted = sm["accessibility_trusted"] as? Bool {
-                m.accessibilityTrusted = trusted
-            }
-            m.competingHostNotice = sm["competing_host_notice"] as? String
-            m.radialMenuEnabled = sm["radial_menu_enabled"] as? Bool ?? false
-            m.radialConfirmMode = sm["radial_confirm_mode"] as? String ?? "encoder_press"
-            m.lightingEnabled = sm["lighting_enabled"] as? Bool ?? true
-            m.cheatSheetPreview = (sm["cheat_sheet_preview"] as? [String: Any]).map(parseCheatSheet)
-            m.cheatSheetVisible = sm["cheat_sheet_visible"] as? Bool ?? false
-            if let pending = sm["pending_import"] as? [String: Any] {
-                m.pendingImport = PendingPresetImportModel(
-                    name: pending["name"] as? String ?? "预设方案",
-                    scope: pending["scope"] as? String ?? "document",
-                    containsCompleteArchive: pending["contains_complete_archive"] as? Bool ?? false,
-                    profileCount: pending["profile_count"] as? Int ?? 0,
-                    layerCount: pending["layer_count"] as? Int ?? 0,
-                    actionCount: pending["action_count"] as? Int ?? 0
-                )
-            }
-            m.presetError = sm["preset_error"] as? String
-            if !hasHeader {
-                if let ps = sm["power_status"] as? [String: Any] {
-                    m.powerStatus = parsePowerStatus(ps)
-                }
-                if let devs = sm["candidate_devices"] as? [[String: Any]] {
-                    m.candidateDevices = parseCandidateDevices(devs)
-                }
-                if let pref = sm["preferred_device_serial"] as? String {
-                    m.preferredDeviceSerial = pref
-                }
-            }
-            if let favs = sm["favorites_2x2"] as? [[String: Any]] {
-                m.favorites2x2 = favs.enumerated().map { idx, f in
-                    FavoriteSlotModel(
-                        slotIndex: f["slot"] as? Int ?? idx,
-                        profileId: f["profile_id"] as? String,
-                        title: f["title"] as? String ?? "未绑定",
-                        isActive: f["is_active"] as? Bool ?? false
-                    )
-                }
-            }
-        }
-
-        if let rad = root["radial"] as? [String: Any] {
-            m.radialReadiness = rad["readiness"] as? String ?? "Ready"
-        }
-        if let rslots = root["radial_slot_configs"] as? [[String: Any]] {
-            m.radialSlots = rslots.enumerated().map { idx, rs in
-                RadialSlotConfigModel(
-                    id: idx,
-                    kind: rs["kind"] as? String ?? "open_app",
-                    label: rs["label"] as? String ?? "",
-                    text: rs["text"] as? String,
-                    bundleId: rs["bundle_id"] as? String,
-                    adapter: rs["adapter"] as? String,
-                    submit: rs["submit"] as? Bool ?? false,
-                    symbol: rs["symbol"] as? String ?? "◎",
-                    colorHex: rs["color_hex"] as? String ?? "#3B82F6"
-                )
-            }
-        }
-
-        if let ov = root["overlay"] as? [String: Any],
-           let content = ov["content"] as? [String: Any]
-        {
-            if let cs = content["InteractiveCheatSheet"] as? [String: Any] {
-                m.cheatSheet = parseCheatSheet(cs)
-            }
-        }
-
-        if let modalDict = root["active_modal"] as? [String: Any] {
-            m.activeModal = parseActiveModal(modalDict)
-        }
-
+        if let cs = overlay?.content?.interactiveCheatSheet { m.cheatSheet = cs.toModel() }
+        if let activeModal { m.activeModal = activeModal.toModel() }
         return m
     }
+}
 
-    private static func parseProtectedLock(_ lock: [String: Any]) -> ProtectedLockModel {
+private struct PowerStatusDTO: Decodable {
+    let batteryPercent: Int?
+    let isCharging, linePowered, usbHostHold: Bool?
+    let usbMode, pmMode, hostSleepStatus, summaryLabel: String?
+    func toModel() -> PowerStatusBadgeModel {
+        PowerStatusBadgeModel(
+            batteryPercent: batteryPercent,
+            isCharging: isCharging,
+            linePowered: linePowered ?? false,
+            usbHostHold: usbHostHold ?? false,
+            usbMode: usbMode ?? "",
+            pmMode: pmMode ?? "",
+            hostSleepStatus: hostSleepStatus ?? "awake",
+            summaryLabel: summaryLabel ?? ""
+        )
+    }
+}
+
+private struct CandidateDeviceDTO: Decodable {
+    let path, product, serialNumber, selectorKey, displayLabel: String?
+    let isConnected, isPreferred: Bool?
+    func toModel() -> CandidateDeviceModel? {
+        guard let path else { return nil }
+        return CandidateDeviceModel(
+            path: path, product: product ?? "Creator Micro 2", serialNumber: serialNumber,
+            selectorKey: selectorKey, displayLabel: displayLabel ?? "",
+            isConnected: isConnected ?? false, isPreferred: isPreferred ?? false
+        )
+    }
+}
+
+private struct HeaderDTO: Decodable {
+    struct ReadyStateDTO: Decodable {
+        struct TextBox: Decodable { let text: String? }
+        let Ready, ModeNotice, Caution: TextBox?
+    }
+    struct BannerDTO: Decodable {
+        struct SummaryBox: Decodable { let summary: String? }
+        struct ReasonBox: Decodable { let reason: String? }
+        let Ready, NativeHeld: SummaryBox?
+        let Caution: ReasonBox?
+    }
+    let engineVersion, preferredDeviceSerial, uiLanguage, resolvedLocale: String?
+    let readyState: ReadyStateDTO?
+    let banner: BannerDTO?
+    let showConnectButton, showReturnToHostButton, hostExecutionEnabled, accessibilityTrusted: Bool?
+    let canEditDraft, canUndo, canRedo, busy, silentAtLogin: Bool?
+    let powerStatus: PowerStatusDTO?
+    let candidateDevices: [CandidateDeviceDTO]?
+
+    func apply(to m: inout ProjectionModel) {
+        m.engineVersion = engineVersion ?? "0.2.0"
+        if let r = readyState?.Ready { m.readyKind = "Ready"; m.readyText = r.text ?? "已就绪" }
+        else if let mn = readyState?.ModeNotice { m.readyKind = "ModeNotice"; m.readyText = mn.text ?? "" }
+        else if let c = readyState?.Caution { m.readyKind = "Caution"; m.readyText = c.text ?? "" }
+        if let r = banner?.Ready { m.bannerKind = "Ready"; m.bannerText = r.summary ?? "就绪" }
+        else if let nh = banner?.NativeHeld { m.bannerKind = "NativeHeld"; m.bannerText = nh.summary ?? "原生接管" }
+        else if let c = banner?.Caution { m.bannerKind = "Caution"; m.bannerText = c.reason ?? "需注意" }
+        m.showConnectButton = showConnectButton ?? true
+        m.showReturnToHostButton = showReturnToHostButton ?? false
+        m.hostExecutionEnabled = hostExecutionEnabled ?? false
+        m.accessibilityTrusted = accessibilityTrusted ?? true
+        m.canEditDraft = canEditDraft ?? true
+        m.canUndo = canUndo ?? false
+        m.canRedo = canRedo ?? false
+        m.busy = busy ?? false
+        m.powerStatus = powerStatus?.toModel()
+        if let devs = candidateDevices { m.candidateDevices = devs.compactMap { $0.toModel() } }
+        m.preferredDeviceSerial = preferredDeviceSerial
+        m.uiLanguage = uiLanguage.flatMap(UiLanguagePreference.init(rawValue:)) ?? .system
+        m.resolvedLocale = resolvedLocale.flatMap(ResolvedLocale.init(rawValue:)) ?? .zhHans
+        m.silentAtLogin = silentAtLogin ?? true
+    }
+}
+
+private struct SidebarDTO: Decodable {
+    struct RowDTO: Decodable {
+        let profileId, rawName, displayName, badgeMonogram, canonicalAgent: String?
+        let isSelected, isActiveHost, isProtectedOai, appInstalled, isManualFallback: Bool?
+        func toModel() -> SidebarRowModel {
+            SidebarRowModel(
+                profileId: profileId ?? "", rawName: rawName ?? "", displayName: displayName ?? "",
+                badgeMonogram: badgeMonogram ?? "", canonicalAgent: canonicalAgent,
+                isSelected: isSelected ?? false, isActiveHost: isActiveHost ?? false,
+                isProtectedOai: isProtectedOai ?? false, appInstalled: appInstalled ?? true,
+                isManualFallback: isManualFallback ?? false
+            )
+        }
+    }
+    struct BoardLayerDTO: Decodable {
+        let layer: Int?; let leds: [Bool]?
+        let profileId, displayName, owner, assignmentIssue: String?; let isPreviewSelected: Bool?
+        func toModel() -> BoardLayerModel? {
+            guard let layer, let leds, leds.count == 3 else { return nil }
+            return BoardLayerModel(
+                layer: layer, leds: leds, profileId: profileId, displayName: displayName ?? "未分配",
+                owner: owner ?? "Unassigned", isPreviewSelected: isPreviewSelected ?? false,
+                assignmentIssue: assignmentIssue
+            )
+        }
+    }
+    struct BoardProfileChoiceDTO: Decodable {
+        let profileId, displayName: String?
+        func toModel() -> BoardProfileChoiceModel? {
+            guard let id = profileId, let name = displayName else { return nil }
+            return BoardProfileChoiceModel(profileId: id, displayName: name)
+        }
+    }
+    struct BoardLayersDTO: Decodable {
+        let layers: [BoardLayerDTO]?; let profileChoices: [BoardProfileChoiceDTO]?
+        let usbStartupProfileId, usbStartupDisplayName, observedProfileKind, observedStatus, applyBlockReason: String?
+        let observedLayer: Int?
+        let usbPreviewSelected, canApply, configurationObserved, keyboardGrabbed, firstEventVerified, runtimeReady, restoreAvailable: Bool?
+    }
+    let selectedProfileId, selectedDisplayName, activeHostProfileId, lockedProfileId: String?
+    let isProfileLocked, accessibilityTrusted, showOtherProfiles, editingDevice, canMoveUp, canMoveDown, canDelete: Bool?
+    let rows: [RowDTO]?
+    let boardLayers: BoardLayersDTO?
+
+    func apply(to m: inout ProjectionModel, hasHeader: Bool) {
+        m.selectedProfileId = selectedProfileId
+        m.selectedDisplayName = selectedDisplayName ?? "未选择方案"
+        m.activeHostProfileId = activeHostProfileId
+        m.isProfileLocked = isProfileLocked ?? false
+        m.lockedProfileId = lockedProfileId
+        if !hasHeader, let trusted = accessibilityTrusted { m.accessibilityTrusted = trusted }
+        m.showOtherProfiles = showOtherProfiles ?? false
+        m.editingDevice = editingDevice ?? false
+        m.canMoveUp = canMoveUp ?? false
+        m.canMoveDown = canMoveDown ?? false
+        m.canDelete = canDelete ?? false
+        if let rows { m.sidebarRows = rows.map { $0.toModel() } }
+        if let board = boardLayers {
+            if let layers = board.layers { m.boardLayers.layers = layers.compactMap { $0.toModel() } }
+            if let choices = board.profileChoices { m.boardLayers.profileChoices = choices.compactMap { $0.toModel() } }
+            m.boardLayers.usbStartupProfileId = board.usbStartupProfileId
+            m.boardLayers.usbStartupDisplayName = board.usbStartupDisplayName ?? "未分配"
+            m.boardLayers.usbPreviewSelected = board.usbPreviewSelected ?? false
+            m.boardLayers.observedLayer = board.observedLayer
+            m.boardLayers.observedProfileKind = board.observedProfileKind
+            m.boardLayers.observedStatus = board.observedStatus ?? "设备层未确认"
+            m.boardLayers.applyBlockReason = board.applyBlockReason ?? "六层应用尚未可用"
+            m.boardLayers.canApply = board.canApply ?? false
+            m.boardLayers.configurationObserved = board.configurationObserved ?? false
+            m.boardLayers.keyboardGrabbed = board.keyboardGrabbed ?? false
+            m.boardLayers.firstEventVerified = board.firstEventVerified ?? false
+            m.boardLayers.runtimeReady = board.runtimeReady ?? false
+            m.boardLayers.restoreAvailable = board.restoreAvailable ?? false
+        }
+    }
+}
+
+private struct ProtectedLockDTO: Decodable {
+    let isLocked: Bool?; let layerId, layerName, ownerClientName, lockBadgeText, explanationText, unlockButtonTitle: String?
+    func toModel() -> ProtectedLockModel {
         ProtectedLockModel(
-            isLocked: lock["is_locked"] as? Bool ?? true,
-            layerId: lock["layer_id"] as? String ?? "",
-            layerName: lock["layer_name"] as? String ?? "",
-            ownerClientName: lock["owner_client_name"] as? String ?? "原生客户端",
-            lockBadgeText: lock["lock_badge_text"] as? String ?? "原生保护层 · 只读",
-            explanationText: lock["explanation_text"] as? String ?? "",
-            unlockButtonTitle: lock["unlock_button_title"] as? String ?? "切到自定义层解锁编辑"
+            isLocked: isLocked ?? true, layerId: layerId ?? "", layerName: layerName ?? "",
+            ownerClientName: ownerClientName ?? "原生客户端", lockBadgeText: lockBadgeText ?? "原生保护层 · 只读",
+            explanationText: explanationText ?? "", unlockButtonTitle: unlockButtonTitle ?? "切到自定义层解锁编辑"
         )
     }
+}
 
-    private static func parseEditableInspector(_ edit: [String: Any]) -> EditableInspectorModel {
-        var e = EditableInspectorModel()
-        e.selectedSurface = edit["selected_surface"] as? String ?? "Key0"
-        e.selectedLogicalSlot = edit["selected_logical_slot"] as? Int ?? 0
-        e.selectedBindingId = edit["selected_binding_id"] as? String ?? "AG00"
-        e.surfaceDisplayName = edit["surface_display_name"] as? String ?? "按键 AG00"
-        e.joystickDirection = edit["joystick_direction"] as? String
-        e.joystickMode = edit["joystick_mode"] as? String ?? "logical_sectors"
-        e.joystickModeSummary = edit["joystick_mode_summary"] as? String ?? ""
-        e.v070HardwareMouseSupported = edit["v070_hardware_mouse_supported"] as? Bool ?? true
-        e.bottomRowLayout = edit["bottom_row_layout"] as? String ?? "split"
-        e.supportsTaskRole = edit["supports_task_role"] as? Bool ?? true
-        e.slotRole = edit["slot_role"] as? String ?? "TaskKey"
-        e.boundActionId = edit["bound_action_id"] as? String
-        e.boundActionName = edit["bound_action_name"] as? String ?? "未绑定"
-        e.boundActionCategory = edit["bound_action_category"] as? String ?? ""
-        e.boundActionDetail = edit["bound_action_detail"] as? String ?? ""
-        if let cap = edit["bound_capability"] as? [String: Any] {
-            e.capabilityTarget = cap["target"] as? String ?? ""
-            e.capabilityPrerequisites = cap["prerequisites"] as? String ?? ""
-            e.capabilitySource = cap["source"] as? String ?? ""
-            e.capabilityAvailable = cap["execution_available"] as? Bool ?? true
-            e.capabilityUnavailableReason = cap["unavailable_reason"] as? String ?? ""
+private struct CanvasDTO: Decodable {
+    struct LayerTabDTO: Decodable { let layerId, name: String?; let isSelected, isProtectedOai: Bool? }
+    struct EncoderDTO: Decodable { let ccwLabel, cwLabel, pressLabel, holdLabel, ringGlowHex: String?; let selectedSlot: Int? }
+    struct JoystickSectorDTO: Decodable { let direction, conciseLabel: String?; let logicalSlot: Int?; let isSelected: Bool? }
+    struct JoystickDTO: Decodable { let mode, modeLabel, activeDirection: String?; let isSelected: Bool?; let sectors: [JoystickSectorDTO]? }
+    struct KeycapCellDTO: Decodable {
+        let surface, bindingId, silkscreenIcon, keycapId, slotRole, conciseCaption, fullActionTitle, perKeyLedHex: String?
+        let primarySlot, effectiveSlot, row, col, spanCols, isSessionSlot: Int?
+        let isSelected, isAvailable: Bool?
+    }
+    let selectedLayerId, selectedSurface, selectedJoystickDirection, bottomRowLayout, statusLedHex, underglowHex, boardPreviewLabel: String?
+    let selectedLogicalSlot, boardPreviewLayer: Int?
+    let showKeycapIcons, showKeycapLabels, canEditBindings, canAddLighting, canExportOrCopyLayer: Bool?
+    let touchLedStates: [Bool]?
+    let layerTabs: [LayerTabDTO]?; let encoder: EncoderDTO?; let joystick: JoystickDTO?
+    let keycapCells: [KeycapCellDTO]?; let protectedLock: ProtectedLockDTO?
+
+    func apply(to m: inout ProjectionModel) {
+        m.selectedLayerId = selectedLayerId
+        m.selectedSurface = selectedSurface ?? "Key0"
+        m.selectedLogicalSlot = selectedLogicalSlot ?? 0
+        m.selectedJoystickDirection = selectedJoystickDirection ?? "North"
+        m.bottomRowLayout = bottomRowLayout ?? "split"
+        m.showKeycapIcons = showKeycapIcons ?? true
+        m.showKeycapLabels = showKeycapLabels ?? true
+        m.statusLedHex = statusLedHex ?? "#14C76B"
+        m.underglowHex = underglowHex ?? "#3B82F6"
+        if let leds = touchLedStates, leds.count == 3 { m.touchLedStates = leds }
+        m.boardPreviewLayer = boardPreviewLayer
+        m.boardPreviewLabel = boardPreviewLabel ?? "USB 启动方案预览"
+        m.canEditBindings = canEditBindings ?? true
+        m.canAddLighting = canAddLighting ?? true
+        m.canExportOrCopyLayer = canExportOrCopyLayer ?? true
+        if let layerTabs {
+            m.layerTabs = layerTabs.map {
+                LayerTabModel(layerId: $0.layerId ?? "", name: $0.name ?? "", isSelected: $0.isSelected ?? false, isProtectedOai: $0.isProtectedOai ?? false)
+            }
         }
-        e.isAppleFnBound = edit["is_apple_fn_bound"] as? Bool ?? false
-        e.selectedKeycap = edit["selected_keycap"] as? String ?? "Blank"
-        e.keycapSearchQuery = edit["keycap_search_query"] as? String ?? ""
-        e.bindKeycapDefaultActionOnSelect = edit["bind_keycap_default_action_on_select"] as? Bool ?? true
-        if let kcs = edit["filtered_keycaps"] as? [[String: Any]] {
-            e.filteredKeycaps = kcs.map { k in
-                KeycapCatalogItemModel(
-                    keycapId: k["id"] as? String ?? "Blank",
-                    silkCode: k["silk_code"] as? String ?? "BLANK",
-                    shortLabel: k["short_label"] as? String ?? "",
-                    chineseHint: k["chinese_hint"] as? String ?? "",
-                    glyphSymbol: k["glyph_symbol"] as? String ?? "□",
-                    defaultActionId: k["default_action_id"] as? String,
-                    isSelected: k["is_selected"] as? Bool ?? false
+        if let enc = encoder {
+            m.encoderCcwLabel = enc.ccwLabel ?? "上滚"; m.encoderCwLabel = enc.cwLabel ?? "下滚"
+            m.encoderPressLabel = enc.pressLabel ?? "按压"; m.encoderHoldLabel = enc.holdLabel ?? ""
+            m.encoderSelectedSlot = enc.selectedSlot; m.encoderRingGlowHex = enc.ringGlowHex ?? "#14C76B"
+        }
+        if let joy = joystick {
+            m.joystickMode = joy.mode ?? "logical_sectors"; m.joystickModeLabel = joy.modeLabel ?? "八向摇杆"
+            m.joystickActiveDirection = joy.activeDirection ?? "North"; m.joystickIsSelected = joy.isSelected ?? false
+            if let secs = joy.sectors {
+                m.joystickSectors = secs.map {
+                    JoystickSectorModel(direction: $0.direction ?? "North", logicalSlot: $0.logicalSlot ?? 16, conciseLabel: $0.conciseLabel ?? "", isSelected: $0.isSelected ?? false)
+                }
+            }
+        }
+        if let keycapCells {
+            m.keycapCells = keycapCells.map {
+                KeycapCellModel(
+                    surface: $0.surface ?? "Key0", primarySlot: $0.primarySlot ?? 0, effectiveSlot: $0.effectiveSlot ?? 0,
+                    bindingId: $0.bindingId ?? "AG00", row: $0.row ?? 0, col: $0.col ?? 0, spanCols: $0.spanCols ?? 1,
+                    silkscreenIcon: $0.silkscreenIcon ?? "⌘", keycapId: $0.keycapId ?? "Blank",
+                    slotRole: $0.slotRole ?? "ActionKey", conciseCaption: $0.conciseCaption ?? "未绑定",
+                    fullActionTitle: $0.fullActionTitle ?? "未绑定", isSessionSlot: $0.isSessionSlot,
+                    isSelected: $0.isSelected ?? false, isAvailable: $0.isAvailable ?? true,
+                    perKeyLedHex: $0.perKeyLedHex ?? "#222222"
                 )
             }
         }
-        if let sr = edit["shortcut_recorder"] as? [String: Any] {
-            e.shortcutRecorder = ShortcutRecorderModel(
-                isRecording: sr["is_recording"] as? Bool ?? false,
-                key: sr["key"] as? String ?? "",
-                modifiers: sr["modifiers"] as? [String] ?? [],
-                target: sr["target"] as? String ?? "frontmost",
-                previewBadge: sr["preview_badge"] as? String ?? "未录制",
-                validationError: sr["validation_error"] as? String
+        if let protectedLock { m.protectedLock = protectedLock.toModel() }
+    }
+}
+
+private struct SessionStripDTO: Decodable {
+    struct SlotDTO: Decodable {
+        let slotIndex: Int?; let keyBindingId, mode, status, kind, agentMonogram, title, subtitle, ledColorHex: String?
+        let isUnreadBlueDot, isWorkingAnimated, isBoundToTopKey: Bool?; let place: JSONPresence?
+    }
+    struct LightingPopoverDTO: Decodable {
+        let isOpen, lightingEnabled, autoSessionColor, onlyGlowOnAttentionOrCompleted, glowOnWorking, suspendedByProtectedLayer: Bool?
+        let ambientColor, workingColor, brightness, autoOffTimeout, manualPreviewPhase: String?
+    }
+    let unreadCompletedCount, workingCount: Int?; let topSixBoundAsSessionKeys, canMutateLayout: Bool?
+    let slots: [SlotDTO]?; let lightingPopover: LightingPopoverDTO?
+
+    func apply(to m: inout ProjectionModel) {
+        m.unreadCompletedCount = unreadCompletedCount ?? 0; m.workingCount = workingCount ?? 0
+        m.topSixBoundAsSessionKeys = topSixBoundAsSessionKeys ?? false; m.canMutateSessionLayout = canMutateLayout ?? true
+        if let slots {
+            m.sessionSlots = slots.map {
+                SessionSlotModel(
+                    slotIndex: $0.slotIndex ?? 0, keyBindingId: $0.keyBindingId ?? "AG00", mode: $0.mode ?? "Recent",
+                    status: $0.status ?? "Idle", kind: $0.kind ?? "Idle", agentMonogram: $0.agentMonogram ?? "",
+                    title: $0.title ?? "", subtitle: $0.subtitle ?? "", isUnreadBlueDot: $0.isUnreadBlueDot ?? false,
+                    isWorkingAnimated: $0.isWorkingAnimated ?? false, isBoundToTopKey: $0.isBoundToTopKey ?? false,
+                    ledColorHex: $0.ledColorHex ?? "#222222", hasAssignedPlace: $0.place != nil
+                )
+            }
+        }
+        if let lp = lightingPopover {
+            m.simpleLighting = SimpleLightingModel(
+                isOpen: lp.isOpen ?? false, lightingEnabled: lp.lightingEnabled ?? true,
+                autoSessionColor: lp.autoSessionColor ?? true, onlyGlowOnAttentionOrCompleted: lp.onlyGlowOnAttentionOrCompleted ?? true,
+                glowOnWorking: lp.glowOnWorking ?? true, ambientColor: lp.ambientColor ?? "OceanBlue",
+                workingColor: lp.workingColor ?? "EmeraldGreen", brightness: lp.brightness ?? "Standard",
+                autoOffTimeout: lp.autoOffTimeout ?? "ThreeMinutes", manualPreviewPhase: lp.manualPreviewPhase,
+                suspendedByProtectedLayer: lp.suspendedByProtectedLayer ?? false
             )
         }
-        e.actionSearchQuery = edit["action_search_query"] as? String ?? ""
-        e.actionCategoryFilter = edit["action_category_filter"] as? String ?? "全部"
-        e.availableCategories = edit["available_categories"] as? [String] ?? []
-        e.favoritesOnly = edit["favorites_only"] as? Bool ?? false
-        if let acts = edit["filtered_actions"] as? [[String: Any]] {
-            e.filteredActions = acts.map { a in
-                ActionRowModel(
-                    actionId: a["action_id"] as? String ?? "",
-                    name: a["name"] as? String ?? "",
-                    category: a["category"] as? String ?? "",
-                    detail: a["detail"] as? String ?? "",
-                    targetSummary: a["target_summary"] as? String ?? "",
-                    executionAvailable: a["execution_available"] as? Bool ?? true,
-                    unavailableReason: a["unavailable_reason"] as? String ?? "",
-                    isFavorite: a["is_favorite"] as? Bool ?? false,
-                    isCurrentlyBound: a["is_currently_bound"] as? Bool ?? false
+    }
+}
+
+private struct InspectorDTO: Decodable {
+    struct MacroRowDTO: Decodable {
+        let id, name, stepOrBranchSummary, referenceSummary: String?; let isMulti, isCurrentlyBound: Bool?; let referenceCount: Int?
+        func toModel() -> MacroRowModel {
+            MacroRowModel(id: id ?? "", name: name ?? "", isMulti: isMulti ?? false, stepOrBranchSummary: stepOrBranchSummary ?? "",
+                          referenceCount: referenceCount ?? 0, referenceSummary: referenceSummary ?? "", isCurrentlyBound: isCurrentlyBound ?? false)
+        }
+    }
+    struct EditableDTO: Decodable {
+        struct CapabilityDTO: Decodable {
+            let target, source, unavailableReason: String?
+            let prerequisites: [String]?
+            let executionAvailable: Bool?
+        }
+        struct KeycapDTO: Decodable { let id, silkCode, shortLabel, chineseHint, glyphSymbol, defaultActionId: String?; let isSelected: Bool? }
+        struct ShortcutRecorderDTO: Decodable { let isRecording: Bool?; let key, target, previewBadge, validationError: String?; let modifiers: [String]? }
+        struct ActionRowDTO: Decodable { let actionId, name, category, detail, targetSummary, unavailableReason: String?; let executionAvailable, isFavorite, isCurrentlyBound: Bool? }
+        let selectedSurface, selectedBindingId, surfaceDisplayName, joystickDirection, joystickMode, joystickModeSummary: String?
+        let bottomRowLayout, slotRole, boundActionId, boundActionName, boundActionCategory, boundActionDetail: String?
+        let selectedKeycap, keycapSearchQuery, actionSearchQuery, actionCategoryFilter: String?
+        let selectedLogicalSlot: Int?; let availableCategories: [String]?
+        let v070HardwareMouseSupported, supportsTaskRole, isAppleFnBound, bindKeycapDefaultActionOnSelect: Bool?
+        let favoritesOnly, canAddLighting, hasLayerLighting, commandExecutionEnabled: Bool?
+        let boundCapability: CapabilityDTO?; let filteredKeycaps: [KeycapDTO]?; let shortcutRecorder: ShortcutRecorderDTO?
+        let filteredActions: [ActionRowDTO]?; let macros, multis: [MacroRowDTO]?
+
+        func toModel() -> EditableInspectorModel {
+            var e = EditableInspectorModel()
+            e.selectedSurface = selectedSurface ?? "Key0"; e.selectedLogicalSlot = selectedLogicalSlot ?? 0
+            e.selectedBindingId = selectedBindingId ?? "AG00"; e.surfaceDisplayName = surfaceDisplayName ?? "按键 AG00"
+            e.joystickDirection = joystickDirection; e.joystickMode = joystickMode ?? "logical_sectors"
+            e.joystickModeSummary = joystickModeSummary ?? ""; e.v070HardwareMouseSupported = v070HardwareMouseSupported ?? true
+            e.bottomRowLayout = bottomRowLayout ?? "split"; e.supportsTaskRole = supportsTaskRole ?? true
+            e.slotRole = slotRole ?? "TaskKey"; e.boundActionId = boundActionId
+            e.boundActionName = boundActionName ?? "未绑定"; e.boundActionCategory = boundActionCategory ?? ""
+            e.boundActionDetail = boundActionDetail ?? ""
+            if let cap = boundCapability {
+                e.capabilityTarget = cap.target ?? ""
+                e.capabilityPrerequisites = (cap.prerequisites ?? []).joined(separator: " · ")
+                e.capabilitySource = cap.source ?? ""
+                e.capabilityAvailable = cap.executionAvailable ?? true
+                e.capabilityUnavailableReason = cap.unavailableReason ?? ""
+            }
+            e.isAppleFnBound = isAppleFnBound ?? false; e.selectedKeycap = selectedKeycap ?? "Blank"
+            e.keycapSearchQuery = keycapSearchQuery ?? ""; e.bindKeycapDefaultActionOnSelect = bindKeycapDefaultActionOnSelect ?? true
+            if let kcs = filteredKeycaps {
+                e.filteredKeycaps = kcs.map {
+                    KeycapCatalogItemModel(keycapId: $0.id ?? "Blank", silkCode: $0.silkCode ?? "BLANK", shortLabel: $0.shortLabel ?? "",
+                                           chineseHint: $0.chineseHint ?? "", glyphSymbol: $0.glyphSymbol ?? "□",
+                                           defaultActionId: $0.defaultActionId, isSelected: $0.isSelected ?? false)
+                }
+            }
+            if let sr = shortcutRecorder {
+                e.shortcutRecorder = ShortcutRecorderModel(
+                    isRecording: sr.isRecording ?? false, key: sr.key ?? "", modifiers: sr.modifiers ?? [],
+                    target: sr.target ?? "frontmost", previewBadge: sr.previewBadge ?? "未录制", validationError: sr.validationError
                 )
             }
+            e.actionSearchQuery = actionSearchQuery ?? ""; e.actionCategoryFilter = actionCategoryFilter ?? "全部"
+            e.availableCategories = availableCategories ?? []; e.favoritesOnly = favoritesOnly ?? false
+            if let acts = filteredActions {
+                e.filteredActions = acts.map {
+                    ActionRowModel(actionId: $0.actionId ?? "", name: $0.name ?? "", category: $0.category ?? "",
+                                   detail: $0.detail ?? "", targetSummary: $0.targetSummary ?? "",
+                                   executionAvailable: $0.executionAvailable ?? true, unavailableReason: $0.unavailableReason ?? "",
+                                   isFavorite: $0.isFavorite ?? false, isCurrentlyBound: $0.isCurrentlyBound ?? false)
+                }
+            }
+            if let macros { e.macros = macros.map { $0.toModel() } }
+            if let multis { e.multis = multis.map { $0.toModel() } }
+            e.canAddLighting = canAddLighting ?? false; e.hasLayerLighting = hasLayerLighting ?? false
+            e.commandExecutionEnabled = commandExecutionEnabled ?? false
+            return e
         }
-        if let macs = edit["macros"] as? [[String: Any]] {
-            e.macros = macs.map(parseMacroRow)
-        }
-        if let muls = edit["multis"] as? [[String: Any]] {
-            e.multis = muls.map(parseMacroRow)
-        }
-        e.canAddLighting = edit["can_add_lighting"] as? Bool ?? false
-        e.hasLayerLighting = edit["has_layer_lighting"] as? Bool ?? false
-        e.commandExecutionEnabled = edit["command_execution_enabled"] as? Bool ?? false
-        return e
     }
+    struct BodyDTO: Decodable { let ProtectedLocked: ProtectedLockDTO?; let Editable: EditableDTO? }
+    let layerName: String?; let isProtectedLayer: Bool?; let body: BodyDTO?
 
-    private static func parseMacroRow(_ r: [String: Any]) -> MacroRowModel {
-        MacroRowModel(
-            id: r["id"] as? String ?? "",
-            name: r["name"] as? String ?? "",
-            isMulti: r["is_multi"] as? Bool ?? false,
-            stepOrBranchSummary: r["step_or_branch_summary"] as? String ?? "",
-            referenceCount: r["reference_count"] as? Int ?? 0,
-            referenceSummary: r["reference_summary"] as? String ?? "",
-            isCurrentlyBound: r["is_currently_bound"] as? Bool ?? false
-        )
+    func apply(to m: inout ProjectionModel) {
+        m.inspectorLayerName = layerName ?? "默认层"; m.isProtectedLayer = isProtectedLayer ?? false
+        if let lock = body?.ProtectedLocked { m.protectedLock = lock.toModel(); m.editableInspector = nil }
+        else if let edit = body?.Editable { m.editableInspector = edit.toModel() }
     }
+}
 
-    private static func parseCheatSheet(_ cs: [String: Any]) -> CheatSheetModel {
+private struct CheatSheetDTO: Decodable {
+    struct TargetAgentCardDTO: Decodable { let agentName, phaseLabel, voiceSummary: String? }
+    struct KeyCellDTO: Decodable { let bindingId, controlName, label, shortLabel: String?; let available: Bool? }
+    let profileName, routingSummary, joystickMode: String?; let targetAgentCard: TargetAgentCardDTO?; let keyCells: [KeyCellDTO]?
+    func toModel() -> CheatSheetModel {
         var m = CheatSheetModel()
-        m.profileName = cs["profile_name"] as? String ?? ""
-        m.routingSummary = cs["routing_summary"] as? String ?? ""
-        m.joystickMode = cs["joystick_mode"] as? String ?? "logical_sectors"
-        if let card = cs["target_agent_card"] as? [String: Any] {
-            m.agentName = card["agent_name"] as? String
-            m.agentPhaseLabel = card["phase_label"] as? String
-            m.agentVoiceSummary = card["voice_summary"] as? String
-        }
-        if let cells = cs["key_cells"] as? [[String: Any]] {
-            m.keyCells = cells.map { c in
-                CheatSheetCellModel(
-                    bindingId: c["binding_id"] as? String ?? "",
-                    controlName: c["control_name"] as? String ?? "",
-                    label: c["label"] as? String ?? "",
-                    shortLabel: c["short_label"] as? String,
-                    available: c["available"] as? Bool ?? true
-                )
+        m.profileName = profileName ?? ""; m.routingSummary = routingSummary ?? ""; m.joystickMode = joystickMode ?? "logical_sectors"
+        if let card = targetAgentCard { m.agentName = card.agentName; m.agentPhaseLabel = card.phaseLabel; m.agentVoiceSummary = card.voiceSummary }
+        if let keyCells {
+            m.keyCells = keyCells.map {
+                CheatSheetCellModel(bindingId: $0.bindingId ?? "", controlName: $0.controlName ?? "", label: $0.label ?? "",
+                                    shortLabel: $0.shortLabel, available: $0.available ?? true)
             }
         }
         return m
     }
+}
 
-    private static func parseActiveModal(_ dict: [String: Any]) -> ActiveModalModel? {
-        if let mac = dict["MacroEditor"] as? [String: Any] {
-            let steps = (mac["steps"] as? [[String: Any]] ?? []).map { s in
-                MacroStepModel(
-                    index: s["index"] as? Int ?? 0,
-                    summaryLabel: s["summary_label"] as? String ?? "",
-                    macosKeySupported: s["macos_key_supported"] as? Bool ?? true
-                )
-            }
-            return .macroEditor(
-                MacroEditorModel(
-                    macroId: mac["macro_id"] as? String,
-                    name: mac["name"] as? String ?? "",
-                    steps: steps,
-                    draftKeyInput: mac["draft_key_input"] as? String ?? "a",
-                    draftDelayMs: mac["draft_delay_ms"] as? Int ?? 30,
-                    bindToSelectedSlot: mac["bind_to_selected_slot"] as? Bool ?? true,
-                    targetSlot: mac["target_slot"] as? Int,
-                    referenceSummaries: mac["reference_summaries"] as? [String] ?? [],
-                    validationError: mac["validation_error"] as? String,
-                    hostExecutionSupported: mac["host_execution_supported"] as? Bool ?? true
-                )
+private struct StatusMenuDTO: Decodable {
+    struct PendingImportDTO: Decodable { let name, scope: String?; let containsCompleteArchive: Bool?; let profileCount, layerCount, actionCount: Int? }
+    struct FavoriteDTO: Decodable { let slot: Int?; let profileId, title: String?; let isActive: Bool? }
+    let activeProfileName, routingModeSummary, lockedProfileId, competingHostNotice, radialConfirmMode, presetError, preferredDeviceSerial: String?
+    let isProfileLocked, accessibilityTrusted, radialMenuEnabled, lightingEnabled, cheatSheetVisible: Bool?
+    let cheatSheetPreview: CheatSheetDTO?; let pendingImport: PendingImportDTO?
+    let powerStatus: PowerStatusDTO?; let candidateDevices: [CandidateDeviceDTO]?; let favorites2X2: [FavoriteDTO]?
+
+    func apply(to m: inout ProjectionModel, hasHeader: Bool) {
+        m.activeProfileName = activeProfileName ?? "未选择方案"
+        m.routingModeSummary = routingModeSummary ?? "手动选择方案 · 按键映射已启用"
+        m.isProfileLocked = isProfileLocked ?? m.isProfileLocked
+        m.lockedProfileId = lockedProfileId ?? m.lockedProfileId
+        if !hasHeader, let trusted = accessibilityTrusted { m.accessibilityTrusted = trusted }
+        m.competingHostNotice = competingHostNotice
+        m.radialMenuEnabled = radialMenuEnabled ?? false
+        m.radialConfirmMode = radialConfirmMode ?? "encoder_press"
+        m.lightingEnabled = lightingEnabled ?? true
+        m.cheatSheetPreview = cheatSheetPreview?.toModel()
+        m.cheatSheetVisible = cheatSheetVisible ?? false
+        if let pending = pendingImport {
+            m.pendingImport = PendingPresetImportModel(
+                name: pending.name ?? "预设方案", scope: pending.scope ?? "document",
+                containsCompleteArchive: pending.containsCompleteArchive ?? false,
+                profileCount: pending.profileCount ?? 0, layerCount: pending.layerCount ?? 0, actionCount: pending.actionCount ?? 0
             )
         }
-        if let mul = dict["MultiEditor"] as? [String: Any] {
-            let branches = (mul["branches"] as? [[String: Any]] ?? []).map { b -> MultiBranchModel in
-                var tKind: String? = nil
-                var tId: String? = nil
-                if let t = b["target"] as? [String: [String: Any]] {
-                    if let act = t["Action"] {
-                        tKind = "Action"
-                        tId = act["action_id"] as? String
-                    } else if let mac = t["Macro"] {
-                        tKind = "Macro"
-                        tId = mac["action_id"] as? String
-                    }
-                }
-                return MultiBranchModel(
-                    branch: b["branch"] as? String ?? "Tap",
-                    title: b["title"] as? String ?? "",
-                    targetKind: tKind,
-                    targetId: tId,
-                    targetDisplayName: b["target_display_name"] as? String ?? "未设置"
-                )
-            }
-            let availActs = (mul["available_actions"] as? [[String: Any]] ?? []).compactMap { opt -> MultiTargetOptionModel? in
-                guard let id = opt["id"] as? String, let label = opt["label"] as? String else { return nil }
-                return MultiTargetOptionModel(id: id, label: label)
-            }
-            let availMacs = (mul["available_macros"] as? [[String: Any]] ?? []).compactMap { opt -> MultiTargetOptionModel? in
-                guard let id = opt["id"] as? String, let label = opt["label"] as? String else { return nil }
-                return MultiTargetOptionModel(id: id, label: label)
-            }
-            return .multiEditor(
-                MultiEditorModel(
-                    multiId: mul["multi_id"] as? String,
-                    name: mul["name"] as? String ?? "",
-                    termMs: mul["term_ms"] as? Int ?? 200,
-                    branches: branches,
-                    bindToSelectedSlot: mul["bind_to_selected_slot"] as? Bool ?? true,
-                    targetSlot: mul["target_slot"] as? Int,
-                    availableActions: availActs,
-                    availableMacros: availMacs,
-                    referenceSummaries: mul["reference_summaries"] as? [String] ?? [],
-                    validationError: mul["validation_error"] as? String
-                )
-            )
+        m.presetError = presetError
+        if !hasHeader {
+            if let ps = powerStatus { m.powerStatus = ps.toModel() }
+            if let devs = candidateDevices { m.candidateDevices = devs.compactMap { $0.toModel() } }
+            if let pref = preferredDeviceSerial { m.preferredDeviceSerial = pref }
         }
-        if let lit = dict["LightingEditor"] as? [String: Any] {
-            return .lightingEditor(
-                LightingEditorModel(
-                    profileId: lit["profile_id"] as? String ?? "",
-                    layerId: lit["layer_id"] as? String ?? "",
-                    layerName: lit["layer_name"] as? String ?? "",
-                    applyToAllLayers: lit["apply_to_all_layers"] as? Bool ?? false,
-                    canAddLighting: lit["can_add_lighting"] as? Bool ?? false,
-                    hasLighting: lit["has_lighting"] as? Bool ?? false,
-                    backlight: (lit["backlight"] as? [String: Any]).map(parseLightingZone),
-                    underglow: (lit["underglow"] as? [String: Any]).map(parseLightingZone),
-                    previewActive: lit["preview_active"] as? Bool ?? false,
-                    previewRemainingSecs: lit["preview_remaining_secs"] as? Int ?? 0,
-                    validationError: lit["validation_error"] as? String
-                )
-            )
-        }
-        if let cmp = dict["ReconnectComparison"] as? [String: Any] {
-            let rows = (cmp["rows"] as? [[String: Any]] ?? []).map { r in
-                ComparisonRowModel(
-                    path: r["path"] as? String ?? "",
-                    label: r["label"] as? String ?? "",
-                    baseSummary: r["base_summary"] as? String ?? "",
-                    localSummary: r["local_summary"] as? String ?? "",
-                    deviceSummary: r["device_summary"] as? String ?? "",
-                    resultBadge: r["result_badge"] as? String ?? "",
-                    isConflict: r["is_conflict"] as? Bool ?? false
-                )
+        if let favs = favorites2X2 {
+            m.favorites2x2 = favs.enumerated().map { idx, f in
+                FavoriteSlotModel(slotIndex: f.slot ?? idx, profileId: f.profileId, title: f.title ?? "未绑定", isActive: f.isActive ?? false)
             }
-            return .reconnectComparison(
-                ReconnectComparisonModel(
-                    token: cmp["token"] as? String ?? "",
-                    revision: cmp["revision"] as? Int ?? 0,
-                    identityMatches: cmp["identity_matches"] as? Bool ?? true,
-                    identityConflict: cmp["identity_conflict"] as? Bool ?? false,
-                    identityConfirmationRequired: cmp["identity_confirmation_required"] as? Bool ?? false,
-                    identityUserConfirmed: cmp["identity_user_confirmed"] as? Bool ?? false,
-                    canMerge: cmp["can_merge"] as? Bool ?? false,
-                    conflicts: cmp["conflicts"] as? [String] ?? [],
-                    rows: rows,
-                    errorMessage: cmp["error_message"] as? String
-                )
-            )
         }
-        if let app = dict["ApplyPreparation"] as? [String: Any] {
-            let changes = (app["changes"] as? [[String: Any]] ?? []).enumerated().map { idx, c in
-                ApplyChangeRowModel(
-                    id: "\(idx)-\(c["location_label"] as? String ?? "")",
-                    kind: c["kind"] as? String ?? "",
-                    locationLabel: c["location_label"] as? String ?? "",
-                    before: c["before"] as? String ?? "",
-                    after: c["after"] as? String ?? ""
-                )
+    }
+}
+
+private struct RadialDTO: Decodable { let readiness: String? }
+
+private struct RadialSlotConfigDTO: Decodable {
+    let kind, label, text, bundleId, adapter, symbol, colorHex: String?; let submit: Bool?
+    func toModel(id: Int) -> RadialSlotConfigModel {
+        RadialSlotConfigModel(id: id, kind: kind ?? "open_app", label: label ?? "", text: text, bundleId: bundleId,
+                              adapter: adapter, submit: submit ?? false, symbol: symbol ?? "◎", colorHex: colorHex ?? "#3B82F6")
+    }
+}
+
+private struct OverlayDTO: Decodable {
+    struct ContentDTO: Decodable {
+        let interactiveCheatSheet: CheatSheetDTO?
+        private enum CodingKeys: String, CodingKey { case InteractiveCheatSheet }
+        init(from decoder: Decoder) throws {
+            if let single = try? decoder.singleValueContainer(), (try? single.decode(String.self)) != nil {
+                interactiveCheatSheet = nil; return
             }
-            return .applyPreparation(
-                ApplyPreparationModel(
-                    token: app["token"] as? String ?? "",
-                    kind: app["kind"] as? String ?? "",
-                    documentId: app["document_id"] as? String ?? "",
-                    revision: app["revision"] as? Int ?? 0,
-                    documentSha256: app["document_sha256"] as? String ?? "",
-                    plannedKeymapSha256: app["planned_keymap_sha256"] as? String ?? "",
-                    beforeSummary: app["before_summary"] as? String ?? "",
-                    afterSummary: app["after_summary"] as? String ?? "",
-                    changes: changes,
-                    backupPrepared: app["backup_prepared"] as? Bool ?? false,
-                    backupPath: app["backup_path"] as? String,
-                    manifestSha256: app["manifest_sha256"] as? String,
-                    candidateTaken: app["candidate_taken"] as? Bool ?? false,
-                    candidateOperationId: app["candidate_operation_id"] as? String,
-                    unavailableReason: app["unavailable_reason"] as? String ?? "",
-                    errorMessage: app["error_message"] as? String
-                )
-            )
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            interactiveCheatSheet = try c.decodeIfPresent(CheatSheetDTO.self, forKey: .InteractiveCheatSheet)
+        }
+    }
+    let content: ContentDTO?
+}
+
+private struct ActiveModalDTO: Decodable {
+    struct MacroStepDTO: Decodable { let index: Int?; let summaryLabel: String?; let macosKeySupported: Bool? }
+    struct MacroEditorDTO: Decodable {
+        let macroId, name, draftKeyInput, validationError: String?; let draftDelayMs, targetSlot: Int?
+        let bindToSelectedSlot, hostExecutionSupported: Bool?; let steps: [MacroStepDTO]?; let referenceSummaries: [String]?
+    }
+    struct MultiBranchDTO: Decodable {
+        struct TargetDTO: Decodable {
+            struct RefBox: Decodable { let actionId: String? }
+            let Action, Macro: RefBox?
+        }
+        let branch, title, targetDisplayName: String?; let target: TargetDTO?
+    }
+    struct MultiOptionDTO: Decodable { let id, label: String? }
+    struct MultiEditorDTO: Decodable {
+        let multiId, name, validationError: String?; let termMs, targetSlot: Int?; let bindToSelectedSlot: Bool?
+        let branches: [MultiBranchDTO]?; let availableActions, availableMacros: [MultiOptionDTO]?; let referenceSummaries: [String]?
+    }
+    struct LightingZoneDTO: Decodable {
+        let zone, zoneTitle, effect, colorHex: String?; let brightnessPercent, speedPercent, magicPercent: Int?
+        let canEditColor, canEditBrightness, canEditSpeed, canEditMagic: Bool?
+        func toModel() -> LightingZoneModel {
+            LightingZoneModel(zone: zone ?? "Backlight", zoneTitle: zoneTitle ?? "", effect: effect ?? "solid",
+                              brightnessPercent: brightnessPercent ?? 100, speedPercent: speedPercent ?? 50,
+                              magicPercent: magicPercent ?? 50, colorHex: colorHex ?? "#FFFFFF",
+                              canEditColor: canEditColor ?? true, canEditBrightness: canEditBrightness ?? true,
+                              canEditSpeed: canEditSpeed ?? false, canEditMagic: canEditMagic ?? false)
+        }
+    }
+    struct LightingEditorDTO: Decodable {
+        let profileId, layerId, layerName, validationError: String?; let applyToAllLayers, canAddLighting, hasLighting, previewActive: Bool?
+        let previewRemainingSecs: Int?; let backlight, underglow: LightingZoneDTO?
+    }
+    struct ComparisonRowDTO: Decodable { let path, label, baseSummary, localSummary, deviceSummary, resultBadge: String?; let isConflict: Bool? }
+    struct ReconnectComparisonDTO: Decodable {
+        let token, errorMessage: String?; let revision: Int?; let identityMatches, identityConflict, identityConfirmationRequired, identityUserConfirmed, canMerge: Bool?
+        let conflicts: [String]?; let rows: [ComparisonRowDTO]?
+    }
+    struct ApplyChangeRowDTO: Decodable { let kind, locationLabel, before, after: String? }
+    struct ApplyPreparationDTO: Decodable {
+        let token, kind, documentId, documentSha256, plannedKeymapSha256, beforeSummary, afterSummary: String?
+        let backupPath, manifestSha256, candidateOperationId, unavailableReason, errorMessage: String?
+        let revision: Int?; let backupPrepared, candidateTaken: Bool?; let changes: [ApplyChangeRowDTO]?
+    }
+    let MacroEditor: MacroEditorDTO?; let MultiEditor: MultiEditorDTO?; let LightingEditor: LightingEditorDTO?
+    let ReconnectComparison: ReconnectComparisonDTO?; let ApplyPreparation: ApplyPreparationDTO?
+
+    func toModel() -> ActiveModalModel? {
+        if let mac = MacroEditor {
+            return .macroEditor(MacroEditorModel(
+                macroId: mac.macroId, name: mac.name ?? "",
+                steps: (mac.steps ?? []).map { MacroStepModel(index: $0.index ?? 0, summaryLabel: $0.summaryLabel ?? "", macosKeySupported: $0.macosKeySupported ?? true) },
+                draftKeyInput: mac.draftKeyInput ?? "a", draftDelayMs: mac.draftDelayMs ?? 30,
+                bindToSelectedSlot: mac.bindToSelectedSlot ?? true, targetSlot: mac.targetSlot,
+                referenceSummaries: mac.referenceSummaries ?? [], validationError: mac.validationError,
+                hostExecutionSupported: mac.hostExecutionSupported ?? true
+            ))
+        }
+        if let mul = MultiEditor {
+            let branches = (mul.branches ?? []).map { b -> MultiBranchModel in
+                let kind: String? = b.target?.Action != nil ? "Action" : (b.target?.Macro != nil ? "Macro" : nil)
+                let tid = b.target?.Action?.actionId ?? b.target?.Macro?.actionId
+                return MultiBranchModel(branch: b.branch ?? "Tap", title: b.title ?? "", targetKind: kind, targetId: tid, targetDisplayName: b.targetDisplayName ?? "未设置")
+            }
+            let toOpts = { (opts: [MultiOptionDTO]?) in (opts ?? []).compactMap { o -> MultiTargetOptionModel? in
+                guard let id = o.id, let label = o.label else { return nil }; return MultiTargetOptionModel(id: id, label: label)
+            }}
+            return .multiEditor(MultiEditorModel(
+                multiId: mul.multiId, name: mul.name ?? "", termMs: mul.termMs ?? 200, branches: branches,
+                bindToSelectedSlot: mul.bindToSelectedSlot ?? true, targetSlot: mul.targetSlot,
+                availableActions: toOpts(mul.availableActions), availableMacros: toOpts(mul.availableMacros),
+                referenceSummaries: mul.referenceSummaries ?? [], validationError: mul.validationError
+            ))
+        }
+        if let lit = LightingEditor {
+            return .lightingEditor(LightingEditorModel(
+                profileId: lit.profileId ?? "", layerId: lit.layerId ?? "", layerName: lit.layerName ?? "",
+                applyToAllLayers: lit.applyToAllLayers ?? false, canAddLighting: lit.canAddLighting ?? false,
+                hasLighting: lit.hasLighting ?? false, backlight: lit.backlight?.toModel(), underglow: lit.underglow?.toModel(),
+                previewActive: lit.previewActive ?? false, previewRemainingSecs: lit.previewRemainingSecs ?? 0,
+                validationError: lit.validationError
+            ))
+        }
+        if let cmp = ReconnectComparison {
+            let rows = (cmp.rows ?? []).map { ComparisonRowModel(path: $0.path ?? "", label: $0.label ?? "", baseSummary: $0.baseSummary ?? "", localSummary: $0.localSummary ?? "", deviceSummary: $0.deviceSummary ?? "", resultBadge: $0.resultBadge ?? "", isConflict: $0.isConflict ?? false) }
+            return .reconnectComparison(ReconnectComparisonModel(
+                token: cmp.token ?? "", revision: cmp.revision ?? 0, identityMatches: cmp.identityMatches ?? true,
+                identityConflict: cmp.identityConflict ?? false, identityConfirmationRequired: cmp.identityConfirmationRequired ?? false,
+                identityUserConfirmed: cmp.identityUserConfirmed ?? false, canMerge: cmp.canMerge ?? false,
+                conflicts: cmp.conflicts ?? [], rows: rows, errorMessage: cmp.errorMessage
+            ))
+        }
+        if let app = ApplyPreparation {
+            let changes = (app.changes ?? []).enumerated().map { idx, c in
+                ApplyChangeRowModel(id: "\(idx)-\(c.locationLabel ?? "")", kind: c.kind ?? "", locationLabel: c.locationLabel ?? "", before: c.before ?? "", after: c.after ?? "")
+            }
+            return .applyPreparation(ApplyPreparationModel(
+                token: app.token ?? "", kind: app.kind ?? "", documentId: app.documentId ?? "", revision: app.revision ?? 0,
+                documentSha256: app.documentSha256 ?? "", plannedKeymapSha256: app.plannedKeymapSha256 ?? "",
+                beforeSummary: app.beforeSummary ?? "", afterSummary: app.afterSummary ?? "", changes: changes,
+                backupPrepared: app.backupPrepared ?? false, backupPath: app.backupPath, manifestSha256: app.manifestSha256,
+                candidateTaken: app.candidateTaken ?? false, candidateOperationId: app.candidateOperationId,
+                unavailableReason: app.unavailableReason ?? "", errorMessage: app.errorMessage
+            ))
         }
         return nil
     }
+}
 
-    private static func parsePowerStatus(_ ps: [String: Any]) -> PowerStatusBadgeModel {
-        PowerStatusBadgeModel(
-            batteryPercent: (ps["battery_percent"] as? NSNumber)?.intValue,
-            isCharging: ps["is_charging"] as? Bool,
-            linePowered: ps["line_powered"] as? Bool ?? false,
-            usbHostHold: ps["usb_host_hold"] as? Bool ?? false,
-            usbMode: ps["usb_mode"] as? String ?? "",
-            pmMode: ps["pm_mode"] as? String ?? "",
-            hostSleepStatus: ps["host_sleep_status"] as? String ?? "awake",
-            summaryLabel: ps["summary_label"] as? String ?? ""
-        )
+private final class WorkspaceObserverBag: @unchecked Sendable {
+    let center: NotificationCenter
+    var observers: [NSObjectProtocol] = []
+
+    init(center: NotificationCenter) {
+        self.center = center
     }
 
-    private static func parseCandidateDevices(_ devs: [[String: Any]]) -> [CandidateDeviceModel] {
-        devs.compactMap { d in
-            guard let path = d["path"] as? String else { return nil }
-            return CandidateDeviceModel(
-                path: path,
-                product: d["product"] as? String ?? "Creator Micro 2",
-                serialNumber: d["serial_number"] as? String,
-                selectorKey: d["selector_key"] as? String,
-                displayLabel: d["display_label"] as? String ?? "",
-                isConnected: d["is_connected"] as? Bool ?? false,
-                isPreferred: d["is_preferred"] as? Bool ?? false
-            )
+    func removeAll() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.removeAll() }
+            return
         }
-    }
-
-    private static func parseLightingZone(_ z: [String: Any]) -> LightingZoneModel {
-        LightingZoneModel(
-            zone: z["zone"] as? String ?? "Backlight",
-            zoneTitle: z["zone_title"] as? String ?? "",
-            effect: z["effect"] as? String ?? "solid",
-            brightnessPercent: z["brightness_percent"] as? Int ?? 100,
-            speedPercent: z["speed_percent"] as? Int ?? 50,
-            magicPercent: z["magic_percent"] as? Int ?? 50,
-            colorHex: z["color_hex"] as? String ?? "#FFFFFF",
-            canEditColor: z["can_edit_color"] as? Bool ?? true,
-            canEditBrightness: z["can_edit_brightness"] as? Bool ?? true,
-            canEditSpeed: z["can_edit_speed"] as? Bool ?? false,
-            canEditMagic: z["can_edit_magic"] as? Bool ?? false
-        )
+        observers.forEach(center.removeObserver)
+        observers.removeAll()
     }
 }
 
@@ -922,19 +901,18 @@ final class WorkspaceLifecycle {
         case didWake = "system_did_wake"
     }
 
-    private let center: NotificationCenter
+    private let bag: WorkspaceObserverBag
     private let receive: (Event) -> Void
-    private var observers: [NSObjectProtocol] = []
     private var active = true
 
     init(center: NotificationCenter, receive: @escaping (Event) -> Void) {
-        self.center = center
+        self.bag = WorkspaceObserverBag(center: center)
         self.receive = receive
         for (name, event) in [
             (NSWorkspace.willSleepNotification, Event.willSleep),
             (NSWorkspace.didWakeNotification, Event.didWake),
         ] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            bag.observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self, self.active else { return }
                     self.receive(event)
@@ -945,11 +923,10 @@ final class WorkspaceLifecycle {
 
     func stop() {
         active = false
-        observers.forEach(center.removeObserver)
-        observers.removeAll()
+        bag.removeAll()
     }
 
     deinit {
-        observers.forEach(center.removeObserver)
+        bag.removeAll()
     }
 }

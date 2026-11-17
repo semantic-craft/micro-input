@@ -581,7 +581,7 @@ private struct SessionSlotExplanationSection: View {
     }
 }
 
-private struct KeycapGlyphGridSectionView: View, Equatable {
+private struct KeycapGlyphGridSectionView: View, @MainActor Equatable {
     let store: CoreStore
     let locale: ResolvedLocale
     let isVisible: Bool
@@ -642,7 +642,7 @@ private struct KeycapGlyphGridSectionView: View, Equatable {
     }
 }
 
-private struct KeycapGlyphCellButton: View, Equatable {
+private struct KeycapGlyphCellButton: View, @MainActor Equatable {
     let store: CoreStore
     let item: KeycapCatalogItemModel
     let bindDefaultAction: Bool
@@ -684,7 +684,7 @@ private struct KeycapGlyphCellButton: View, Equatable {
     }
 }
 
-private struct AgentActionCatalogSectionView: View, Equatable {
+private struct AgentActionCatalogSectionView: View, @MainActor Equatable {
     let store: CoreStore
     let locale: ResolvedLocale
     let isVisible: Bool
@@ -735,7 +735,7 @@ private struct AgentActionCatalogSectionView: View, Equatable {
     }
 }
 
-private struct ActionCatalogRowButton: View, Equatable {
+private struct ActionCatalogRowButton: View, @MainActor Equatable {
     let store: CoreStore
     let locale: ResolvedLocale
     let act: ActionRowModel

@@ -30,6 +30,7 @@ unsafe fn parse_optional_trimmed_path(raw_ptr: *const c_char) -> Result<Option<P
     if raw_ptr.is_null() {
         return Ok(None);
     }
+    // SAFETY: Caller guarantees `raw_ptr` points to a valid NUL-terminated C string for this call.
     let raw = CStr::from_ptr(raw_ptr).to_str().map_err(|_| ())?;
     let trimmed = raw.trim();
     Ok((!trimmed.is_empty()).then(|| PathBuf::from(trimmed)))
@@ -108,11 +109,19 @@ pub extern "C" fn mi_core_run_qa_from_env() -> i32 {
     })
 }
 
+/// Acquires the single-instance lock for the target document directory (or default production directory).
+///
+/// # Safety
+///
+/// `doc_dir_utf8` may be `NULL`, or must point to a valid NUL-terminated UTF-8 C string that
+/// remains valid and immutable for the duration of this call. Non-null returned pointers must be
+/// released exactly once via [`mi_core_release_instance_lock`].
 #[no_mangle]
 pub unsafe extern "C" fn mi_core_acquire_instance_lock(
     doc_dir_utf8: *const c_char,
 ) -> *mut DocumentInstanceLock {
     ffi_guard(ptr::null_mut(), "mi_core_acquire_instance_lock", || {
+        // SAFETY: Preconditions documented on `mi_core_acquire_instance_lock` guarantee valid CStr or NULL.
         let explicit_dir = match parse_optional_trimmed_path(doc_dir_utf8) {
             Ok(dir) => dir,
             Err(()) => {
@@ -136,18 +145,33 @@ pub unsafe extern "C" fn mi_core_acquire_instance_lock(
     })
 }
 
+/// Releases an instance lock acquired by [`mi_core_acquire_instance_lock`].
+///
+/// # Safety
+///
+/// `ptr` may be `NULL`, or must be a live pointer previously returned by
+/// [`mi_core_acquire_instance_lock`] that has not been released and is not concurrently used.
 #[no_mangle]
 pub unsafe extern "C" fn mi_core_release_instance_lock(ptr: *mut DocumentInstanceLock) {
     ffi_guard((), "mi_core_release_instance_lock", || {
         if !ptr.is_null() {
+            // SAFETY: Non-null `ptr` transfers unique ownership from `mi_core_acquire_instance_lock`.
             drop(Box::from_raw(ptr));
         }
     });
 }
 
+/// Opens a [`WorkbenchStore`] in the requested document directory (or production store if `NULL`/empty).
+///
+/// # Safety
+///
+/// `doc_dir_utf8` may be `NULL`, or must point to a valid NUL-terminated UTF-8 C string that
+/// remains valid and immutable for the duration of this call. Non-null returned handles must be
+/// freed once via [`mi_core_free`].
 #[no_mangle]
 pub unsafe extern "C" fn mi_core_new(doc_dir_utf8: *const c_char) -> *mut WorkbenchStore {
     ffi_guard(ptr::null_mut(), "mi_core_new", || {
+        // SAFETY: Preconditions documented on `mi_core_new` guarantee valid CStr or NULL.
         let custom_dir = match parse_optional_trimmed_path(doc_dir_utf8) {
             Ok(dir) => dir,
             Err(()) => {
@@ -176,21 +200,36 @@ pub unsafe extern "C" fn mi_core_new(doc_dir_utf8: *const c_char) -> *mut Workbe
     })
 }
 
+/// Destroys a [`WorkbenchStore`] handle created by [`mi_core_new`].
+///
+/// # Safety
+///
+/// `ptr` may be `NULL`, or must be a live pointer previously returned by [`mi_core_new`] that
+/// has not already been freed and has no concurrent or subsequent callers.
 #[no_mangle]
 pub unsafe extern "C" fn mi_core_free(ptr: *mut WorkbenchStore) {
     ffi_guard((), "mi_core_free", || {
         if !ptr.is_null() {
+            // SAFETY: Non-null `ptr` transfers unique ownership from `mi_core_new`.
             drop(Box::from_raw(ptr));
         }
     });
 }
 
+/// Serializes the current [`WorkbenchProjection`](mi_core::WorkbenchProjection) to a newly allocated JSON C string.
+///
+/// # Safety
+///
+/// `ptr` may be `NULL`, or must be a live [`WorkbenchStore`] pointer returned by [`mi_core_new`]
+/// with non-concurrent access for the duration of the call. Returned non-null strings must be
+/// freed via [`mi_core_string_free`].
 #[no_mangle]
 pub unsafe extern "C" fn mi_core_project_json(ptr: *mut WorkbenchStore) -> *mut c_char {
     ffi_guard(ptr::null_mut(), "mi_core_project_json", || {
         if ptr.is_null() {
             return ptr::null_mut();
         }
+        // SAFETY: Caller guarantees `ptr` is live and not concurrently mutated.
         let store = &*ptr;
         match serde_json::to_string(store.projection()) {
             Ok(json) => string_to_c_char(json),
@@ -202,6 +241,14 @@ pub unsafe extern "C" fn mi_core_project_json(ptr: *mut WorkbenchStore) -> *mut 
     })
 }
 
+/// Dispatches a JSON-encoded [`WorkbenchCommand`] and returns an updated projection JSON string if changed.
+///
+/// # Safety
+///
+/// `ptr` may be `NULL`, or must be a live [`WorkbenchStore`] pointer returned by [`mi_core_new`]
+/// with exclusive access on the calling thread; `cmd_utf8` may be `NULL`, or must point to a valid
+/// NUL-terminated UTF-8 C string for the duration of this call. Returned non-null strings must be
+/// freed via [`mi_core_string_free`].
 #[no_mangle]
 pub unsafe extern "C" fn mi_core_dispatch_json(
     ptr: *mut WorkbenchStore,
@@ -211,8 +258,10 @@ pub unsafe extern "C" fn mi_core_dispatch_json(
         if ptr.is_null() || cmd_utf8.is_null() {
             return ptr::null_mut();
         }
+        // SAFETY: Caller guarantees `ptr` is live and exclusively accessed by this thread.
         let store = &mut *ptr;
         let before_gen = store.projection_generation();
+        // SAFETY: Caller guarantees `cmd_utf8` points to a valid NUL-terminated C string.
         let raw = match CStr::from_ptr(cmd_utf8).to_str() {
             Ok(s) => s,
             Err(_) => {
@@ -246,12 +295,20 @@ pub unsafe extern "C" fn mi_core_dispatch_json(
     })
 }
 
+/// Polls pending hardware/background events on `ptr`, returning a new projection JSON string if state changed.
+///
+/// # Safety
+///
+/// `ptr` may be `NULL`, or must be a live [`WorkbenchStore`] pointer returned by [`mi_core_new`]
+/// with exclusive access on the calling thread. Returned non-null strings must be freed via
+/// [`mi_core_string_free`].
 #[no_mangle]
 pub unsafe extern "C" fn mi_core_poll_json(ptr: *mut WorkbenchStore) -> *mut c_char {
     ffi_guard(ptr::null_mut(), "mi_core_poll_json", || {
         if ptr.is_null() {
             return ptr::null_mut();
         }
+        // SAFETY: Caller guarantees `ptr` is live and exclusively accessed by this thread.
         let store = &mut *ptr;
         if store.poll_hardware_events() {
             match serde_json::to_string(store.projection()) {
@@ -264,10 +321,17 @@ pub unsafe extern "C" fn mi_core_poll_json(ptr: *mut WorkbenchStore) -> *mut c_c
     })
 }
 
+/// Frees a C string returned by `mi-ffi` JSON functions.
+///
+/// # Safety
+///
+/// `s` may be `NULL`, or must be a live pointer previously allocated by [`mi_core_project_json`],
+/// [`mi_core_dispatch_json`], or [`mi_core_poll_json`] that has not already been freed.
 #[no_mangle]
 pub unsafe extern "C" fn mi_core_string_free(s: *mut c_char) {
     ffi_guard((), "mi_core_string_free", || {
         if !s.is_null() {
+            // SAFETY: Non-null `s` transfers unique ownership from `CString::into_raw`.
             drop(CString::from_raw(s));
         }
     });

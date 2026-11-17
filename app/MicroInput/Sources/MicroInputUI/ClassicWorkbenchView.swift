@@ -416,7 +416,7 @@ private struct WorkbenchFooterBarView: View {
     }
 }
 
-private struct SidebarProfileRowButton: View, Equatable {
+private struct SidebarProfileRowButton: View, @MainActor Equatable {
     let store: CoreStore
     let row: SidebarRowModel
     let locale: ResolvedLocale

@@ -39,9 +39,9 @@ private final class SMAppServiceLaunchAtLoginDriver: LaunchAtLoginDriver {
 private final class SparkleSoftwareUpdateDriver: SoftwareUpdateDriver {
     private let controller: SPUStandardUpdaterController
     private var observations: [NSKeyValueObservation] = []
-    private let onStateChange: @MainActor () -> Void
+    private let onStateChange: @MainActor @Sendable () -> Void
 
-    init(onStateChange: @escaping @MainActor () -> Void) {
+    init(onStateChange: @escaping @MainActor @Sendable () -> Void) {
         self.controller = SPUStandardUpdaterController(
             startingUpdater: false,
             updaterDelegate: nil,
@@ -66,7 +66,7 @@ private final class SparkleSoftwareUpdateDriver: SoftwareUpdateDriver {
     func startUpdater() {
         controller.startUpdater()
         let callback = onStateChange
-        let notify: () -> Void = {
+        let notify: @Sendable () -> Void = {
             Task { @MainActor in
                 callback()
             }

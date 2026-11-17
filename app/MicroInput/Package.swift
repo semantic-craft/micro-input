@@ -54,7 +54,7 @@ let package = Package(
             name: "MicroInputUI",
             dependencies: ["MicroInputCoreFFI"],
             path: "Sources/MicroInputUI",
-            swiftSettings: [.unsafeFlags(["-O"])],
+            swiftSettings: [.unsafeFlags(["-O", "-strict-concurrency=complete"])],
             linkerSettings: commonLinkerSettings
         ),
         .executableTarget(
@@ -65,13 +65,14 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "Sources/MicroInput",
-            swiftSettings: [.unsafeFlags(["-O"])],
+            swiftSettings: [.unsafeFlags(["-O", "-strict-concurrency=complete"])],
             linkerSettings: executableLinkerSettings
         ),
         .testTarget(
             name: "MicroInputTests",
             dependencies: ["MicroInputUI", "MicroInputCoreFFI"],
             path: "Tests/MicroInputTests",
+            swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])],
             linkerSettings: commonLinkerSettings
         ),
     ]

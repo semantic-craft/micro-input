@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import os
 import SwiftUI
 
 public enum UITheme {
@@ -227,7 +228,7 @@ private struct TriggerAnchorProbe: NSViewRepresentable {
     }
 }
 
-private final class DropdownMonitorBag {
+private final class DropdownMonitorBag: @unchecked Sendable {
     var localMouseMonitor: Any?
     var globalMouseMonitor: Any?
     var scrollMonitor: Any?
@@ -236,6 +237,10 @@ private final class DropdownMonitorBag {
     var closeObserver: NSObjectProtocol?
 
     func removeAll() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.removeAll() }
+            return
+        }
         if let m = localMouseMonitor { NSEvent.removeMonitor(m); localMouseMonitor = nil }
         if let m = globalMouseMonitor { NSEvent.removeMonitor(m); globalMouseMonitor = nil }
         if let m = scrollMonitor { NSEvent.removeMonitor(m); scrollMonitor = nil }
@@ -810,7 +815,7 @@ public enum StatusItemIcon {
     }
 }
 
-public struct DesktopAgent: Identifiable {
+public struct DesktopAgent: Identifiable, Sendable {
     public static let otherAppsWildcardBundleID = "*"
     @MainActor private static var appURLCache: [String: URL?] = [:]
 
@@ -944,13 +949,15 @@ public enum AgentProfileKind: String {
 
 private enum HexColorCache {
     private static let fallback = Color(red: 0.23, green: 0.51, blue: 0.96)
-    private static let lock = NSLock()
-    private static var table: [String: Color] = [:]
+    private static let table = OSAllocatedUnfairLock<[String: Color]>(initialState: [:])
 
     static func resolve(_ hex: String) -> Color {
-        if let cached = lock.withLock({ table[hex] }) { return cached }
+        if let cached = table.withLock({ $0[hex] }) { return cached }
         let parsed = parse(hex)
-        lock.withLock { if table.count >= 128 { table.removeAll(keepingCapacity: true) }; table[hex] = parsed }
+        table.withLock { state in
+            if state.count >= 128 { state.removeAll(keepingCapacity: true) }
+            state[hex] = parsed
+        }
         return parsed
     }
 

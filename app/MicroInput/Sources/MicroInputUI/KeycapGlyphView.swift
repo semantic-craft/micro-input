@@ -118,7 +118,7 @@ public enum CodexKeycapId: String, CaseIterable, Identifiable {
     }
 }
 
-public struct CodexKeycapGlyphView: View, Equatable {
+public struct CodexKeycapGlyphView: View, @MainActor Equatable {
     public let keycap: CodexKeycapId
     public var size: CGFloat = 22
     public var color: Color = .white
