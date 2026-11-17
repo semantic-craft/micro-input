@@ -195,15 +195,17 @@ impl AppliedSixLayerPlan {
         .get(index)
         .copied()
         .unwrap_or("Unassigned");
-        let hardware_joystick_mode = (1..=2)
-            .contains(&index)
-            .then(|| {
-                self.hosts
-                    .get(index - 1)
-                    .and_then(|h| h.joystick_mode.as_deref())
-            })
-            .flatten()
-            .filter(|m| matches!(*m, "MOUSE" | "SCROLL"));
+        let hardware_joystick_mode = if (1..=2).contains(&index) {
+            self.hosts
+                .get(index - 1)
+                .and_then(|h| h.joystick_mode.as_deref())
+                .filter(|m| matches!(*m, "MOUSE" | "SCROLL"))
+        } else {
+            self.codex_joystick_mode
+                .as_deref()
+                .or_else(|| self.hosts.iter().find_map(|h| h.joystick_mode.as_deref()))
+                .filter(|m| matches!(*m, "MOUSE" | "SCROLL"))
+        };
         let joystick = if let Some(mode) = hardware_joystick_mode {
             crate::Joystick {
                 kind: json!(mode),

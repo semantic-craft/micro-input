@@ -121,64 +121,64 @@ impl MouseSpeedPreset {
     pub fn to_mouse_config(self) -> MouseConfig {
         match self {
             Self::Precise => MouseConfig {
-                delay_ms: 130,
-                interval_ms: 28,
-                move_delta: 2,
-                max_speed: 4,
-                time_to_max: 40,
-                wheel_delay_ms: 130,
-                wheel_interval_ms: 100,
-                wheel_delta: 1,
-                wheel_max_speed: 3,
-                wheel_time_to_max: 50,
-                stick_speed: 1,
-                stick_regulator: 32,
-                stick_scroll: 80,
-            },
-            Self::Slow => MouseConfig {
-                delay_ms: 120,
-                interval_ms: 24,
+                delay_ms: 110,
+                interval_ms: 22,
                 move_delta: 4,
-                max_speed: 6,
-                time_to_max: 35,
-                wheel_delay_ms: 120,
-                wheel_interval_ms: 90,
+                max_speed: 8,
+                time_to_max: 32,
+                wheel_delay_ms: 110,
+                wheel_interval_ms: 85,
                 wheel_delta: 1,
                 wheel_max_speed: 4,
                 wheel_time_to_max: 45,
-                stick_speed: 1,
-                stick_regulator: 25,
-                stick_scroll: 60,
+                stick_speed: 6,
+                stick_regulator: 16,
+                stick_scroll: 50,
             },
-            Self::Standard => MouseConfig {
-                delay_ms: 100,
-                interval_ms: 20,
+            Self::Slow => MouseConfig {
+                delay_ms: 95,
+                interval_ms: 18,
                 move_delta: 8,
-                max_speed: 10,
-                time_to_max: 30,
-                wheel_delay_ms: 100,
-                wheel_interval_ms: 80,
+                max_speed: 12,
+                time_to_max: 28,
+                wheel_delay_ms: 95,
+                wheel_interval_ms: 75,
                 wheel_delta: 1,
                 wheel_max_speed: 8,
                 wheel_time_to_max: 40,
-                stick_speed: 2,
-                stick_regulator: 20,
+                stick_speed: 10,
+                stick_regulator: 12,
                 stick_scroll: 40,
             },
-            Self::Fast => MouseConfig {
+            Self::Standard => MouseConfig {
                 delay_ms: 80,
                 interval_ms: 16,
-                move_delta: 14,
+                move_delta: 12,
                 max_speed: 18,
                 time_to_max: 24,
                 wheel_delay_ms: 80,
                 wheel_interval_ms: 60,
                 wheel_delta: 2,
-                wheel_max_speed: 14,
+                wheel_max_speed: 12,
                 wheel_time_to_max: 30,
-                stick_speed: 4,
-                stick_regulator: 16,
-                stick_scroll: 25,
+                stick_speed: 16,
+                stick_regulator: 10,
+                stick_scroll: 30,
+            },
+            Self::Fast => MouseConfig {
+                delay_ms: 60,
+                interval_ms: 12,
+                move_delta: 18,
+                max_speed: 28,
+                time_to_max: 18,
+                wheel_delay_ms: 60,
+                wheel_interval_ms: 45,
+                wheel_delta: 3,
+                wheel_max_speed: 18,
+                wheel_time_to_max: 24,
+                stick_speed: 24,
+                stick_regulator: 8,
+                stick_scroll: 20,
             },
         }
     }
@@ -284,7 +284,7 @@ impl JoystickDeadzone {
     pub const MAX: f64 = 0.95;
     pub const UI_MIN: f64 = 0.02;
     pub const UI_MAX: f64 = 0.45;
-    pub const DEFAULT: f64 = 0.15;
+    pub const DEFAULT: f64 = 0.07;
 
     pub fn new(v: f64) -> Result<Self, ProtoError> {
         let dz = Self { v };
@@ -697,19 +697,19 @@ mod tests {
     #[test]
     fn mouse_config_presets_and_validation_match_firmware_defaults() {
         let standard = MouseConfig::default();
-        assert_eq!(standard.delay_ms, 100);
-        assert_eq!(standard.interval_ms, 20);
-        assert_eq!(standard.move_delta, 8);
-        assert_eq!(standard.max_speed, 10);
-        assert_eq!(standard.time_to_max, 30);
-        assert_eq!(standard.wheel_delay_ms, 100);
-        assert_eq!(standard.wheel_interval_ms, 80);
-        assert_eq!(standard.wheel_delta, 1);
-        assert_eq!(standard.wheel_max_speed, 8);
-        assert_eq!(standard.wheel_time_to_max, 40);
-        assert_eq!(standard.stick_speed, 2);
-        assert_eq!(standard.stick_regulator, 20);
-        assert_eq!(standard.stick_scroll, 40);
+        assert_eq!(standard.delay_ms, 80);
+        assert_eq!(standard.interval_ms, 16);
+        assert_eq!(standard.move_delta, 12);
+        assert_eq!(standard.max_speed, 18);
+        assert_eq!(standard.time_to_max, 24);
+        assert_eq!(standard.wheel_delay_ms, 80);
+        assert_eq!(standard.wheel_interval_ms, 60);
+        assert_eq!(standard.wheel_delta, 2);
+        assert_eq!(standard.wheel_max_speed, 12);
+        assert_eq!(standard.wheel_time_to_max, 30);
+        assert_eq!(standard.stick_speed, 16);
+        assert_eq!(standard.stick_regulator, 10);
+        assert_eq!(standard.stick_scroll, 30);
         assert_eq!(standard.matching_preset(), Some(MouseSpeedPreset::Standard));
         assert_eq!(
             MouseSpeedPreset::parse("FAST").unwrap(),
@@ -720,7 +720,7 @@ mod tests {
         let wire = encode_write_mouse_config(&standard, 10).unwrap();
         let v: Value = serde_json::from_slice(&wire).unwrap();
         assert_eq!(v["method"], "mouse.config");
-        assert_eq!(v["params"]["stick_scroll"], 40);
+        assert_eq!(v["params"]["stick_scroll"], 30);
 
         let reply = json!({"id": 10, "method": "mouse.config", "result": v["params"]});
         assert_eq!(decode_mouse_config_response(&reply, 10).unwrap(), standard);
@@ -775,6 +775,7 @@ mod tests {
 
     #[test]
     fn joystick_deadzone_enforces_firmware_range_and_finiteness() {
+        assert_eq!(JoystickDeadzone::default().v, 0.07);
         assert!(encode_write_joystick_deadzone(JoystickDeadzone { v: 0.0025 }, 1).is_ok());
         assert!(encode_write_joystick_deadzone(JoystickDeadzone { v: 0.95 }, 2).is_ok());
         assert!(encode_write_joystick_deadzone(JoystickDeadzone { v: 0.0024 }, 3).is_err());

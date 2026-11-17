@@ -284,10 +284,10 @@ private func v070Double(_ value: Any?) -> Double? {
 
 public struct V070MouseConfigModel: Equatable {
     public var preset = "standard"
-    public var delayMs = 100, intervalMs = 20, moveDelta = 8, maxSpeed = 10, timeToMax = 30
-    public var wheelDelayMs = 100, wheelIntervalMs = 80, wheelDelta = 1, wheelMaxSpeed = 8, wheelTimeToMax = 40
-    public var stickSpeed = 2, stickRegulator = 20, stickScroll = 40
-    public var deadzone = 0.15
+    public var delayMs = 80, intervalMs = 16, moveDelta = 12, maxSpeed = 18, timeToMax = 24
+    public var wheelDelayMs = 80, wheelIntervalMs = 60, wheelDelta = 2, wheelMaxSpeed = 12, wheelTimeToMax = 30
+    public var stickSpeed = 16, stickRegulator = 10, stickScroll = 30
+    public var deadzone = 0.07
 
     public init() {}
     public init(json: [String: Any]) {

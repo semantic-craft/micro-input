@@ -179,7 +179,7 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertNil(partial.preferredDeviceSerial)
         XCTAssertNil(partial.activeLayer)
         XCTAssertNil(partial.batteryPercent)
-        XCTAssertEqual(partial.mouse.deadzone, 0.15, accuracy: 0.0001)
+        XCTAssertEqual(partial.mouse.deadzone, 0.07, accuracy: 0.0001)
         XCTAssertNil(partial.saRgb.sa)
 
         let legacyDefault = V070HardwareSliceModel(json: [:])

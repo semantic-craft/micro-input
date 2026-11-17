@@ -402,6 +402,16 @@ fn native_codex_cheat_sheets_show_local_labels_and_preserve_empty_controls() {
     let local = store.local_codex_profile_id().unwrap();
     let graph = &mut store.document_store.draft.document.editable.graph;
     let layer_id = graph.profiles[&local].layer_order[0].clone();
+    if let Some(cs) = graph
+        .layers
+        .get_mut(&layer_id)
+        .unwrap()
+        .control_settings
+        .as_mut()
+    {
+        cs.joystick_mode = "logical_sectors".into();
+        cs.active_sectors = 4;
+    }
     let mut expected = BTreeMap::new();
     for binding in graph
         .layers
@@ -715,6 +725,16 @@ fn native_codex_all_controls_dispatch_custom_local_actions_without_rewriting_map
         let local = store.local_codex_profile_id().unwrap();
         let graph = &mut store.document_store.draft.document.editable.graph;
         let layer_id = graph.profiles[&local].layer_order[0].clone();
+        if let Some(cs) = graph
+            .layers
+            .get_mut(&layer_id)
+            .unwrap()
+            .control_settings
+            .as_mut()
+        {
+            cs.joystick_mode = "logical_sectors".into();
+            cs.active_sectors = 4;
+        }
         let template = graph.actions.values().next().unwrap().clone();
         for binding in graph
             .layers
@@ -999,13 +1019,13 @@ fn poll_at_triggers_encoder_model_picker_hold_and_idle_expiry() {
         ..input(11, InputEventKind::Pressed)
     };
     assert!(store.consume_physical_input_event(turn, t_turn).is_some());
-    assert!(store.is_model_picker_mouse_capture_enabled());
+    assert!(!store.is_model_picker_mouse_capture_enabled());
     assert!(store.encoder_model_picker.active_session().is_some());
 
     let mid_commits = store.commit_local_update_count;
     assert!(!store.poll_at(t_turn + Duration::from_secs(5)));
     assert_eq!(store.commit_local_update_count, mid_commits);
-    assert!(store.is_model_picker_mouse_capture_enabled());
+    assert!(!store.is_model_picker_mouse_capture_enabled());
 
     let _ = store.poll_at(t_turn + crate::MODEL_PICKER_IDLE_TIMEOUT + Duration::from_millis(1));
     assert_eq!(store.commit_local_update_count, mid_commits + 1);

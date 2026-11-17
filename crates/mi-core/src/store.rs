@@ -2247,10 +2247,16 @@ impl WorkbenchStore {
         {
             return false;
         }
+        if profiles
+            .keys()
+            .any(|pid| mi_model::preset::starter_profile_needs_hardware_mouse_migration(doc, pid))
+        {
+            return false;
+        }
         CANONICAL_DESKTOP_AGENT_PROFILES
             .iter()
             .all(|canonical_name| {
-                profiles.values().any(|p| {
+                profiles.iter().any(|(pid, p)| {
                     if p.name.trim() != *canonical_name {
                         return false;
                     }
@@ -2260,6 +2266,9 @@ impl WorkbenchStore {
                             .layer_order
                             .iter()
                             .any(|lid| doc.is_protected_oai_layer(lid));
+                    }
+                    if mi_model::preset::starter_profile_needs_hardware_mouse_migration(doc, pid) {
+                        return false;
                     }
                     if *canonical_name == "Antigravity" {
                         return p.layer_order.first().is_some_and(|lid| {
@@ -3443,17 +3452,12 @@ impl WorkbenchStore {
                     .update(|draft| {
                         match preset {
                             KnobJoystickPreset::ModelSelectionAndMouse => {
-                                let (joystick_mode, active_sectors) = if v070_supported {
-                                    ("mouse", 0)
-                                } else {
-                                    ("logical_sectors", 4)
-                                };
                                 draft.set_control_settings(
                                     &pid,
                                     &lid,
                                     mi_model::control_settings::ControlSettings {
-                                        joystick_mode: joystick_mode.into(),
-                                        active_sectors,
+                                        joystick_mode: "mouse".into(),
+                                        active_sectors: 0,
                                         encoder_hold_action_id: None,
                                     },
                                 )?;
@@ -5336,7 +5340,7 @@ impl WorkbenchStore {
     ) -> String {
         match kind {
             crate::encoder_model_picker::EncoderOverlayKind::ModelPicker => {
-                format!("已弹出模型选择页 · 左右旋转选模型，按右选模型力度 ({detail})")
+                format!("已弹出模型选择页 · 左右旋转选模型，短按确认 ({detail})")
             }
             crate::encoder_model_picker::EncoderOverlayKind::SearchConversations => {
                 format!("已打开搜索会话 · 上下旋转选择会话，短按确认 ({detail})")
@@ -5800,29 +5804,9 @@ impl WorkbenchStore {
                         }
                         crate::encoder_model_picker::EncoderTurnOutcome::NormalSlot => {}
                     }
-                } else if matches!(binding_id.as_str(), "AG15" | "AG16" | "AG17" | "AG18") {
-                    if let Some(cmd) = self
-                        .encoder_model_picker
-                        .on_sector_direction_while_active(&binding_id, now)
-                    {
-                        if let Some(adapter) = self
-                            .encoder_model_picker
-                            .active_adapter(now)
-                            .map(str::to_owned)
-                        {
-                            let action = cmd.into_host_action(adapter);
-                            return self.execute_resolved_physical_action_with_session(
-                                &profile_id,
-                                &binding_id,
-                                event.session_id,
-                                action,
-                            );
-                        }
-                    }
-                    if self.encoder_model_picker.is_active(now) {
-                        self.cancel_encoder_model_picker();
-                    }
-                } else if self.encoder_model_picker.is_active(now) {
+                } else if !matches!(binding_id.as_str(), "AG15" | "AG16" | "AG17" | "AG18")
+                    && self.encoder_model_picker.is_active(now)
+                {
                     self.cancel_encoder_model_picker();
                 }
 
@@ -5833,6 +5817,11 @@ impl WorkbenchStore {
                     self.commit_runtime_update();
                     return None;
                 };
+                if matches!(binding_id.as_str(), "AG15" | "AG16" | "AG17" | "AG18")
+                    && self.encoder_model_picker.is_active(now)
+                {
+                    self.cancel_encoder_model_picker();
+                }
 
                 let target_adapter =
                     self.resolve_model_picker_target_adapter(&profile_id, Some(&action));
@@ -9459,7 +9448,7 @@ mod tests {
             )
             .expect("idle CCW turn enters model picker");
         assert_eq!(turn_receipt.detail, "antigravity/model-picker-prev");
-        assert!(store.is_model_picker_mouse_capture_enabled());
+        assert!(!store.is_model_picker_mouse_capture_enabled());
 
         let closed_receipt = HostActionReceipt {
             action_type: "agent_command".into(),

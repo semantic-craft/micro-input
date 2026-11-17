@@ -234,8 +234,6 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         ("AG14", "model-picker-next"),
         ("ENC_CW", "model-picker-next"),
         ("ENC_CLK", "search"),
-        ("AG15", "scroll-up"),
-        ("AG17", "scroll-down"),
     ] {
         assert_eq!(
             resolve_host_action(&draft.document, Some(ag_pid), binding, true),
@@ -253,7 +251,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             command: "search".into(),
         })
     );
-    for binding in ["AG05", "AG16", "AG18"] {
+    for binding in ["AG05"] {
         assert!(
             matches!(
                 resolve_host_action(&draft.document, Some(ag_pid), binding, true),
@@ -262,6 +260,9 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             ),
             "Antigravity {binding} must resolve to com.google.antigravity shortcut"
         );
+    }
+    for binding in ["AG15", "AG16", "AG17", "AG18"] {
+        assert!(resolve_host_action(&draft.document, Some(ag_pid), binding, true).is_none());
     }
     for binding in ["AG10", "AG15"] {
         assert!(resolve_host_action(&draft.document, Some(dsh_pid), binding, true).is_none());
@@ -785,6 +786,17 @@ fn joystick_prompt_slots_and_submit_control_route_to_target_agent_without_auto_e
             .0
             .clone();
         let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+        draft
+            .set_control_settings(
+                &pid,
+                &lid,
+                mi_model::control_settings::ControlSettings {
+                    joystick_mode: "logical_sectors".into(),
+                    active_sectors: 4,
+                    encoder_hold_action_id: None,
+                },
+            )
+            .unwrap();
 
         // Bind 4-way joystick sectors (slots 16..19 -> AG15..AG18) to Continue, Test, Review, Summary
         draft

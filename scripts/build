@@ -26,9 +26,9 @@ fi
 export MI_RUST_PROFILE="$profile"
 cargo build --locked ${cargo_flags[@]+"${cargo_flags[@]}"} -p mi-model --bin mi
 cargo build --locked ${cargo_flags[@]+"${cargo_flags[@]}"} -p mi-ffi
-rm -f "target/$profile/libmi_ffi.dylib"
-swift build --package-path app/MicroInput ${swift_flags[@]+"${swift_flags[@]}"}
 swift_bin_dir="$(swift build --package-path app/MicroInput ${swift_flags[@]+"${swift_flags[@]}"} --show-bin-path)"
+rm -f "target/$profile/libmi_ffi.dylib" "$swift_bin_dir/MicroInput"
+swift build --package-path app/MicroInput ${swift_flags[@]+"${swift_flags[@]}"}
 touch target/.metadata_never_index app/MicroInput/.build/.metadata_never_index 2>/dev/null || true
 
 bundle=target/MicroInput.app

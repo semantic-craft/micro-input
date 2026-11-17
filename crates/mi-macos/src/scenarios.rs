@@ -326,7 +326,7 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
             }
         }
     }
-    fire_binding(&mut receipts, &draft.document, &herdr_pid, "AG15")?;
+    fire_binding(&mut receipts, &draft.document, &herdr_pid, "AG01")?;
 
     {
         let other_lid =
@@ -375,6 +375,15 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
     receipts.push(forward_receipt);
 
     let ag_lid = draft.document.editable.graph.profiles[&antigravity_pid].layer_order[0].clone();
+    draft.set_control_settings(
+        &antigravity_pid,
+        &ag_lid,
+        mi_model::control_settings::ControlSettings {
+            joystick_mode: "logical_sectors".into(),
+            active_sectors: 4,
+            encoder_hold_action_id: None,
+        },
+    )?;
     let mut prompt_continue = find_catalog_action("prompt-continue")?;
     prompt_continue.payload = json!({"type": "text", "text": "Continue\n"});
     draft.assign(&json!(antigravity_pid), &json!(ag_lid), 16, prompt_continue)?;

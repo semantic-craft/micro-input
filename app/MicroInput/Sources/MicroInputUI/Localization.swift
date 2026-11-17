@@ -573,6 +573,7 @@ public enum L10n {
         "标准": "Standard",
         "快速": "Fast",
         "精准": "Precise",
+        "摇杆全层固定为纯硬件高速鼠标指针，任何时候推动摇杆均直接高速移动光标，不拦截或抢占方向。": "The stick acts as a pure high-speed hardware mouse pointer across all layers without directional interception.",
         "旋转左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。": "While rotating the top-left knob for Model Picker, nudging the stick right temporarily adjusts reasoning effort; press to confirm and restore hardware pointer.",
         "短按左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。": "While tapping the top-left knob for Model Picker, nudging the stick right temporarily adjusts reasoning effort; press to confirm and restore hardware pointer.",
         "长按左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。": "While holding the top-left knob for Model Picker, nudging the stick right temporarily adjusts reasoning effort; press to confirm and restore hardware pointer.",

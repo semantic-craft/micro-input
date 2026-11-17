@@ -123,18 +123,7 @@ def collect_sign_targets(bundle_path: Path) -> list[Path]:
 
 def _discover_dev_identity() -> str:
     env_id = os.environ.get('MI_CODESIGN_IDENTITY', '').strip()
-    if env_id:
-        return env_id
-    try:
-        out = subprocess.check_output(
-            ['security', 'find-identity', '-v', '-p', 'codesigning'],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return '-'
-    match = re.search(r'"(Apple Development:[^"]+)"', out)
-    return match.group(1) if match else '-'
+    return env_id if env_id else '-'
 
 
 def _redact_identity(message: str, identity: str) -> str:

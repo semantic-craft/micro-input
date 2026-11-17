@@ -1076,7 +1076,7 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
     legacy_specs.extend(
         specs
             .iter()
-            .filter(|(name, _)| matches!(*name, "Codex" | "Antigravity"))
+            .filter(|(name, _)| matches!(*name, "Codex" | "Antigravity" | "DeepSeek Coder (DSH)"))
             .cloned(),
     );
     for (_, assignments) in &mut specs {
@@ -1712,9 +1712,33 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
             }
         }
     }
+    for (name, assignments) in &specs {
+        if *name != "Codex" && assignments.iter().any(|(slot, ..)| *slot >= 16) {
+            legacy_specs.push((*name, assignments.clone()));
+        }
+    }
     for mut hybrid in [codex_pre_slots, codex_r25, codex_r26] {
         replace_encoder_slots_with_model_picker(&mut hybrid);
+        let mut stripped = hybrid.clone();
+        stripped.retain(|(slot, ..)| *slot < 16);
         legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, hybrid));
+        legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, stripped));
+    }
+    let dsh_hybrids: Vec<Vec<AgentAssignment>> = legacy_specs
+        .iter()
+        .filter(|(name, _)| *name == "DeepSeek Coder (DSH)")
+        .map(|(_, a)| {
+            let mut h = a.clone();
+            replace_encoder_slots_with_model_picker(&mut h);
+            h.retain(|(slot, ..)| *slot < 16);
+            h
+        })
+        .collect();
+    for h in dsh_hybrids {
+        legacy_specs.push(("DeepSeek Coder (DSH)", h));
+    }
+    for (_, assignments) in &mut specs {
+        assignments.retain(|(slot, ..)| *slot < 16);
     }
 
     (specs, legacy_specs)
@@ -1898,23 +1922,35 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 created_ids.push(pid);
                 continue;
             }
-            let can_upgrade = if profile_name == LOCAL_CODEX_PROFILE_NAME {
-                local_codex_profile_needs_starter_slot_migration(&work.document, &pid)
-            } else {
-                p.layer_order.len() == 1
-                    && ((is_native_oai_profile
-                        && work.document.editable.graph.layers[&p.layer_order[0]].name == "基础层")
-                        || legacy_specs
-                            .iter()
-                            .filter(|(name, _)| *name == profile_name)
-                            .any(|(_, old)| {
-                                layer_matches_starter_assignments(
-                                    &work.document,
-                                    &work.document.editable.graph.layers[&p.layer_order[0]],
-                                    old,
-                                )
-                            }))
+            let already_current = p.layer_order.len() == 1 && {
+                let layer = &work.document.editable.graph.layers[&p.layer_order[0]];
+                layer
+                    .control_settings
+                    .as_ref()
+                    .is_some_and(|cs| cs.joystick_mode == "mouse" && cs.active_sectors == 0)
+                    && layer_matches_starter_assignments(&work.document, layer, &assignments)
             };
+            let can_upgrade = !already_current
+                && if profile_name == LOCAL_CODEX_PROFILE_NAME {
+                    local_codex_profile_needs_starter_slot_migration(&work.document, &pid)
+                        || starter_profile_needs_hardware_mouse_migration(&work.document, &pid)
+                } else {
+                    starter_profile_needs_hardware_mouse_migration(&work.document, &pid)
+                        || (p.layer_order.len() == 1
+                            && ((is_native_oai_profile
+                                && work.document.editable.graph.layers[&p.layer_order[0]].name
+                                    == "基础层")
+                                || legacy_specs
+                                    .iter()
+                                    .filter(|(name, _)| *name == profile_name)
+                                    .any(|(_, old)| {
+                                        layer_matches_starter_assignments(
+                                            &work.document,
+                                            &work.document.editable.graph.layers[&p.layer_order[0]],
+                                            old,
+                                        )
+                                    })))
+                };
             let first_lid = p.layer_order.first().cloned();
             if !can_upgrade {
                 if profile_name == "Antigravity" {
@@ -2219,8 +2255,8 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             &pid,
             &lid,
             crate::control_settings::ControlSettings {
-                joystick_mode: "logical_sectors".into(),
-                active_sectors: 4,
+                joystick_mode: "mouse".into(),
+                active_sectors: 0,
                 encoder_hold_action_id: None,
             },
         )?;
@@ -2313,7 +2349,8 @@ fn layer_matches_starter_assignments(
     hold_ok
         && layer.lighting.is_none()
         && layer.control_settings.as_ref().is_some_and(|settings| {
-            settings.joystick_mode == "logical_sectors" && settings.active_sectors == 4
+            (settings.joystick_mode == "mouse" && settings.active_sectors == 0)
+                || (settings.joystick_mode == "logical_sectors" && settings.active_sectors == 4)
         })
         && layer
             .controls
@@ -2353,12 +2390,49 @@ pub fn local_codex_profile_needs_starter_slot_migration(
     let Some(layer) = doc.editable.graph.layers.get(&profile.layer_order[0]) else {
         return false;
     };
+    let (specs, legacy_specs) = agent_starter_specs();
+    let already_current = layer
+        .control_settings
+        .as_ref()
+        .is_some_and(|cs| cs.joystick_mode == "mouse" && cs.active_sectors == 0)
+        && specs
+            .iter()
+            .filter(|(name, _)| *name == LOCAL_CODEX_PROFILE_NAME)
+            .any(|(_, assignments)| layer_matches_starter_assignments(doc, layer, assignments));
     layer.name == "基础层"
-        && agent_starter_specs()
-            .1
+        && !already_current
+        && legacy_specs
             .iter()
             .filter(|(name, _)| *name == LOCAL_CODEX_PROFILE_NAME)
             .any(|(_, assignments)| layer_matches_starter_assignments(doc, layer, assignments))
+}
+
+pub fn starter_profile_needs_hardware_mouse_migration(
+    doc: &LocalDocumentV2,
+    profile_id: &str,
+) -> bool {
+    let Some(profile) = doc.editable.graph.profiles.get(profile_id) else {
+        return false;
+    };
+    if profile.name == "Codex" || profile.layer_order.len() != 1 {
+        return false;
+    }
+    let Some(layer) = doc.editable.graph.layers.get(&profile.layer_order[0]) else {
+        return false;
+    };
+    if !layer
+        .control_settings
+        .as_ref()
+        .is_some_and(|cs| cs.joystick_mode == "logical_sectors" && cs.active_sectors == 4)
+    {
+        return false;
+    }
+    let (specs, legacy_specs) = agent_starter_specs();
+    specs
+        .iter()
+        .chain(legacy_specs.iter())
+        .filter(|(name, _)| *name == profile.name)
+        .any(|(_, assignments)| layer_matches_starter_assignments(doc, layer, assignments))
 }
 
 fn rebind_starter_slot_action(
@@ -2566,8 +2640,8 @@ pub fn install_four_app_cockpit_preset(
         &pid,
         &lid,
         crate::control_settings::ControlSettings {
-            joystick_mode: "logical_sectors".into(),
-            active_sectors: 4,
+            joystick_mode: "mouse".into(),
+            active_sectors: 0,
             encoder_hold_action_id: None,
         },
     )?;
@@ -2837,7 +2911,7 @@ mod agent_migration_tests {
                 if customized {
                     legacy_agent_specs()[0].1.len()
                 } else {
-                    20
+                    16
                 }
             );
             if customized {

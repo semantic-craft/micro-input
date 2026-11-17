@@ -3438,6 +3438,12 @@ mod tests {
             .clone();
         let graph = &mut store.document_store.draft.document.editable.graph;
         let layer_id = graph.profiles[&local].layer_order[0].clone();
+        graph.layers.get_mut(&layer_id).unwrap().control_settings =
+            Some(mi_model::control_settings::ControlSettings {
+                joystick_mode: "logical_sectors".into(),
+                active_sectors: 4,
+                encoder_hold_action_id: None,
+            });
         let template = graph.actions.values().next().unwrap().clone();
         for binding in graph
             .layers
@@ -5644,23 +5650,13 @@ mod tests {
                 ),
                 (
                     ag_profile_id.clone(),
-                    "AG18".into(),
-                    "antigravity:model-picker-effort-right".into(),
-                ),
-                (
-                    ag_profile_id.clone(),
-                    "ENC_CLK".into(),
-                    "antigravity:model-picker-effort-left".into(),
-                ),
-                (
-                    ag_profile_id.clone(),
                     "ENC_CLK".into(),
                     "antigravity:model-picker-confirm".into(),
                 ),
                 (ag_profile_id, "ENC_CLK".into(), "antigravity:submit".into(),),
             ]
         );
-        assert_eq!(capture_transitions, vec![true, false]);
+        assert!(capture_transitions.is_empty());
     }
 
     #[test]
@@ -6148,7 +6144,7 @@ mod tests {
                 (ag_profile_id, "ENC_CLK".into(), "antigravity:search".into(),),
             ]
         );
-        assert_eq!(capture_transitions, vec![true, false]);
+        assert!(capture_transitions.is_empty());
     }
 
     #[test]
@@ -6228,7 +6224,7 @@ mod tests {
             },
         );
 
-        assert_eq!(capture_transitions, vec![true, false]);
+        assert!(capture_transitions.is_empty());
     }
 
     #[test]
@@ -6336,14 +6332,20 @@ mod tests {
                 (ag_profile_id, "ENC_CLK".into(), "antigravity:search".into()),
             ]
         );
-        assert_eq!(capture_transitions, vec![true, false]);
+        assert!(capture_transitions.is_empty());
     }
 
     #[test]
     fn six_layer_sector_press_during_search_overlay_cancels_overlay() {
         let receiver = UserCommandReceiver::bind().unwrap();
         receiver.arm().unwrap();
-        let plan = test_plan();
+        let mut plan = test_plan();
+        plan.hosts[0].actions[19] = Some(ResolvedHostAction::Shortcut {
+            key: "]".into(),
+            key_code: 30,
+            modifiers: vec!["command".into()],
+            target_bundle_id: Some("com.google.antigravity".into()),
+        });
         let ag_profile_id = plan.hosts[0].profile_id.clone();
 
         let base = Instant::now() - Duration::from_millis(500);
@@ -6446,7 +6448,7 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(capture_transitions, vec![true, false]);
+        assert!(capture_transitions.is_empty());
     }
 
     #[test]
@@ -6564,11 +6566,6 @@ mod tests {
                 (
                     ag_profile_id.clone(),
                     "ENC_CLK".into(),
-                    "antigravity:model-picker-effort-right".into(),
-                ),
-                (
-                    ag_profile_id.clone(),
-                    "ENC_CLK".into(),
                     "antigravity:model-picker-confirm".into(),
                 ),
                 (
@@ -6593,7 +6590,7 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(capture_transitions, vec![true, false]);
+        assert!(capture_transitions.is_empty());
     }
 }
 

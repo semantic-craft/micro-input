@@ -1435,7 +1435,7 @@ mod tests {
         assert_eq!(p.v070_hardware.active_layer, Some(1));
         assert_eq!(p.v070_hardware.device_name.max_length, 15);
         assert!(p.v070_hardware.pm_state.usb_host_hold);
-        assert_eq!(p.v070_hardware.mouse.move_delta, 8);
+        assert_eq!(p.v070_hardware.mouse.move_delta, 12);
         assert_eq!(p.v070_hardware.mouse.deadzone, 0.15);
 
         let before_invalid = store.projection().v070_hardware.clone();
@@ -1494,7 +1494,7 @@ mod tests {
             !s.projection().v070_hardware.busy
                 && s.projection().v070_hardware.mouse.preset == "fast"
         });
-        assert_eq!(store.projection().v070_hardware.mouse.move_delta, 14);
+        assert_eq!(store.projection().v070_hardware.mouse.move_delta, 18);
 
         let before_custom_mouse_idx = sent_methods.lock().unwrap().len();
         store
@@ -1793,6 +1793,12 @@ mod tests {
                 spawn_mock_v070_session(&store.tokio_runtime, version, sent_methods);
 
             let mut running = RunningSixLayer::isolated(session.clone(), dir.path());
+            if version == "0.6.3" {
+                running.installation.plan.codex_joystick_mode = None;
+                for host in &mut running.installation.plan.hosts {
+                    host.joystick_mode = None;
+                }
+            }
             running.set_v070_inbox(store.hardware_event_tx.clone());
             running.attach_test_vendor_session(&store.tokio_runtime, session.clone());
             store.six_layer_running = Some(running);

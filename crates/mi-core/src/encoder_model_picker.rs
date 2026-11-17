@@ -19,11 +19,11 @@ pub enum EncoderOverlayKind {
 
 impl EncoderOverlayKind {
     pub const fn captures_mouse(self) -> bool {
-        matches!(self, Self::ModelPicker)
+        false
     }
 
     pub const fn captures_sectors(self) -> bool {
-        matches!(self, Self::ModelPicker)
+        false
     }
 
     pub fn from_action(action: &ResolvedHostAction) -> Option<Self> {
@@ -751,11 +751,12 @@ mod tests {
     }
 
     #[test]
-    fn mouse_flick_accumulates_horizontal_deltas_respects_vertical_idle_and_cooldown() {
+    fn mouse_deltas_never_intercept_hardware_mouse_pointer_even_while_model_picker_active() {
         let mut picker = EncoderModelPicker::new();
         let t0 = Instant::now();
 
-        // Inactive: mouse deltas ignored.
+        assert!(!EncoderOverlayKind::ModelPicker.captures_mouse());
+        assert!(!EncoderOverlayKind::SearchConversations.captures_mouse());
         assert_eq!(picker.on_mouse_delta(40.0, 0.0, t0), None);
 
         let gen = picker.on_encoder_press(9, t0);
@@ -773,42 +774,19 @@ mod tests {
         );
 
         let mut now = t0 + Duration::from_millis(400);
-        // Sub-threshold horizontal steps accumulate into EffortRight.
-        assert_eq!(picker.on_mouse_delta(15.0, 2.0, now), None);
-        now += Duration::from_millis(16);
-        assert_eq!(
-            picker.on_mouse_delta(15.0, -2.0, now),
-            Some(ModelPickerCommand::EffortRight)
-        );
-
-        // Cooldown (220ms): immediate flick is suppressed and does not pre-charge accumulator.
-        now += Duration::from_millis(100);
-        assert_eq!(picker.on_mouse_delta(-40.0, 0.0, now), None);
-        now += Duration::from_millis(130); // 230ms since first flick >= 220ms cooldown
-        assert_eq!(picker.on_mouse_delta(-10.0, 0.0, now), None);
-        now += Duration::from_millis(16);
-        assert_eq!(
-            picker.on_mouse_delta(-20.0, 3.0, now),
-            Some(ModelPickerCommand::EffortLeft)
-        );
-
-        // Idle reset (> 180ms) clears partial accumulation.
-        now += Duration::from_millis(250);
-        assert_eq!(picker.on_mouse_delta(20.0, 0.0, now), None);
-        now += Duration::from_millis(200); // > 180ms idle
-        assert_eq!(picker.on_mouse_delta(20.0, 0.0, now), None);
-
-        // Vertical-dominant motion resets accumulator without firing.
-        now += Duration::from_millis(200);
-        assert_eq!(picker.on_mouse_delta(12.0, 25.0, now), None);
-        now += Duration::from_millis(16);
-        assert_eq!(picker.on_mouse_delta(20.0, 22.0, now), None);
+        for (dx, dy) in [(15.0, 2.0), (25.0, -2.0), (-40.0, 0.0), (50.0, 0.0)] {
+            now += Duration::from_millis(16);
+            assert_eq!(picker.on_mouse_delta(dx, dy, now), None);
+        }
     }
 
     #[test]
     fn sector_directions_idle_timeout_and_cancel_behave_deterministically() {
         let mut picker = EncoderModelPicker::new();
         let t0 = Instant::now();
+        assert!(!EncoderOverlayKind::ModelPicker.captures_sectors());
+        assert!(!EncoderOverlayKind::SearchConversations.captures_sectors());
+
         let gen = picker.on_encoder_press(5, t0);
         picker.on_hold_timer(
             gen,
@@ -830,30 +808,22 @@ mod tests {
         );
 
         let t1 = t0 + Duration::from_secs(1);
-        assert_eq!(
-            picker.on_sector_direction_while_active("AG15", t1),
-            Some(ModelPickerCommand::ModelPickerPrev)
-        );
-        assert_eq!(
-            picker.on_sector_direction_while_active("AG17", t1 + Duration::from_millis(50)),
-            Some(ModelPickerCommand::ModelPickerNext)
-        );
-        assert_eq!(
-            picker.on_sector_direction_while_active("AG18", t1 + Duration::from_millis(100)),
-            Some(ModelPickerCommand::EffortRight)
-        );
-        assert_eq!(
-            picker.on_sector_direction_while_active("AG16", t1 + Duration::from_millis(150)),
-            Some(ModelPickerCommand::EffortLeft)
-        );
-        assert_eq!(
-            picker.on_sector_direction_while_active("AG00", t1 + Duration::from_millis(200)),
-            None
-        );
+        for (idx, binding) in ["AG15", "AG17", "AG18", "AG16", "AG00"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                picker.on_sector_direction_while_active(
+                    binding,
+                    t1 + Duration::from_millis(idx as u64 * 50)
+                ),
+                None
+            );
+        }
 
         // Idle timeout (> 12s after last activity) expires Active automatically.
         let t_expired =
-            t1 + Duration::from_millis(150) + Duration::from_secs(12) + Duration::from_millis(1);
+            t0 + Duration::from_millis(350) + Duration::from_secs(12) + Duration::from_millis(1);
         assert_eq!(
             picker.on_encoder_turn(true, t_expired),
             EncoderTurnOutcome::NormalSlot
@@ -1008,7 +978,7 @@ mod tests {
             assert!(picker.is_active(t0));
             assert_eq!(
                 picker.on_mouse_delta(32.0, 0.0, t0 + Duration::from_millis(20)),
-                Some(ModelPickerCommand::EffortRight)
+                None
             );
         }
 

@@ -838,14 +838,8 @@ impl ProjectionInputs<'_> {
                 match joystick_mode {
                     Some(JoystickControlMode::Mouse) => {
                         control_name_out = crate::i18n::tr("摇杆（硬件鼠标）", locale).to_string();
-                        if slot == 19 {
-                            label = crate::i18n::tr("模型选择中：展开 / 调高模型力度", locale)
-                                .to_string();
-                            short_label = crate::i18n::tr("模型力度", locale).to_string();
-                            available = true;
-                        } else if slot == 16 {
-                            label = crate::i18n::tr("硬件鼠标指针（选模型时按右调力度）", locale)
-                                .to_string();
+                        if slot == 16 {
+                            label = crate::i18n::tr("硬件鼠标指针", locale).to_string();
                             short_label = crate::i18n::tr("鼠标指针", locale).to_string();
                             available = true;
                         } else {
@@ -856,14 +850,8 @@ impl ProjectionInputs<'_> {
                     }
                     Some(JoystickControlMode::Scroll) => {
                         control_name_out = crate::i18n::tr("摇杆（硬件滚轮）", locale).to_string();
-                        if slot == 19 {
-                            label = crate::i18n::tr("模型选择中：展开 / 调高模型力度", locale)
-                                .to_string();
-                            short_label = crate::i18n::tr("模型力度", locale).to_string();
-                            available = true;
-                        } else if slot == 16 {
-                            label = crate::i18n::tr("硬件滚轮（选模型时按右调力度）", locale)
-                                .to_string();
+                        if slot == 16 {
+                            label = crate::i18n::tr("硬件滚轮", locale).to_string();
                             short_label = crate::i18n::tr("硬件滚轮", locale).to_string();
                             available = true;
                         } else {
