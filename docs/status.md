@@ -4,8 +4,8 @@
 
 ## 当前版本与架构基线
 
-- **最新发行标签**：[v0.10.1](releases/v0.10.1.md)（`CFBundleShortVersionString = 0.10.1`；历次发行说明归档于 [releases/](releases/v0.10.1.md)）。
-- **主线演进（v0.10.1 之后）**：已合入按层混合硬件摇杆模式、`Antigravity` 顶部 6 键会话状态与摇杆左/右划开关右边栏、`Codex` / `DeepSeek Harness` 顶部 `Subagent` + `左键点击`、固件 `0.7.0-rc.16` 鼠标曲线与出厂 `0.15` 防漂移死区默认值回调，以及真实 `workbench.json` 残留槽位自动迁移。
+- **最新发行标签**：[v0.11.0](releases/v0.11.0.md)（`CFBundleShortVersionString = 0.11.0`；历次发行说明归档于 [releases/](releases/v0.11.0.md)）。
+- **主线演进（v0.11.0 基线）**：已合入按层混合硬件摇杆模式、`Antigravity` 顶部 6 键会话状态与摇杆左/右划开关右边栏、`Codex` / `DeepSeek Harness` 顶部 `Subagent` + `左键点击`、固件 `0.7.0-rc.16` 鼠标曲线与出厂 `0.15` 防漂移死区默认值回调、真实 `workbench.json` 残留槽位自动迁移，以及三阶段架构收口（生产 `qa-runner`/`mi-bridge` 隔离、`store`/`six_layer_runtime` 模块化拆解、全量 Clippy 清零、`CoreStore` `Codable` DTO 与 Swift `-strict-concurrency=complete`）。
 - **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C14`。
 
 ## 已实现与已验证能力
