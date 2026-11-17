@@ -912,6 +912,12 @@ impl HostOsDriver for Driver {
     fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
         self.controls.send_model_picker_key(adapter, key_code)
     }
+    fn open_side_panel(&self, adapter: &str) -> Result<(), String> {
+        self.controls.set_side_panel_open(adapter, true)
+    }
+    fn close_side_panel(&self, adapter: &str) -> Result<(), String> {
+        self.controls.set_side_panel_open(adapter, false)
+    }
 }
 
 #[test]
@@ -3457,4 +3463,157 @@ fn subagent_picker_opens_steps_and_confirms_across_antigravity_dsh_and_codex() {
     assert!(dsh_model
         .events()
         .contains(&"press:选择模型，当前 DeepSeek-V4.1-Flash，推理等级 High".to_string()));
+}
+
+#[test]
+fn antigravity_side_panel_open_and_close_are_directional_idempotent_and_verified() {
+    let ag = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = ag.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls.push(ManagedControl {
+            id: 42,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+        state.after_press = Some(|fixture, _label, id| {
+            if let Some(ctrl) = fixture.window.controls.iter_mut().find(|c| c.id == id) {
+                ctrl.expanded = Some(!ctrl.expanded.unwrap_or(false));
+            }
+        });
+    }
+    let exec = LiveHostActionExecutor::new(Driver {
+        controls: ag.controls(),
+        trusted: true,
+    });
+    let open_cmd = ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".into(),
+        command: "open-side-panel".into(),
+    };
+    let close_cmd = ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".into(),
+        command: "close-side-panel".into(),
+    };
+
+    let press_events = || -> Vec<String> {
+        ag.events()
+            .into_iter()
+            .filter(|e| e.starts_with("press:"))
+            .collect()
+    };
+
+    // 1. Closing when already closed is an idempotent no-op (zero presses).
+    let r_close_noop = exec.execute("antigravity", "AG18", &close_cmd);
+    assert_eq!(r_close_noop.outcome, "executed", "{r_close_noop:?}");
+    assert!(press_events().is_empty());
+
+    // 2. Opening when closed presses once and confirms expanded=true.
+    let r_open = exec.execute("antigravity", "AG16", &open_cmd);
+    assert_eq!(r_open.outcome, "executed", "{r_open:?}");
+    assert_eq!(press_events(), vec!["press:Toggle Side Panel".to_string()]);
+
+    // 3. Opening again when already open is an idempotent no-op (still 1 press total).
+    let r_open_noop = exec.execute("antigravity", "AG16", &open_cmd);
+    assert_eq!(r_open_noop.outcome, "executed", "{r_open_noop:?}");
+    assert_eq!(press_events().len(), 1);
+
+    // 4. Closing when open presses once and confirms expanded=false.
+    let r_close = exec.execute("antigravity", "AG18", &close_cmd);
+    assert_eq!(r_close.outcome, "executed", "{r_close:?}");
+    assert_eq!(press_events().len(), 2);
+
+    // 5. Unknown expanded state (None) fails closed with zero presses.
+    let ag_unknown = Provider::with_target("com.google.antigravity", "Record voice memo");
+    ag_unknown
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 43,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: None,
+        });
+    let unknown_exec = LiveHostActionExecutor::new(Driver {
+        controls: ag_unknown.controls(),
+        trusted: true,
+    });
+    let r_unknown = unknown_exec.execute("antigravity", "AG16", &open_cmd);
+    assert_eq!(r_unknown.outcome, "blocked", "{r_unknown:?}");
+    assert_eq!(r_unknown.detail, "blocked:side_panel_state_unknown");
+    assert!(!ag_unknown.events().iter().any(|e| e.starts_with("press:")));
+
+    // 6. Stuck expanded=false after press reports unconfirmed failure.
+    let ag_stuck = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = ag_stuck.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls.push(ManagedControl {
+            id: 44,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+    }
+    let stuck_exec = LiveHostActionExecutor::new(Driver {
+        controls: ManagedAxControls::with_readback_timeout(
+            ag_stuck.clone(),
+            std::time::Duration::from_millis(30),
+        ),
+        trusted: true,
+    });
+    let r_stuck = stuck_exec.execute("antigravity", "AG16", &open_cmd);
+    assert_eq!(r_stuck.outcome, "failed", "{r_stuck:?}");
+    assert_eq!(r_stuck.detail, "unconfirmed:side_panel_open");
+
+    // 7. Transient ax_control_removed during readback falls back to window read and confirms.
+    let ag_replaced = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = ag_replaced.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls.push(ManagedControl {
+            id: 45,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+        state.after_press = Some(|fixture, _label, id| {
+            fixture.window.controls.retain(|c| c.id != id);
+            fixture.window.controls.push(ManagedControl {
+                id: 145,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            });
+        });
+    }
+    let replaced_exec = LiveHostActionExecutor::new(Driver {
+        controls: ag_replaced.controls(),
+        trusted: true,
+    });
+    let r_replaced = replaced_exec.execute("antigravity", "AG16", &open_cmd);
+    assert_eq!(r_replaced.outcome, "executed", "{r_replaced:?}");
 }

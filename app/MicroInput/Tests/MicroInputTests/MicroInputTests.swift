@@ -449,7 +449,7 @@ final class MicroInputTests: XCTestCase {
             XCTAssertEqual(store.inspector.selectedLogicalSlot, expectedSlot)
         }
 
-        for (dirName, expectedSlot) in [("North", 16), ("South", 17), ("West", 18), ("East", 19)] {
+        for (dirName, expectedSlot) in [("North", 16), ("South", 18), ("West", 17), ("East", 19)] {
             store.dispatch("canvas", ["SelectJoystickDirection": dirName])
             XCTAssertEqual(store.canvas.selectedSurface, "Joystick")
             XCTAssertEqual(store.canvas.selectedJoystickDirection, dirName)
@@ -908,9 +908,9 @@ final class MicroInputTests: XCTestCase {
         store.dispatch("sidebar", ["SelectProfile": agRow.profileId])
         store.dispatch("canvas", ["SelectSurface": "Joystick"])
 
-        XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "mouse")
+        XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "logical_sectors")
         XCTAssertFalse(store.inspector.editableInspector?.joystickModeSummary.isEmpty ?? true)
-        XCTAssertEqual(store.canvas.joystickModeLabel, "硬件指针")
+        XCTAssertEqual(store.canvas.joystickModeLabel, "8向摇杆")
 
         let renderHost = {
             let view = CreatorMicroInlineInspectorView(

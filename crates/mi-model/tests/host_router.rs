@@ -202,25 +202,15 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     // Released events never trigger host actions
     assert!(resolve_host_action(&draft.document, Some(ag_pid), "AG00", false).is_none());
 
-    // AG00 maps to logical-0 (Antigravity: subagent picker), AG01 maps to logical-1 (left click)
-    let resolved_0 = resolve_host_action(&draft.document, Some(ag_pid), "AG00", true).unwrap();
-    assert_eq!(
-        resolved_0,
-        ResolvedHostAction::AgentCommand {
-            adapter: "antigravity".into(),
-            command: "subagent".into(),
-        }
-    );
-
-    assert_eq!(
-        resolve_host_action(&draft.document, Some(ag_pid), "AG01", true).unwrap(),
-        ResolvedHostAction::AgentCommand {
-            adapter: "host".into(),
-            command: "mouse-click:left".into()
-        }
-    );
-    for binding in ["AG02", "AG03", "AG04", "AG05"] {
-        assert!(resolve_host_action(&draft.document, Some(ag_pid), binding, true).is_none());
+    // AG00..AG05 map to logical-0..logical-5 (Antigravity session status slots)
+    for slot in 0..6u32 {
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(ag_pid), &format!("AG{slot:02}"), true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
     }
     for (binding, command) in [
         ("AG06", "live-voice"),
@@ -235,6 +225,10 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         ("AG14", "model-picker-next"),
         ("ENC_CW", "model-picker-next"),
         ("ENC_CLK", "search"),
+        ("AG15", "scroll-up"),
+        ("AG16", "open-side-panel"),
+        ("AG17", "scroll-down"),
+        ("AG18", "close-side-panel"),
     ] {
         assert_eq!(
             resolve_host_action(&draft.document, Some(ag_pid), binding, true),
@@ -252,9 +246,6 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             command: "search".into(),
         })
     );
-    for binding in ["AG15", "AG16", "AG17", "AG18"] {
-        assert!(resolve_host_action(&draft.document, Some(ag_pid), binding, true).is_none());
-    }
     for binding in ["AG10", "AG15"] {
         assert!(resolve_host_action(&draft.document, Some(dsh_pid), binding, true).is_none());
     }

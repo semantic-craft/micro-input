@@ -602,6 +602,19 @@ fn spawn_mock_device(
     Arc<DeviceSession>,
     tokio::task::JoinHandle<(Vec<u8>, usize)>,
 ) {
+    spawn_mock_device_with_version(initial, commit_writes, post_commit_layer, "0.6.3")
+}
+
+fn spawn_mock_device_with_version(
+    initial: Vec<u8>,
+    commit_writes: bool,
+    post_commit_layer: u64,
+    version: &str,
+) -> (
+    Arc<DeviceSession>,
+    tokio::task::JoinHandle<(Vec<u8>, usize)>,
+) {
+    let version = version.to_string();
     let (link, mut requests) = MockLink::new();
     let inject = link.inject.clone();
     let session = DeviceSession::new(
@@ -630,7 +643,7 @@ fn spawn_mock_device(
                 let result = match request["method"].as_str().unwrap() {
                     "device.status" => {
                         let layer = if commits > 0 { post_commit_layer } else { 1 };
-                        json!({"version":"0.6.3","profile_index":active,"layer_index":layer})
+                        json!({"version": version, "profile_index":active,"layer_index":layer})
                     }
                     "fs.list" => json!([
                         metadata("keymap.json", &keymap),
@@ -788,4 +801,52 @@ async fn three_layer_backup_restore_roundtrip_idempotence_and_mismatch_rejection
     let (mismatch_keymap, mismatch_commits) = mismatch_worker.await.unwrap();
     assert_eq!(mismatch_commits, 0);
     assert_eq!(mismatch_keymap, tampered);
+}
+
+#[tokio::test]
+async fn prepare_six_layer_write_with_layer_modes_compiles_mixed_radial_and_mouse_on_v070() {
+    const SIX_SOURCE: &[u8] =
+        include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+    let dir = tempfile::tempdir().unwrap();
+    let (session, worker) =
+        spawn_mock_device_with_version(SIX_SOURCE.to_vec(), true, 1, "0.7.0-rc.16");
+    session.read_identity_info().await.unwrap();
+    let layer_modes = [
+        Some("MOUSE"),
+        None,
+        Some("MOUSE"),
+        Some("MOUSE"),
+        Some("MOUSE"),
+        Some("MOUSE"),
+    ];
+    let prepared = session
+        .prepare_six_layer_write_with_layer_modes(dir.path(), Some(layer_modes))
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_slice(&prepared.candidate).unwrap();
+    let layers = parsed["profiles"][prepared.profile_index as usize]["layers"]
+        .as_array()
+        .unwrap();
+    assert_eq!(layers[0]["layout"]["joystick"], json!({"type": "MOUSE"}));
+    assert_eq!(layers[1]["layout"]["joystick"]["type"], json!("RADIAL"));
+    assert_eq!(layers[2]["layout"]["joystick"], json!({"type": "MOUSE"}));
+    session.shutdown().await;
+    drop(session);
+    let _ = worker.await.unwrap();
+
+    // 0.6.3 must fail closed rather than silently downgrading requested MOUSE layers.
+    let dir_063 = tempfile::tempdir().unwrap();
+    let (session_063, worker_063) =
+        spawn_mock_device_with_version(SIX_SOURCE.to_vec(), true, 1, "0.6.3");
+    session_063.read_identity_info().await.unwrap();
+    let err = session_063
+        .prepare_six_layer_write_with_layer_modes(dir_063.path(), Some(layer_modes))
+        .await
+        .err()
+        .expect("0.6.3 must reject MOUSE layer mode")
+        .to_string();
+    assert!(err.contains("0.7.0-rc.16"), "{err}");
+    session_063.shutdown().await;
+    drop(session_063);
+    let _ = worker_063.await.unwrap();
 }

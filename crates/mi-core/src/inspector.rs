@@ -656,7 +656,11 @@ impl CodexKeycapId {
             }
             if a.id.contains("split")
                 || a.id.contains("side-question")
-                || cmd == Some("side-question")
+                || a.id.contains("side-panel")
+                || matches!(
+                    cmd,
+                    Some("side-question" | "open-side-panel" | "close-side-panel")
+                )
             {
                 return Self::Split;
             }

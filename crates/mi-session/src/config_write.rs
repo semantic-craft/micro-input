@@ -442,21 +442,39 @@ impl DeviceSession {
         &self,
         backup_parent: &Path,
     ) -> Result<PreparedSixLayerWrite, SessionError> {
+        self.prepare_six_layer_write_with_layer_modes(backup_parent, None)
+            .await
+    }
+
+    pub async fn prepare_six_layer_write_with_layer_modes(
+        &self,
+        backup_parent: &Path,
+        layer_joystick_modes: Option<[Option<&str>; 6]>,
+    ) -> Result<PreparedSixLayerWrite, SessionError> {
         self.guarded(async {
             let mut queue = self.queue.lock().await;
             let before = self.three_layer_position(&mut queue).await?;
             let original = self.read_files_locked(&mut queue).await?;
             let fw = self.observed_firmware_version();
-            let default_joystick_mode = fw
-                .as_deref()
-                .filter(|v| mi_model::supports_v070_mouse_tokens(v))
-                .map(|_| "mouse");
-            let compiled = mi_model::apply::compile_six_layer_profile_for_firmware(
-                &original.keymap.bytes,
-                smart_bytes(&original),
-                fw.as_deref(),
-                default_joystick_mode,
-            )
+            let compiled = if let Some(layer_modes) = layer_joystick_modes {
+                mi_model::apply::compile_six_layer_profile_for_firmware_layers(
+                    &original.keymap.bytes,
+                    smart_bytes(&original),
+                    fw.as_deref(),
+                    layer_modes,
+                )
+            } else {
+                let default_joystick_mode = fw
+                    .as_deref()
+                    .filter(|v| mi_model::supports_v070_mouse_tokens(v))
+                    .map(|_| "mouse");
+                mi_model::apply::compile_six_layer_profile_for_firmware(
+                    &original.keymap.bytes,
+                    smart_bytes(&original),
+                    fw.as_deref(),
+                    default_joystick_mode,
+                )
+            }
             .map_err(SessionError::Config)?;
             if self.three_layer_position(&mut queue).await? != before {
                 return Err(SessionError::Config("准备期间设备切换了方案或层".into()));

@@ -1053,6 +1053,75 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         focus_in_window(&mut *provider, &window.identity, self.readback_timeout).map(|_| ())
     }
 
+    pub fn set_side_panel_open(&self, adapter: &str, open: bool) -> Result<(), String> {
+        if managed_adapter(adapter)? != DictationAdapter::Antigravity {
+            return Err(blocked("unsupported_side_panel_adapter"));
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window =
+            self.capture_full_window_for_key(&mut *provider, DictationAdapter::Antigravity)?;
+        let btn = window
+            .controls
+            .iter()
+            .find(|c| c.role == "AXButton" && c.label.trim() == "Toggle Side Panel")
+            .ok_or_else(|| blocked("side_panel_control_not_found"))?;
+        if !btn.enabled || !btn.pressable {
+            return Err(blocked("side_panel_unavailable"));
+        }
+        let btn_id = btn.id;
+        let current_open = btn
+            .expanded
+            .ok_or_else(|| blocked("side_panel_state_unknown"))?;
+        if current_open == open {
+            return Ok(());
+        }
+        provider.press(&window.identity, btn_id)?;
+        let timeout = if self.readback_timeout.is_zero() {
+            Duration::from_millis(900)
+        } else {
+            self.readback_timeout
+        };
+        let deadline = Instant::now() + timeout;
+        let is_transient_removal = |err: &str| {
+            matches!(
+                err,
+                "blocked:ax_control_removed" | "blocked:ax_target_missing"
+            )
+        };
+        loop {
+            let observed_expanded = match provider.read_control(&window.identity, btn_id) {
+                Ok(ctrl) => ctrl.expanded,
+                Err(err) if is_transient_removal(&err) => {
+                    let refreshed = read(&mut *provider, &window.identity)
+                        .map_err(|e| format!("unconfirmed:{e}"))?;
+                    refreshed
+                        .controls
+                        .iter()
+                        .find(|c| c.role == "AXButton" && c.label.trim() == "Toggle Side Panel")
+                        .and_then(|c| c.expanded)
+                }
+                Err(error) => return Err(format!("unconfirmed:{error}")),
+            };
+            if observed_expanded == Some(open) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "unconfirmed:{}",
+                    if open {
+                        "side_panel_open"
+                    } else {
+                        "side_panel_close"
+                    }
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+
     pub fn open_side_question(&self, adapter: &str) -> Result<(), String> {
         if managed_adapter(adapter)? != DictationAdapter::Antigravity {
             return Err(blocked("unsupported_side_question_adapter"));

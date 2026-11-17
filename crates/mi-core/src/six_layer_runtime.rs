@@ -158,6 +158,42 @@ impl SavedSixLayerState {
                     changed = true;
                 }
             }
+            let doc_has_session_top_six = (0..6usize).all(|slot| {
+                let logical = format!("logical-{slot}");
+                is_action_cmd(
+                    slot_action(&logical),
+                    &format!("slot-open-{slot}"),
+                    &format!("slot-open:{slot}"),
+                )
+            });
+            if host.adapter == "antigravity" && doc_has_session_top_six && host.actions.len() >= 6 {
+                let b0 = host.actions[0].as_ref();
+                let b1 = host.actions[1].as_ref();
+                let baked_v2_top_six = matches!(
+                    b0,
+                    Some(ResolvedHostAction::AgentCommand { command, .. }) if command == "subagent"
+                ) && matches!(
+                    b1,
+                    Some(ResolvedHostAction::AgentCommand { adapter, command })
+                        if adapter == "host" && command == "mouse-click:left"
+                ) && host.actions[2..6].iter().all(Option::is_none);
+                let baked_legacy_starter_top_six =
+                    matches!(b0, Some(ResolvedHostAction::OpenApp { .. }))
+                        && matches!(
+                            b1,
+                            Some(ResolvedHostAction::AgentCommand { command, .. })
+                                if command == "focus-input"
+                        );
+                if baked_v2_top_six || baked_legacy_starter_top_six {
+                    for slot in 0..6usize {
+                        host.actions[slot] = Some(ResolvedHostAction::AgentCommand {
+                            adapter: "four-app".into(),
+                            command: format!("slot-open:{slot}"),
+                        });
+                    }
+                    changed = true;
+                }
+            }
             if layer
                 .control_settings
                 .as_ref()
@@ -172,6 +208,59 @@ impl SavedSixLayerState {
                         host.actions[slot] = None;
                     }
                     changed = true;
+                }
+            } else if host.adapter == "antigravity"
+                && layer.control_settings.as_ref().is_some_and(|cs| {
+                    cs.joystick_mode == "logical_sectors" && cs.active_sectors == 4
+                })
+            {
+                let d16 = slot_action("logical-16");
+                let d17 = slot_action("logical-17");
+                let d18 = slot_action("logical-18");
+                let d19 = slot_action("logical-19");
+                let doc_has_side_panel_joystick =
+                    is_action_cmd(d16, "desktop-scroll-up", "scroll-up")
+                        && is_action_cmd(d17, "ag-open-side-panel", "open-side-panel")
+                        && is_action_cmd(d18, "desktop-scroll-down", "scroll-down")
+                        && is_action_cmd(d19, "ag-close-side-panel", "close-side-panel");
+                if doc_has_side_panel_joystick && host.actions.len() >= 20 {
+                    let baked_mouse_joystick = host.joystick_mode.as_deref() == Some("MOUSE")
+                        && host.actions[16..20].iter().all(Option::is_none);
+                    let baked_legacy_nav_joystick = matches!(
+                        host.actions[16].as_ref(),
+                        Some(ResolvedHostAction::AgentCommand { command, .. })
+                            if command == "scroll-up"
+                    ) && matches!(
+                        host.actions[17].as_ref(),
+                        Some(ResolvedHostAction::Shortcut { key, .. }) if key == "["
+                    ) && matches!(
+                        host.actions[18].as_ref(),
+                        Some(ResolvedHostAction::AgentCommand { command, .. })
+                            if command == "scroll-down"
+                    ) && matches!(
+                        host.actions[19].as_ref(),
+                        Some(ResolvedHostAction::Shortcut { key, .. }) if key == "]"
+                    );
+                    if baked_mouse_joystick || baked_legacy_nav_joystick {
+                        host.joystick_mode = None;
+                        host.actions[16] = Some(ResolvedHostAction::AgentCommand {
+                            adapter: "antigravity".into(),
+                            command: "scroll-up".into(),
+                        });
+                        host.actions[17] = Some(ResolvedHostAction::AgentCommand {
+                            adapter: "antigravity".into(),
+                            command: "open-side-panel".into(),
+                        });
+                        host.actions[18] = Some(ResolvedHostAction::AgentCommand {
+                            adapter: "antigravity".into(),
+                            command: "scroll-down".into(),
+                        });
+                        host.actions[19] = Some(ResolvedHostAction::AgentCommand {
+                            adapter: "antigravity".into(),
+                            command: "close-side-panel".into(),
+                        });
+                        changed = true;
+                    }
                 }
             }
 
@@ -2928,9 +3017,15 @@ pub async fn apply(
     let receiver = Arc::new(UserCommandReceiver::bind_default().map_err(|e| e.to_string())?);
     let patch = prepare_apply_karabiner_patch(&saved, &target, &receiver, plan.bottom_row_layout)?;
     let (session, candidate) = connect(transport.as_ref(), &target)?;
+    let layer_modes: [Option<String>; 6] = plan
+        .board_layer_joystick_modes()
+        .map(|mode| mode.map(str::to_owned));
     let outcome: Result<RunningSixLayer, String> = async {
         let prepared = session
-            .prepare_six_layer_write(document_dir)
+            .prepare_six_layer_write_with_layer_modes(
+                document_dir,
+                Some(layer_modes.each_ref().map(|mode| mode.as_deref())),
+            )
             .await
             .map_err(|e| e.to_string())?;
         let candidate_bytes = prepared.candidate.clone();
@@ -3255,6 +3350,15 @@ pub async fn resume(
             return Err(error);
         }
     };
+    if !mi_model::apply::planned_keymap_matches_plan_joystick_modes(
+        &expected,
+        installation.profile_index,
+        &installation.plan,
+        session.observed_firmware_version().as_deref(),
+    ) {
+        session.shutdown().await;
+        return Err("旧版六层布局需要显式应用；重连未写设备".into());
+    }
     let outcome: Result<RunningSixLayer, String> = async {
         let receiver = Arc::new(UserCommandReceiver::bind_default().map_err(|e| e.to_string())?);
         let rule = karabiner::rules(&target, &receiver, installation.plan.bottom_row_layout)?;
@@ -4121,7 +4225,7 @@ mod tests {
         policy.set(true, true, now);
         let mut pending = std::collections::VecDeque::from([
             mi_transport::Activation {
-                control: 0,
+                control: 7,
                 layer_override: None,
                 released: false,
                 generation: receiver.generation().into(),
@@ -4129,7 +4233,7 @@ mod tests {
                 received_at: now,
             },
             mi_transport::Activation {
-                control: 0,
+                control: 7,
                 layer_override: None,
                 released: false,
                 generation: receiver.generation().into(),
@@ -4202,6 +4306,189 @@ mod tests {
         )
         .unwrap();
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn saved_state_migrates_antigravity_v160_top_six_and_mouse_joystick_to_session_and_side_panel()
+    {
+        let mut draft = mi_model::draft::Draft::default();
+        mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
+        let ag_pid = draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == "Antigravity")
+            .unwrap()
+            .0
+            .clone();
+        let desired = BoardLayerPlan::recommended(
+            draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == "Codex")
+                .unwrap()
+                .0
+                .clone(),
+            ag_pid.clone(),
+            draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == "DeepSeek Coder (DSH)")
+                .unwrap()
+                .0
+                .clone(),
+        );
+        let mut plan = mi_model::apply::AppliedSixLayerPlan::compile(
+            &desired,
+            &draft.document,
+            mi_model::host_router::BottomRowLayout::Split,
+            true,
+        )
+        .unwrap();
+        // Simulate saved #160 Antigravity plan (subagent + mouse-click:left + blanks + MOUSE joystick)
+        // while the live document has already migrated to Antigravity session top-6 + logical_sectors.
+        let ag_host = plan
+            .hosts
+            .iter_mut()
+            .find(|h| h.profile_id == ag_pid)
+            .unwrap();
+        ag_host.actions[0] = Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "subagent".into(),
+        });
+        ag_host.actions[1] = Some(ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "mouse-click:left".into(),
+        });
+        for slot in 2..6 {
+            ag_host.actions[slot] = None;
+        }
+        ag_host.joystick_mode = Some("MOUSE".into());
+        for slot in 16..20 {
+            ag_host.actions[slot] = None;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut saved = SavedSixLayerState {
+            version: 3,
+            legacy_native_paused_confirmation: None,
+            installation: Some(Installation {
+                status: InstallationStatus::Applied,
+                target: TargetKeyboard {
+                    vendor_id: 0x303a,
+                    product_id: 0x8298,
+                    location_id: 1,
+                    usb_parent: 1,
+                    vendor_path: "synthetic".into(),
+                },
+                profile_index: 0,
+                backup: dir.path().join("backup"),
+                config: ConfigPatch {
+                    path: dir.path().join("karabiner.json"),
+                    original: vec![],
+                    installed: vec![],
+                    profile_name: "synthetic".into(),
+                    original_device: None,
+                    installed_device: serde_json::Value::Null,
+                },
+                plan,
+            }),
+        };
+
+        assert!(saved.migrate_saved_encoder_defaults(&draft.document));
+        // Second call must be idempotent.
+        assert!(!saved.migrate_saved_encoder_defaults(&draft.document));
+
+        let migrated_ag = saved
+            .installation
+            .as_ref()
+            .unwrap()
+            .plan
+            .hosts
+            .iter()
+            .find(|h| h.profile_id == ag_pid)
+            .unwrap();
+        for slot in 0..6 {
+            assert_eq!(
+                migrated_ag.actions[slot],
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "four-app".into(),
+                    command: format!("slot-open:{slot}"),
+                })
+            );
+        }
+        assert_eq!(migrated_ag.joystick_mode, None);
+        assert_eq!(
+            migrated_ag.actions[16],
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "scroll-up".into(),
+            })
+        );
+        assert_eq!(
+            migrated_ag.actions[17],
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "open-side-panel".into(),
+            })
+        );
+        assert_eq!(
+            migrated_ag.actions[18],
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "scroll-down".into(),
+            })
+        );
+        assert_eq!(
+            migrated_ag.actions[19],
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "close-side-panel".into(),
+            })
+        );
+
+        const SIX_SOURCE: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+        const SMART: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
+        let migrated_plan = &saved.installation.as_ref().unwrap().plan;
+        let old_all_mouse = mi_model::apply::compile_six_layer_profile_for_firmware(
+            SIX_SOURCE,
+            Some(SMART),
+            Some("0.7.0-rc.16"),
+            Some("mouse"),
+        )
+        .unwrap();
+        assert!(
+            !mi_model::apply::planned_keymap_matches_plan_joystick_modes(
+                &old_all_mouse.keymap,
+                old_all_mouse.profile_index,
+                migrated_plan,
+                Some("0.7.0-rc.16"),
+            ),
+            "old all-MOUSE keymap must fail plan mode match so resume requires explicit apply"
+        );
+        let recompiled = mi_model::apply::compile_six_layer_profile_for_firmware_layers(
+            &old_all_mouse.keymap,
+            Some(SMART),
+            Some("0.7.0-rc.16"),
+            migrated_plan.board_layer_joystick_modes(),
+        )
+        .unwrap();
+        assert!(mi_model::apply::planned_keymap_matches_plan_joystick_modes(
+            &recompiled.keymap,
+            recompiled.profile_index,
+            migrated_plan,
+            Some("0.7.0-rc.16"),
+        ));
     }
 
     #[test]
@@ -5605,11 +5892,13 @@ mod tests {
     ) {
         let receiver = UserCommandReceiver::bind().unwrap();
         let mut plan = test_plan();
-        // Configure a normal short-press action on L2 ENC_CLK (slot 15) to prove hold never leaks short-press.
+        // Configure a normal short-press action on L2 ENC_CLK (slot 15) to prove hold never leaks short-press,
+        // and leave AG18 (slot 19) unassigned so this test isolates captures_sectors == false vs assigned controls.
         plan.hosts[0].actions[15] = Some(ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
             command: "submit".into(),
         });
+        plan.hosts[0].actions[19] = None;
         plan.hosts[0].encoder_hold_action = Some(ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
             command: "model-picker-open".into(),

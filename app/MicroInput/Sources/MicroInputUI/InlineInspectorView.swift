@@ -188,8 +188,8 @@ struct CreatorMicroInlineInspectorView: View {
                 case 14: return "KV_OAI_ENC_CW / AG14"
                 case 15: return "KV_OAI_ENC_CLK / ENC_CLK"
                 case 16: return "KV_OAI_JOY_N / AG15"
-                case 17: return "KV_OAI_JOY_S / AG17"
-                case 18: return "KV_OAI_JOY_W / AG16"
+                case 17: return "KV_OAI_JOY_W / AG16"
+                case 18: return "KV_OAI_JOY_S / AG17"
                 case 19: return "KV_OAI_JOY_E / AG18"
                 default: return "KV_OAI"
                 }
