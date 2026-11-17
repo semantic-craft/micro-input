@@ -35,9 +35,9 @@ Micro Input 一方面在 macOS 上完整接管日常配置、通用快捷键映�
 
 #### 专为 Antigravity 优化的物理工作流
 
-- **开箱即用的 Antigravity 全键位映射。** 默认物理布局覆盖 Antigravity 全部高频操作，包含唤起并聚焦 `com.google.antigravity`、聚焦当前输入框、新建会话、选择或新建项目、项目工作区快切、呼出模型列表、开关 Gemini Live 实时语音、打开内置浏览器、快速向右分栏、按住说话与先停听写再发送消息。
+- **开箱即用的 Antigravity 全键位映射。** 顶部 6 键（`AG00–AG05`）对应会话状态槽位与绿/蓝逐键状态灯；下排 7 键（`AG06–AG12`）预置为 Gemini Live 实时语音、聚焦当前输入框、打开内置浏览器、打开 Side Question、在项目中新建会话、按住说话与先停听写再发送消息；右上角摇杆采用四向扇区（上/下滚动对话、左划打开右边栏、右划关闭右边栏）。
 - **物理键帽同步真实未读状态。** 顶部状态键按上述过滤规则只跟踪顶层主会话，运行中呼吸绿光，超过 15 分钟仍保留未读海洋蓝状态灯，直到你在前台窗口实际打开对应 `/c/<cid>` 会话后自动熄灯，单按槽位即通过侧栏直达。
-- **围绕语音与选模型重构的硬件操控。** 直接旋转旋钮即可在 Antigravity 内原位展开并切换模型与推理档位，按下或长按旋钮直接搜索会话，无需先聚焦输入框或抬手点选菜单。底行中键合并为 2U 宽键后适合连续口述代码需求，并由底层防抖确保松开最后一侧微动才停录，也可随时拆回两颗 1U 按键分别承担新建会话与按住说话。
+- **围绕语音与选模型重构的硬件操控。** 直接旋转旋钮即可在 Antigravity 内原位展开并切换模型与推理档位，按下或长按旋钮直接搜索会话（`Cmd+K`），无需先聚焦输入框或抬手点选菜单。底行中键合并为 2U 宽键后适合连续口述代码需求，并由底层防抖确保松开最后一侧微动才停录，也可随时拆回两颗 1U 按键分别承担新建会话与按住说话。
 - **跟手且零侵入的辅助功能执行。** 所有 Antigravity 集成均基于可观测界面与辅助功能实现，不向宿主应用打 `.patch` 补丁，并在 Antigravity 2.31.0 下把 release 构建聚焦输入框中位耗时压至 284.3 ms，让单键切换窗口和输入几乎感受不到等待。
 
 #### 超越内置插件的可自定义 Codex 交互
@@ -56,7 +56,7 @@ Micro Input 一方面在 macOS 上完整接管日常配置、通用快捷键映�
 除了补足通用键位工具在多 Agent 场景上的短板，项目从一开始确立了三条工程边界。
 
 - **原生链路与最小接口。** 协议分帧、配置模型、本地文档、设备会话与 macOS 宿主执行全部收拢在 7 个核心 Rust crate 中，分别为 `mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos` 和 `mi-core`。`crates/mi-ffi` 通过 9 个 `extern "C"` 导出函数驱动由 13 个 Swift 源文件构成的原生长驻界面。
-- **把未知和边界写到台面上。** 未穷尽的固件行为和待实机验证项全部登记在 [UNKNOWNS](docs/spec/UNKNOWNS.md)。`scripts/check-boundaries.py` 在每次检查时强制核验 `R-C01` 至 `R-C12` 静态门禁，确保生产只读退出路径不被绕过，合成测试通过绝不冒充实体按键通过。
+- **把未知和边界写到台面上。** 未穷尽的固件行为和待实机验证项全部登记在 [UNKNOWNS](docs/spec/UNKNOWNS.md)。`scripts/check-boundaries.py` 在每次检查时强制核验 `R-C01` 至 `R-C14` 静态门禁，确保生产只读退出路径不被绕过，合成测试通过绝不冒充实体按键通过。
 - **宁可拒绝写入，绝不静默毁坏配置。** 设备读取、本地草稿、基线快照与真实写入严格分离。配置应用和固件刷写前必须保存完整原字节备份与 `fsync` 操作记录，写入后逐字节读回核对一致才标记完成。
 
 ### 结合同类项目的工程取舍
@@ -79,7 +79,7 @@ Micro Input 针对每个关键子系统吸收了同类开源项目的成熟结�
 很多桌面配置工具把小键盘简化成一排普通快捷键。Micro Input 通过 macOS 独占 Vendor HID 接口连接 `303A:8298` 设备，使用 267 字节编号报告 `0x06` 与通道 `0x02` 配合 Karabiner 去重，把机械轴、旋钮、摇杆、底排微动与状态灯的物理特性发挥到实用状态。
 
 - **旋钮的多手势与模型选择器。** 除常规按键映射外，`encoder_model_picker.rs` 实现了完整的多阶段手势状态机。在桌面 Agent 方案下，直接左右旋转旋钮即可不抢输入框焦点原位展开模型列表并切换模型，随后水平轻扫鼠标或左右拨动摇杆调节推理力度，短按旋钮确认选择；无活跃弹层时无论短按或长按旋钮均统一打开会话搜索（`Cmd+K`）并进入旋钮选会话；按住旋钮同时旋转触发快速滚动，闲置 12 秒自动退出。工作台内建 6 套旋钮与摇杆组合预设，覆盖模型选择、Working 与未读会话轮询、双滚轮、对话滚动、推理档位和硬件鼠标模式。
-- **摇杆双模运行。** 在软件模式中，摇杆驱动不抢焦点的 8 向极坐标「轮盘菜单」，必须先回中再拨动选区，支持旋钮按下确认或摇杆回弹确认，慢速回中则取消。升级至官方 `0.7.0-rc.16` 预发布固件后，摇杆可切入固件原生 `MOUSE` 与 `SCROLL` 模式，提供 `Precise`、`Slow`、`Standard`、`Fast` 四档预设、13 项 `mouse.config` 底层曲线参数、摇杆死区调校与跨主机脱机生效的 `MS_*` HID 鼠标键码。
+- **摇杆按层混合运行。** 在软件模式中，摇杆驱动不抢焦点的 8 向极坐标「轮盘菜单」，必须先回中再拨动选区，支持旋钮按下确认或摇杆回弹确认，慢速回中则取消。升级至官方 `0.7.0-rc.16` 预发布固件后，六层方案按层分配硬件摇杆模式：`Codex`（第 1 层）与 `Deepseek Harness`（第 3 层）默认采用原生高响应 `MOUSE` 模式（支持 `Precise`、`Slow`、`Standard`、`Fast` 四档预设、13 项 `mouse.config` 曲线参数、默认 `0.15` 防漂移死区调校与脱机 `MS_*` 鼠标键码），而 `Antigravity`（第 2 层）默认保持四向 `RADIAL` 扇区用于对话滚动与右边栏开关。
 - **底排双微动自由切换 1U+1U 与 2U 宽键。** 针对底行左中两个微动开关 `AG10` 与 `AG11`，主机偏好支持随时在拆成两个 1U 按键与合并为 2U 宽键之间切换。合并模式下通过 `WideKeyMerger` 对双微动按位掩码去重，直到最后一个微动松开才结束按住手势，避免并排开关触发微差导致的误松手。
 - **六层物理共存与逐键状态灯。** 第 1 层完整保留 20 个控制位的 `Codex · Micro Input` 本机控制，同时通过 `SharedVendorBridge` 将第 2、3 层顶部按键映射为 `KV_OAI_AG06` 至 `KV_OAI_AG17` 专属通道。这些机械键帽直接作为 AI 会话状态指示灯使用，运行中呼吸绿光，完成待查看常亮海洋蓝光，阅读后自动熄灭，并且只以固件 `v.oai.thstatus` 总线真实 ACK 确认同步状态，在到达 900 次请求边界前自动预轮转会话。
 - **无写 Flash 实时切层、电源读取与安全刷机机制。** 在 `0.7.0-rc.16` 及以上固件通过 `kb.pl.set` 实现不磨损 Flash 的即时切层，保持 `keymap.json` SHA-1 不变，并通过 `device.status`、`pm.config` 与 `pm.state` 读取电池电量和随主机休眠配置。ESP32-S3 串口更新器在写入前校验官方 SHA-256 摘要，先保存完整 16 MB Flash 备份并解析 `0x8000` 分区表，确认保留 `nvs` 与 `fs` 用户分区后再写入与重连读回核对，不做整片擦除与盲目重试。
@@ -117,7 +117,7 @@ Work Louder Creator Micro 2 (USB 303A:8298, HID Report 0x06)
 构建需要 macOS 14+、Rust stable 与 Swift 工具链。
 
 ```sh
-scripts/check           # 静态与边界门禁 R-C01 至 R-C12、Rust 与 Swift 单测、C-ABI 静态库与开发包构建
+scripts/check           # 静态与边界门禁 R-C01 至 R-C14、Rust 与 Swift 单测、C-ABI 静态库与开发包构建
 scripts/verify-offline  # 全量检查加 6 个隔离合成 QA 场景及自动清理核对，不连接真实设备
 scripts/run             # 启动当前 checkout 构建的 target/MicroInput.app，带单实例排他锁
 ```
@@ -166,7 +166,7 @@ Micro Input handles daily macOS key configuration and official firmware updates 
 
 #### Dedicated Physical Workflows for Antigravity
 
-- **Antigravity keymap ready out of the box.** Starter controls cover focusing `com.google.antigravity`, composer input focus, new conversations, project picker, workspace quick-switch, model picker, Gemini Live voice toggle, built-in browser, split right, hold-to-talk, and submit after confirmed dictation stop.
+- **Antigravity keymap ready out of the box.** Top six slots (`AG00–AG05`) show live session status and trigger direct jumps; bottom seven keys (`AG06–AG12`) cover Gemini Live voice toggle, composer input focus, built-in browser, Side Question, new conversation in project, hold-to-talk, and submit after confirmed dictation stop; the top-right joystick uses 4-sector `RADIAL` controls (Up/Down chat scroll, Left open right side panel, Right close right side panel).
 - **Hardware keycaps track real unread watermarks.** Top slots track primary conversations after subagent filtering, retain ocean-blue unread indicators past 15 minutes, clear automatically once viewed frontmost at `/c/<cid>`, and switch sessions directly through sidebar links.
 - **Voice and model controls tuned to hardware cadence.** Rotating the encoder directly opens Antigravity's model picker in place without stealing composer focus and adjusts reasoning effort, pressing or holding the encoder searches conversations, and bottom `AG10` and `AG11` switches merge into a debounced 2U wide dictation key or split back into dual 1U keys for new conversation and hold-to-talk.
 - **Responsive, zero-patch Accessibility execution.** Integrates cleanly through macOS Accessibility and observable endpoints without patching the target app, reducing Antigravity 2.31.0 release composer focus median time to 284.3 ms.
@@ -187,7 +187,7 @@ Micro Input handles daily macOS key configuration and official firmware updates 
 Micro Input enforces three engineering boundaries from the ground up.
 
 - **Pure Rust core behind a thin C-ABI shell.** Framing, document models, local drafts, device sessions, agent bridges, and macOS execution live in 7 Rust crates named `mi-proto`, `mi-transport`, `mi-model`, `mi-session`, `mi-bridge`, `mi-macos`, and `mi-core`, driving 13 SwiftUI and AppKit files via 9 `extern "C"` functions in `crates/mi-ffi`.
-- **Explicit unknowns and static gates.** Unverified firmware edges stay logged in [UNKNOWNS](docs/spec/UNKNOWNS.md). `scripts/check-boundaries.py` enforces static rules `R-C01` through `R-C12` on every run so read-only safety checks stay intact and synthetic runs never impersonate physical hardware sign-off.
+- **Explicit unknowns and static gates.** Unverified firmware edges stay logged in [UNKNOWNS](docs/spec/UNKNOWNS.md). `scripts/check-boundaries.py` enforces static rules `R-C01` through `R-C14` on every run so read-only safety checks stay intact and synthetic runs never impersonate physical hardware sign-off.
 - **Refuse writes before risking device state.** Device snapshots, local drafts, and baselines remain strictly isolated, with full pre-write backups, `fsync` operation logs, and byte-for-byte readback checks required before marking any apply or Flash operation complete.
 
 ### Engineering Tradeoffs from Peer Projects
@@ -210,7 +210,7 @@ Micro Input borrows proven designs across subsystems while closing gaps specific
 Micro Input opens an exclusive macOS Vendor HID link to `303A:8298` over 267-byte numbered report `0x06` and channel `0x02` paired with Karabiner deduplication to turn every switch, dial, and LED on the board into predictable daily hardware.
 
 - **Multi-stage rotary encoder picker and presets.** `encoder_model_picker.rs` opens the target Agent's model picker directly on idle left or right turns without stealing input focus, adjusts reasoning effort via horizontal mouse flick or joystick tilt, unifies short presses and 350 ms holds on conversation search when idle, preserves press-and-turn fast scrolling, and exits automatically after 12 seconds idle. Six built-in knob and joystick presets cover model picking, Working and unread cycling, dual scroll, chat scrolling, effort levels, and hardware mouse mode.
-- **Dual-mode joystick operation.** In software mode, the joystick drives an 8-direction polar wheel menu that avoids stealing window focus, requiring neutral return before selection and supporting encoder click or spring-back confirmation. On `0.7.0-rc.16` firmware, it also unlocks hardware `MOUSE` and `SCROLL` modes with `Precise`, `Slow`, `Standard`, and `Fast` profiles, 13 `mouse.config` curve parameters, deadzone tuning, and host-independent `MS_*` HID mouse keycodes.
+- **Per-layer hybrid joystick operation.** In software mode, the joystick drives an 8-direction polar wheel menu that avoids stealing window focus, requiring neutral return before selection and supporting encoder click or spring-back confirmation. On `0.7.0-rc.16` firmware, the six-layer board assigns hardware joystick modes per layer: `Codex` (Layer 1) and `Deepseek Harness` (Layer 3) default to hardware `MOUSE` mode (`Precise`, `Slow`, `Standard`, and `Fast` presets, 13 `mouse.config` curve parameters, `0.15` factory anti-drift deadzone default, and host-independent `MS_*` mouse keycodes), while `Antigravity` (Layer 2) defaults to 4-sector `RADIAL` for chat scrolling and right side panel toggling.
 - **Flexible bottom `1U+1U` split or `2U` merged micro-switches.** Bottom switches `AG10` and `AG11` can switch globally between dual 1U keys and a merged 2U bar deduplicated by bitmask in `WideKeyMerger` until the final switch releases.
 - **Six-layer coexistence and ACK-verified per-key status LEDs.** Layer 1 preserves 20-control `Codex · Micro Input` behavior while `SharedVendorBridge` assigns Layer 2 and 3 top slots to `KV_OAI_AG06` through `KV_OAI_AG17` for green running and ocean-blue unread keycaps backed by firmware `v.oai.thstatus` ACK tracking and proactive session rotation at 900 requests.
 - **Flash-free live layer switching, power telemetry, and partitioned firmware recovery.** Uses `kb.pl.set` on `0.7.0-rc.16+` to switch onboard layers without wearing Flash, reads battery and host-sleep config via `device.status`, `pm.config`, and `pm.state`, and verifies official SHA-256 digests, full 16 MB Flash backups, and `0x8000` `nvs` and `fs` partitions before flashing over ESP32-S3 serial.
@@ -248,7 +248,7 @@ Further design specifications, research logs, and verification ledgers live insi
 Building requires macOS 14+, Rust stable, and the Swift toolchain.
 
 ```sh
-scripts/check           # Static boundary gates R-C01 to R-C12, Rust + Swift tests, C-ABI static lib, and app build
+scripts/check           # Static boundary gates R-C01 to R-C14, Rust + Swift tests, C-ABI static lib, and app build
 scripts/verify-offline  # Full checks plus 6 isolated synthetic QA scenarios and cleanup checks without real hardware
 scripts/run             # Launches target/MicroInput.app from the current checkout under a single-instance lock
 ```

@@ -12,7 +12,7 @@ PR #12/#13 已交付离线工作台与核心草稿（见 BUILD_PROMPT S1a/S2a）
 
 ## Solution
 
-提供原生 macOS Creator Micro 管理软件，菜单栏负责设备状态和常用切换，主视图以设备实体布局为中心，动作库围绕用户意图组织。早期五模块与进程内 UniFFI 选型已收敛为七模块纯 Rust 内核 + 7 函数极简 C-ABI（`crates/mi-ffi`）+ 原生 SwiftUI 薄壳（`app/MicroInput`），面向 Creator Micro 2 的 USB 只读链路先行。
+提供原生 macOS Creator Micro 管理软件，菜单栏负责设备状态和常用切换，主视图以设备实体布局为中心，动作库围绕用户意图组织。早期五模块与进程内 UniFFI 选型已收敛为七模块纯 Rust 内核 + 9 函数极简 C-ABI（`crates/mi-ffi`）+ 原生 SwiftUI 薄壳（`app/MicroInput`），面向 Creator Micro 2 的 USB 独占链路推进（早期基线与当前实装状态对照见 [status.md](../status.md)）。
 
 完整闭环为接入设备 → 选择要浏览/编辑的 Profile 和 Layer → 点选实体控件 → 搜索、配置动作 → 在草稿中撤销和检查差异 → 明确应用 → 核对结果 → 日常切换。离线可编辑，重连先比较。日常使用以手动选择、锁定当前方案或六层板载路由为准（前台应用自动切换已由 `R-C11` 退役）。
 

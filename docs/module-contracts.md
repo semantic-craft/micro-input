@@ -73,7 +73,7 @@
 
 `mi-model::lighting` 保存Layer目标并复用mutate/undo；`apply`在精确基线下生成单键或灯光候选，副本成功后才允许取得一次PreparedCandidate。此对象不携带生产发送权限。`mi-proto::mutation`仅编码限定keymap块；原Method/公开request的只读守卫不变。
 
-[ConfigWriter](../crates/mi-session/src/config_write.rs) 复用私有会话队列和唯一 reader。`ConfigWriter::new` 只在 `synthetic-backend` 编译，并拒绝非合成连接；`ConfigWriter::native` 要求原生 numbered 后端和非空接口身份。两条路径都绑定准备计划、核验基线、逐块写入并独立读回，保全 `smart_actions`，失败或取消后不自动重试。普通 RPC 入口的只读守卫不变。当前 `WorkbenchStore` 的配置编辑入口提供候选预览、备份和一次消费，不据此宣称工作台已接通会话 writer 的全部应用与恢复能力。
+[ConfigWriter](../crates/mi-session/src/config_write.rs) 复用私有会话队列和唯一 reader。`ConfigWriter::new` 只在 `synthetic-backend` 编译，并拒绝非合成连接；`ConfigWriter::native` 要求原生 numbered 后端和非空接口身份。两条路径都绑定准备计划、核验基线、逐块写入并独立读回，保全 `smart_actions`，失败或取消后不自动重试。普通 RPC 入口的只读守卫不变。当前工作台已通过 [six_layer_store.rs](../crates/mi-core/src/six_layer_store.rs) 与 [v070_hardware_store.rs](../crates/mi-core/src/v070_hardware_store.rs) 接通六层与进阶硬件写入；单键候选预览入口继续保持上述备份、一次消费与读回校验边界。
 
 
 ## S3 离线持久记录与恢复
@@ -85,13 +85,11 @@
 恢复只写 keymap，保全现状 smart_actions，并保存恢复链关联。显式读回可区分 original/candidate/other；OriginalVerified 表示本次检查等于原配置，不声称从未发送。未决记录冻结对应文档的编辑和新普通应用；成功恢复或本地修复后重开文档清空旧撤销历史。retry_local_save 不依赖会话，仅核对冻结文档身份、修订和原字节；磁盘已经等于目标时只补记录，其他内容一律拒绝覆盖。记录损坏时保持关闭，不自动清理材料。合成身份为模拟器固定标识，不冒充硬件序列号验证。
 
 
-## S3 历史 FFI 与宿主排空设计
+## 运行时排空与恢复不变量
 
-旧 `mi-ffi::device_operations`、UniFFI token 接口、Swift 执行 lease 与 `DeviceOperationsTests` 属于历史实现，当前源码已退役。它们不能作为当前工作台完成应用、恢复或排空的证据。
+旧 `mi-ffi::device_operations`、UniFFI token 接口、Swift 执行 lease 与 `DeviceOperationsTests` 属于已退役历史实现。当前工作台与运行时继续遵守以下排空与恢复不变量：准备计划绑定文档身份、修订与原字节，重连使旧计划失效；检查、恢复准备、本地修复与写入互斥；取消输入订阅不等于在途动作完成，排空未确认时不得开始写入；旧代回执不能更新新会话，未知结果不得自动重放。
 
-原设计要求保留为待接线契约。准备计划绑定文档身份、修订与原字节，重连使旧计划失效。检查、恢复准备、本地修复与写入互斥。取消输入订阅不等于在途动作完成，排空未确认时不得开始写入。旧代回执不能更新新会话，未知结果不得自动重放。后续接线仍须验证原目标清理、一次消费、跨会话拒绝、写后重验与离线修复。
-
-当前软件准备落点是 [DocumentStore](../crates/mi-model/src/storage.rs) 与 [WorkbenchStore::dispatch_editor_action](../crates/mi-core/src/store.rs)。当前会话应用与恢复行为由 [config_write.rs 测试](../crates/mi-session/tests/config_write.rs) 覆盖；候选和备份门禁由 [apply_preparation.rs](../crates/mi-model/tests/apply_preparation.rs) 与 [inspector_and_editors.rs](../crates/mi-core/tests/inspector_and_editors.rs) 覆盖。这些分层测试不能替代尚未证实的完整工作台接线。
+当前软件准备落点是 [DocumentStore](../crates/mi-model/src/storage.rs) 与 [WorkbenchStore::dispatch_editor_action](../crates/mi-core/src/store.rs)。会话应用与恢复行为由 [config_write.rs 测试](../crates/mi-session/tests/config_write.rs) 与 [six_layer_runtime.rs](../crates/mi-core/src/six_layer_runtime.rs) 覆盖；候选和备份门禁由 [apply_preparation.rs](../crates/mi-model/tests/apply_preparation.rs) 与 [inspector_and_editors.rs](../crates/mi-core/tests/inspector_and_editors.rs) 覆盖。
 
 
 ## RGB 编辑与合成预览

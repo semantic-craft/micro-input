@@ -6,7 +6,7 @@
 
 - 明确 `Stage`、目标提交/分支、该阶段允许的副作用、适用规则及未解锁UNKNOWN。没指定阶段时不能默认执行阶段0–6全量产品。
 - 历史9e78e8a为文档仓；当前应用基线cb31157已包含PR #12/#13。PR #7/#8已关闭未合并；如接续旧候选，只选择相关原创实现，重新核对现行规则并验证，不自动重开或合并旧PR。
-- 早期 Rust stable 五核心模块与进程内 UniFFI 选型已收敛为当前七核心模块纯 Rust 内核（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）、7 函数极简 C-ABI 静态库（`crates/mi-ffi`）与原生 SwiftUI macOS 14+ 薄壳（`app/MicroInput`）；驱动路径采用 IOKit/hidapi。若改变已有候选选型，说明当前需求与可验替代，不凭喜好增基础设施。
+- 早期 Rust stable 五核心模块与进程内 UniFFI 选型已收敛为当前七核心模块纯 Rust 内核（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）、9 函数极简 C-ABI 静态库（`crates/mi-ffi`）与原生 SwiftUI macOS 14+ 薄壳（`app/MicroInput`）；驱动路径采用 IOKit/hidapi。若改变已有候选选型，说明当前需求与可验替代，不凭喜好增基础设施。
 - 工程建立后提供 `scripts/check` 与真实启动命令；check在干净clone构建Rust/Swift并跑适用测试，不加载凭据。当前只有文档时只检查链接/规则/证据一致性，不伪造应用构建通过。
 - 合成向量必须明确标识自编格式；未知设备字段保留raw，真实schema另设可替换边界。每个实现/测试注明规则ID；新的证据先更新EVIDENCE/UNKNOWN，再解锁对应代码。
 - 完成回执包含提交、环境、检查命令、成功/失败/未运行、真实副作用和剩余UNKNOWN；构建、模拟、UI、硬件、合并、发布分别报告。
@@ -14,7 +14,7 @@
 
 ## 测试接缝
 
-优先一个共同产品接缝（**纯 Rust 内核 `WorkbenchStore` → 7 函数 C-ABI `crates/mi-ffi` → SwiftUI/未来 agent 客户端**，由早期 UniFFI 接缝收敛而来）。MockTransport 和内存配置支持真实解析/桥接，无 Swift 硬编码数据替代。协议分片/校验必须在 Framer/Codec 边界补测；真实设备/权限/布局只能用实机验收补证。
+优先一个共同产品接缝（**纯 Rust 内核 `WorkbenchStore` → 9 函数 C-ABI `crates/mi-ffi` → SwiftUI/未来 agent 客户端**，由早期 UniFFI 接缝收敛而来）。MockTransport 和内存配置支持真实解析/桥接，无 Swift 硬编码数据替代。协议分片/校验必须在 Framer/Codec 边界补测；真实设备/权限/布局只能用实机验收补证。
 
 既有候选先例：非连续Profile ID、raw/未知token、缺失引用、畸形JSON、导航零请求、通知穿插、错ID、超时、pending open期间断开/移除、跨重连旧响应、大整数与同批通知。旧测试可复用，旧通过结论不可直接复用到新提交。
 
