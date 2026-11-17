@@ -11,12 +11,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[path = "three_layer_board.rs"]
 mod three_layer_board;
 pub use three_layer_board::*;
-#[path = "six_layer_board.rs"]
 mod six_layer_board;
 pub use six_layer_board::*;
+
+type KeymapPatchSet = (Vec<(usize, usize, Vec<u8>)>, Vec<Value>);
+type KeymapPatchSetResult = Result<KeymapPatchSet, String>;
 
 pub const UNAVAILABLE: &str = "请核验当前连接并保存原配置副本后应用";
 #[derive(Clone, Serialize, Deserialize)]
@@ -288,7 +289,7 @@ impl Pending {
             if source["kind"] != "source-binding"
                 || source["logical_control"] != binding.logical_control
             {
-                return Err("绑定来源无效")?;
+                return Err("绑定来源无效".into());
             }
             let pid = &source["profile_source_id"];
             let lid = &source["layer_source_id"];
@@ -556,11 +557,8 @@ impl Pending {
             smart: self.smart.clone(),
         })
     }
-    fn lighting_patches(
-        doc: &LocalDocumentV2,
-        keymap: &[u8],
-    ) -> Result<(Vec<(usize, usize, Vec<u8>)>, Vec<Value>), String> {
-        let root: &RawValue = serde_json::from_slice(&keymap).map_err(|e| e.to_string())?;
+    fn lighting_patches(doc: &LocalDocumentV2, keymap: &[u8]) -> KeymapPatchSetResult {
+        let root: &RawValue = serde_json::from_slice(keymap).map_err(|e| e.to_string())?;
         let mut patches = vec![];
         let mut changes = vec![];
         for (id, layer) in &doc.editable.graph.layers {
@@ -668,7 +666,7 @@ impl Pending {
         doc: &LocalDocumentV2,
         keymap: &[u8],
         firmware: &str,
-    ) -> Result<(Vec<(usize, usize, Vec<u8>)>, Vec<Value>), String> {
+    ) -> KeymapPatchSetResult {
         let root: &RawValue = serde_json::from_slice(keymap).map_err(|e| e.to_string())?;
         let mut patches = vec![];
         let mut changes = vec![];

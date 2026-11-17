@@ -744,7 +744,7 @@ pub(crate) fn resolve_layer_slot_action_id<'a>(
         if a10.is_some_and(is_focus_input) && a11.is_some_and(is_voice_hold) {
             return a11;
         }
-        return find_action_id(primary_slot).or_else(|| match primary_slot {
+        return find_action_id(primary_slot).or(match primary_slot {
             "logical-10" => a11,
             "logical-11" => a10,
             _ => None,

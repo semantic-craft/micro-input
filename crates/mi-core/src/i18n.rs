@@ -395,7 +395,7 @@ pub fn zh_reverse_lookup(en: &str) -> Option<&'static str> {
     None
 }
 
-pub fn tr<'a>(zh: &'a str, locale: ResolvedLocale) -> &'a str {
+pub fn tr(zh: &str, locale: ResolvedLocale) -> &str {
     match locale {
         ResolvedLocale::ZhHans => zh,
         ResolvedLocale::En => en_lookup(zh).unwrap_or(zh),

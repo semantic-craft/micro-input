@@ -559,11 +559,10 @@ pub fn validate_grabbed(log: &str, id: u64) -> Result<(), String> {
     let marker = format!("(device_id:{id})");
     let last = log
         .lines()
-        .filter(|line| {
+        .rfind(|line| {
             line.contains(&marker)
                 && (line.contains("hid device events monitor") || line.contains("terminated"))
         })
-        .next_back()
         .ok_or("未找到目标键盘的抓取记录")?;
     if !last.contains("hid device events monitor is started (grabbed).") {
         return Err("目标标准键盘未被 Karabiner 抓取".into());

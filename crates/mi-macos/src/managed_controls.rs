@@ -390,10 +390,10 @@ enum ObservedModelPickerPopupState {
     Unknown,
 }
 
-fn select_unique_model_trigger<'a>(
-    window: &'a ManagedWindow,
+fn select_unique_model_trigger(
+    window: &ManagedWindow,
     matches_label: fn(&str) -> bool,
-) -> Result<Option<&'a ManagedControl>, String> {
+) -> Result<Option<&ManagedControl>, String> {
     let popup_candidates: Vec<&ManagedControl> = window
         .controls
         .iter()

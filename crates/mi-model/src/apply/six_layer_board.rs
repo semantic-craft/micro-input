@@ -1214,11 +1214,11 @@ pub fn patch_keymap_joystick_hardware_mode(
         let desired_joystick: Option<Value> = match target_mode {
             TargetJoystickMode::Mouse => {
                 let target = json!({"type": "MOUSE"});
-                (&current_joystick != &target).then_some(target)
+                (current_joystick != target).then_some(target)
             }
             TargetJoystickMode::Scroll => {
                 let target = json!({"type": "SCROLL"});
-                (&current_joystick != &target).then_some(target)
+                (current_joystick != target).then_some(target)
             }
             TargetJoystickMode::Sectors => {
                 if is_six_layer_target {
@@ -1230,11 +1230,11 @@ pub fn patch_keymap_joystick_hardware_mode(
                         (!already_vendor).then(|| json!({"type": "VENDOR", "sectors": []}))
                     } else {
                         let expected = managed_layer(li)["layout"]["joystick"].clone();
-                        (&current_joystick != &expected).then_some(expected)
+                        (current_joystick != expected).then_some(expected)
                     }
                 } else if is_three_layer_target {
                     let expected = json!({"type": "VENDOR", "sectors": []});
-                    (&current_joystick != &expected).then_some(expected)
+                    (current_joystick != expected).then_some(expected)
                 } else if current_joystick["type"] == "RADIAL"
                     && current_joystick
                         .get("sectors")
@@ -1306,7 +1306,7 @@ pub fn patch_keymap_joystick_hardware_mode(
 mod unit_tests {
     use super::*;
 
-    const SOURCE: &[u8] = include_bytes!("../fixtures/device/synthetic-six-layer-source.json");
+    const SOURCE: &[u8] = include_bytes!("../../fixtures/device/synthetic-six-layer-source.json");
 
     fn build_outdated_keymap(
         source: &[u8],

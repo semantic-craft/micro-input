@@ -81,19 +81,14 @@ fn validate_v070_response<'a>(
         .ok_or_else(|| ProtoError::Invalid(format!("missing result in {expected_method} reply")))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseSpeedPreset {
     Precise,
     Slow,
+    #[default]
     Standard,
     Fast,
-}
-
-impl Default for MouseSpeedPreset {
-    fn default() -> Self {
-        Self::Standard
-    }
 }
 
 impl MouseSpeedPreset {

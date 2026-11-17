@@ -509,7 +509,9 @@ extern "C" fn discovered(
             usage_page,
             usage,
             usage_pairs: std::slice::from_raw_parts(pairs, count * 2)
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|p| UsagePair {
                     page: p[0],
                     usage: p[1],

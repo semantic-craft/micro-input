@@ -983,19 +983,20 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
     }
 
     // Desktop targets are bound explicitly; no inferred approval/send shortcuts.
-    for (name, adapter, bundle) in [("Codex", "codex", "com.openai.codex")] {
-        let mut assignments = vec![(
-            0,
-            "desktop-open",
-            "打开 / 聚焦应用",
-            "应用",
-            bundle,
-            ActionKind::OpenApp {
-                bundle_id: bundle.into(),
-            },
-        )];
-        {
-            assignments.push((
+    {
+        let (name, adapter, bundle) = ("Codex", "codex", "com.openai.codex");
+        let assignments = vec![
+            (
+                0,
+                "desktop-open",
+                "打开 / 聚焦应用",
+                "应用",
+                bundle,
+                ActionKind::OpenApp {
+                    bundle_id: bundle.into(),
+                },
+            ),
+            (
                 1,
                 "desktop-input",
                 "聚焦当前输入框",
@@ -1005,10 +1006,8 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
                     adapter: adapter.into(),
                     command: "focus-input".into(),
                 },
-            ));
-        }
-        if ["codex"].contains(&adapter) {
-            assignments.push((
+            ),
+            (
                 2,
                 "desktop-search",
                 "搜索任务",
@@ -1018,8 +1017,8 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
                     adapter: adapter.into(),
                     command: "search".into(),
                 },
-            ));
-        }
+            ),
+        ];
         specs.push((name, assignments));
     }
 
@@ -2435,7 +2434,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                                         .and_then(|aid| {
                                             work.document.editable.graph.actions.get(aid)
                                         })
-                                        .map_or(true, |a| {
+                                        .is_none_or(|a| {
                                             a.id.starts_with("ag-")
                                                 || a.id.starts_with("navigate-")
                                                 || a.id.starts_with("desktop-")
@@ -2656,7 +2655,7 @@ fn layer_matches_starter_assignments(
     layer: &crate::document::LayerNode,
     assignments: &[AgentAssignment],
 ) -> bool {
-    let hold_ok = layer.control_settings.as_ref().map_or(true, |settings| {
+    let hold_ok = layer.control_settings.as_ref().is_none_or(|settings| {
         match &settings.encoder_hold_action_id {
             None => true,
             Some(aid) => doc.editable.graph.actions.get(aid).is_some_and(|a| {

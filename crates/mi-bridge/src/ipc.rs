@@ -40,14 +40,11 @@ pub struct UnixJsonTransport {
 
 impl UnixJsonTransport {
     fn lock_path(&self) -> PathLockGuard {
-        static PATH_LOCKS: std::sync::OnceLock<
-            std::sync::Mutex<
-                std::collections::BTreeMap<
-                    PathBuf,
-                    Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-                >,
-            >,
-        > = std::sync::OnceLock::new();
+        type PathLockEntry = Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+        type PathLockMap = std::sync::OnceLock<
+            std::sync::Mutex<std::collections::BTreeMap<PathBuf, PathLockEntry>>,
+        >;
+        static PATH_LOCKS: PathLockMap = std::sync::OnceLock::new();
         let slot = {
             let mut map = PATH_LOCKS
                 .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))

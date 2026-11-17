@@ -646,9 +646,16 @@ def run_boundary_checks(root: Path = ROOT) -> None:
         'and attach .onSubmit handlers to search TextFields'
     )
 
-    store_src = (root / 'crates/mi-core/src/store.rs').read_text(encoding='utf-8')
+    store_prod_paths = [root / 'crates/mi-core/src/store.rs'] + [
+        p
+        for p in sorted((root / 'crates/mi-core/src/store').rglob('*.rs'))
+        if not p.name.endswith('tests.rs')
+    ]
+    store_src = '\n'.join(
+        _strip_rust_cfg_test(p.read_text(encoding='utf-8')) for p in store_prod_paths
+    )
     assert 'inspector_search_active' in store_src, (
-        'R-C07 violation in crates/mi-core/src/store.rs: '
+        'R-C07 violation in crates/mi-core/src/store: '
         'consume_physical_input_event must guard selected_surface auto-follow with !inspector_search_active '
         'so hardware key events do not hijack InlineInspectorView focus during active search/recording'
     )
@@ -686,21 +693,30 @@ def run_boundary_checks(root: Path = ROOT) -> None:
         'Repository root must contain MIT LICENSE file'
     )
 
-    projection_src = (root / 'crates/mi-core/src/projection.rs').read_text(encoding='utf-8')
+    projection_src = (root / 'crates/mi-core/src/store/projection.rs').read_text(encoding='utf-8')
     for forbidden in (
         'WorkbenchStore', 'NativeOwnershipController', 'PushToTalkController',
         'AppBundleCache', 'DeviceSession', 'RunningSixLayer', 'Instant::now',
         '.elapsed(', '.load(Ordering', 'std::fs', 'self.panel_host', 'self.status_item_host',
     ):
         assert forbidden not in projection_src, (
-            f'R-C08 violation in crates/mi-core/src/projection.rs: {forbidden} is a runtime capability; '
+            f'R-C08 violation in crates/mi-core/src/store/projection.rs: {forbidden} is a runtime capability; '
             'projection must read captured value inputs only'
         )
     assert 'UnboundedSender<HardwareLoopEvent>' not in store_src and 'UnboundedReceiver<HardwareLoopEvent>' not in store_src, (
         'R-C08 violation: Workbench hardware ingress must remain bounded with independent loss/control delivery'
     )
 
-    six_layer_runtime_src = (root / 'crates/mi-core/src/six_layer_runtime.rs').read_text(encoding='utf-8').split('#[cfg(test)]\nmod tests {', 1)[0]
+    six_layer_runtime_prod_paths = [
+        root / 'crates/mi-core/src/six_layer_runtime.rs',
+        root / 'crates/mi-core/src/six_layer_runtime/state.rs',
+        root / 'crates/mi-core/src/six_layer_runtime/vendor_bridge.rs',
+        root / 'crates/mi-core/src/six_layer_runtime/encoder_dispatch.rs',
+        root / 'crates/mi-core/src/six_layer_runtime/lifecycle.rs',
+    ]
+    six_layer_runtime_src = '\n'.join(
+        _strip_rust_cfg_test(p.read_text(encoding='utf-8')) for p in six_layer_runtime_prod_paths
+    )
     assert 'LiveHostActionExecutor::new' not in six_layer_runtime_src and '.driver()' not in store_src, (
         'R-C08 violation: six-layer and UI host actions must share the Store executor admission/cleanup boundary'
     )
@@ -956,7 +972,7 @@ def run_boundary_checks(root: Path = ROOT) -> None:
         text=True,
     )
     prod_qa_leaks = find_production_qa_leaks(
-        (root / 'crates/mi-core/src/store.rs').read_text(encoding='utf-8'),
+        store_src,
         (root / 'crates/mi-macos/src/status_item.rs').read_text(encoding='utf-8'),
         (root / 'crates/mi-macos/src/passive_panel.rs').read_text(encoding='utf-8'),
         (root / 'crates/mi-core/Cargo.toml').read_text(encoding='utf-8'),

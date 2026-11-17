@@ -176,13 +176,13 @@ impl WorkbenchStore {
     pub(crate) fn build_six_layer_routing_mode(&self) -> six_layer_runtime::SixLayerRoutingMode {
         if let Some(locked_id) = self.document_store.locked_profile_id() {
             if let Some(plan) = self.compile_profile_twenty_slots(&locked_id) {
-                return six_layer_runtime::SixLayerRoutingMode::Locked(plan);
+                return six_layer_runtime::SixLayerRoutingMode::Locked(Box::new(plan));
             }
         }
         if self.six_layer_user_pinned {
             if let Some(active_id) = self.document_store.host_active_profile_id() {
                 if let Some(plan) = self.compile_profile_twenty_slots(&active_id) {
-                    return six_layer_runtime::SixLayerRoutingMode::ManualPinned(plan);
+                    return six_layer_runtime::SixLayerRoutingMode::ManualPinned(Box::new(plan));
                 }
             }
         }
@@ -194,30 +194,32 @@ impl WorkbenchStore {
             .iter()
             .find(|(_, profile)| profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
             .and_then(|(pid, _)| self.compile_profile_twenty_slots(pid))
-            .filter(six_layer_runtime::PinnedProfilePlan::has_any_action);
-        let resolve_board_host_layer = |board_layer: mi_model::board_layers::BoardLayer,
-                                        host_idx: usize,
-                                        canonical: CanonicalAgent|
-         -> Option<six_layer_runtime::PinnedProfilePlan> {
-            let pid = self
-                .document_store
-                .board_layer_plan()
-                .and_then(|plan| match plan.route(board_layer) {
-                    mi_model::board_layers::BoardLayerRoute::HostProfile { profile_id } => {
-                        Some(profile_id.clone())
-                    }
-                    _ => None,
-                })
-                .or_else(|| {
-                    self.six_layer_state
-                        .installation
-                        .as_ref()
-                        .and_then(|inst| inst.plan.hosts.get(host_idx))
-                        .map(|h| h.profile_id.clone())
-                })
-                .or_else(|| self.find_canonical_profile_id(canonical))?;
-            self.compile_profile_twenty_slots(&pid)
-        };
+            .filter(six_layer_runtime::PinnedProfilePlan::has_any_action)
+            .map(Box::new);
+        let resolve_board_host_layer =
+            |board_layer: mi_model::board_layers::BoardLayer,
+             host_idx: usize,
+             canonical: CanonicalAgent|
+             -> Option<Box<six_layer_runtime::PinnedProfilePlan>> {
+                let pid = self
+                    .document_store
+                    .board_layer_plan()
+                    .and_then(|plan| match plan.route(board_layer) {
+                        mi_model::board_layers::BoardLayerRoute::HostProfile { profile_id } => {
+                            Some(profile_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        self.six_layer_state
+                            .installation
+                            .as_ref()
+                            .and_then(|inst| inst.plan.hosts.get(host_idx))
+                            .map(|h| h.profile_id.clone())
+                    })
+                    .or_else(|| self.find_canonical_profile_id(canonical))?;
+                self.compile_profile_twenty_slots(&pid).map(Box::new)
+            };
         let layer_two = resolve_board_host_layer(
             mi_model::board_layers::BoardLayer::ALL[1],
             0,
@@ -1412,9 +1414,9 @@ mod tests {
             .find_canonical_profile_id(CanonicalAgent::Antigravity)
             .unwrap();
         running.set_routing_context(
-            six_layer_runtime::SixLayerRoutingMode::Locked(
+            six_layer_runtime::SixLayerRoutingMode::Locked(Box::new(
                 store.compile_profile_twenty_slots(&active).unwrap(),
-            ),
+            )),
             Some("com.google.antigravity"),
         );
         running.readiness.configuration_observed = true;
@@ -1503,9 +1505,9 @@ mod tests {
     #[test]
     fn six_layer_breaking_upgrade_preserves_original_backup_chain_for_exact_restore() {
         const SIX_SOURCE: &[u8] =
-            include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+            include_bytes!("../../../mi-model/fixtures/device/synthetic-six-layer-source.json");
         const SMART: &[u8] =
-            include_bytes!("../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
+            include_bytes!("../../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
         const STALE_V1_SMART: &[u8] = br#"{"smart_actions":[]}"#;
 
         let v2_template =
@@ -1970,9 +1972,9 @@ mod tests {
     #[test]
     fn six_layer_store_health_startup_and_resume_accept_v070_mouse_and_scroll_and_reject_on_v063() {
         const SIX_SOURCE: &[u8] =
-            include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+            include_bytes!("../../../mi-model/fixtures/device/synthetic-six-layer-source.json");
         const SMART: &[u8] =
-            include_bytes!("../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
+            include_bytes!("../../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
 
         let dir = tempfile::tempdir().unwrap();
         let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();

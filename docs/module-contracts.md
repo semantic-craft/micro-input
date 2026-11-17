@@ -26,12 +26,12 @@
 | 持久操作与恢复记录 | [operation_record.rs](../crates/mi-model/src/operation_record.rs) | 失败安全与原子落盘操作记录 |
 | 草稿与设备工作区 | [draft.rs](../crates/mi-model/src/draft.rs)、[storage.rs](../crates/mi-model/src/storage.rs) | 稳定身份、原子保存、宿主文档与设备草稿隔离 |
 | 工作台命令与运行门禁 | [store.rs](../crates/mi-core/src/store.rs) | `WorkbenchStore` 持有工作流、`HeldDictation` 与宿主执行器 |
-| 展示投影 | [projection.rs](../crates/mi-core/src/projection.rs) | 从当前事实生成投影，`projection_generation` 门禁由 Store 管理 |
+| 展示投影 | [projection.rs](../crates/mi-core/src/store/projection.rs) | 从当前事实生成投影，`projection_generation` 门禁由 Store 管理 |
 | 宿主执行与目标确认 | [executor.rs](../crates/mi-macos/src/executor.rs)、[managed_controls.rs](../crates/mi-macos/src/managed_controls.rs) | `LiveHostActionExecutor` 与 `ManagedAxControls` 保留原窗口、分屏和录音目标 |
 | C-ABI 桥 | [lib.rs](../crates/mi-ffi/src/lib.rs) | 解码 `WorkbenchCommand`、派发、投影、poll、释放句柄与字符串 |
 | Swift 展示桥 | [CoreBridge.swift](../app/MicroInput/Sources/MicroInputUI/CoreBridge.swift)、[ProjectionModels.swift](../app/MicroInput/Sources/MicroInputUI/ProjectionModels.swift) | `CoreStore` 与 Equatable 域切片，系统通知转发到 Rust |
 
-当前验证入口包括 [runtime_consistency_tests.rs](../crates/mi-core/src/runtime_consistency_tests.rs)、[workbench_store.rs](../crates/mi-core/tests/workbench_store.rs)、[managed_controls.rs](../crates/mi-macos/tests/managed_controls.rs) 和 C-ABI 的 `ffi_roundtrip_projects_and_dispatches_commands`。它们分别覆盖 core 接线、工作台状态、AX 确认与桥接所有权。
+当前验证入口包括 [runtime_consistency_tests.rs](../crates/mi-core/src/store/runtime_consistency_tests.rs)、[workbench_store.rs](../crates/mi-core/tests/workbench_store.rs)、[managed_controls.rs](../crates/mi-macos/tests/managed_controls.rs) 和 C-ABI 的 `ffi_roundtrip_projects_and_dispatches_commands`。它们分别覆盖 core 接线、工作台状态、AX 确认与桥接所有权。
 
 ## 最小行为契约
 
@@ -73,7 +73,7 @@
 
 `mi-model::lighting` 保存Layer目标并复用mutate/undo；`apply`在精确基线下生成单键或灯光候选，副本成功后才允许取得一次PreparedCandidate。此对象不携带生产发送权限。`mi-proto::mutation`仅编码限定keymap块；原Method/公开request的只读守卫不变。
 
-[ConfigWriter](../crates/mi-session/src/config_write.rs) 复用私有会话队列和唯一 reader。`ConfigWriter::new` 只在 `synthetic-backend` 编译，并拒绝非合成连接；`ConfigWriter::native` 要求原生 numbered 后端和非空接口身份。两条路径都绑定准备计划、核验基线、逐块写入并独立读回，保全 `smart_actions`，失败或取消后不自动重试。普通 RPC 入口的只读守卫不变。当前工作台已通过 [six_layer_store.rs](../crates/mi-core/src/six_layer_store.rs) 与 [v070_hardware_store.rs](../crates/mi-core/src/v070_hardware_store.rs) 接通六层与进阶硬件写入；单键候选预览入口继续保持上述备份、一次消费与读回校验边界。
+[ConfigWriter](../crates/mi-session/src/config_write.rs) 复用私有会话队列和唯一 reader。`ConfigWriter::new` 只在 `synthetic-backend` 编译，并拒绝非合成连接；`ConfigWriter::native` 要求原生 numbered 后端和非空接口身份。两条路径都绑定准备计划、核验基线、逐块写入并独立读回，保全 `smart_actions`，失败或取消后不自动重试。普通 RPC 入口的只读守卫不变。当前工作台已通过 [six_layer_store.rs](../crates/mi-core/src/store/six_layer_store.rs) 与 [v070_hardware_store.rs](../crates/mi-core/src/store/v070_hardware_store.rs) 接通六层与进阶硬件写入；单键候选预览入口继续保持上述备份、一次消费与读回校验边界。
 
 
 ## S3 离线持久记录与恢复
@@ -103,9 +103,9 @@ RGB 编辑由 [Draft](../crates/mi-model/src/draft.rs) 与 [mi-model::lighting](
 
 - `storage::routing` 在工作台偏好文件中原子保存活动选择、锁定方案、`host_execution_enabled`、常用置顶顺序及底行布局；严格解析（`#[serde(deny_unknown_fields)]`）保留，旧版前台自动跟随偏好字段（`auto_follow_enabled`、`manual_override`、`app_profile_links`）在反序列化时静默丢弃且不写回；失败不发布新 revision。
 - `mi-session` 唯一 reader 在广播前分配 ingress sequence，消费者的 sequence 只作诊断。摇杆回中/离中状态即使没有动作边沿也向上交付。
-- [host_router.rs](../crates/mi-model/src/host_router.rs) 负责纯函数路由；[store.rs](../crates/mi-core/src/store.rs) 与 [six_layer_store.rs](../crates/mi-core/src/six_layer_store.rs) 持有运行选择（含 `SixLayerRoutingMode::BoardLayers` / `ManualPinned` / `Locked` 与 V070 前台层同步）和动作来源，设备会话与文档身份互不替代。
-- [runtime_inbox.rs](../crates/mi-core/src/runtime_inbox.rs) 接收硬件事件，`WorkbenchStore::poll_hardware_events` 消费事件并核对代次与门禁。`InputStreamGap` 停止原目标动作并封锁旧输入会话，重新连接后才接收新输入。旧 Swift `HostRouting` 的 FIFO 与 lease 数字是历史设计，不能套用为当前实现参数。
-- [projection.rs](../crates/mi-core/src/projection.rs) 生成实际运行配置投影；[passive_panel.rs](../crates/mi-macos/src/passive_panel.rs) 显示被动面板。Swift `CoreBridge.swift` 的 `WorkspaceLifecycle` 转发睡眠和唤醒，Rust [workspace_lifecycle.rs](../crates/mi-core/src/workspace_lifecycle.rs) 退役并等待旧任务。旧 `HostOverlay` 和 `WorkspaceSleepObserver` 是历史 owner。
+- [host_router.rs](../crates/mi-model/src/host_router.rs) 负责纯函数路由；[store.rs](../crates/mi-core/src/store.rs) 与 [six_layer_store.rs](../crates/mi-core/src/store/six_layer_store.rs) 持有运行选择（含 `SixLayerRoutingMode::BoardLayers` / `ManualPinned` / `Locked` 与 V070 前台层同步）和动作来源，设备会话与文档身份互不替代。
+- [runtime_inbox.rs](../crates/mi-core/src/store/runtime_inbox.rs) 接收硬件事件，`WorkbenchStore::poll_hardware_events` 消费事件并核对代次与门禁。`InputStreamGap` 停止原目标动作并封锁旧输入会话，重新连接后才接收新输入。旧 Swift `HostRouting` 的 FIFO 与 lease 数字是历史设计，不能套用为当前实现参数。
+- [projection.rs](../crates/mi-core/src/store/projection.rs) 生成实际运行配置投影；[passive_panel.rs](../crates/mi-macos/src/passive_panel.rs) 显示被动面板。Swift `CoreBridge.swift` 的 `WorkspaceLifecycle` 转发睡眠和唤醒，Rust [workspace_lifecycle.rs](../crates/mi-core/src/store/workspace_lifecycle.rs) 退役并等待旧任务。旧 `HostOverlay` 和 `WorkspaceSleepObserver` 是历史 owner。
 
 采用 IA-09/11 作为静态研究背景，不实现厂商 AppSense 通知或设备自动激活；本轮验证须分别记录自动化输入夹具、原生窗口与真实硬件覆盖。
 
@@ -160,6 +160,6 @@ RGB 编辑由 [Draft](../crates/mi-model/src/draft.rs) 与 [mi-model::lighting](
 
 ## Agent 本地提案契约
 
-独立二进制 `mi`（[mi.rs](../crates/mi-model/src/bin/mi.rs)）与 `agent::execute`（[agent.rs](../crates/mi-model/src/agent.rs)）提供 `mi draft read/validate/patch` 本地提案入口，采用 `api_version = 1` 的单行 JSON stdin/stdout 契约。请求通过 `Stamp`（`document_id`、`revision`、`sha256`）绑定已保存本地 `v2` 文档，只允许 `rename_profile`、`rename_layer` 与 `bind_action` 三种受限操作，不提供设备写入口或宿主执行权限。
+独立二进制 `mi`（[mi.rs](../crates/mi-model/src/bin/mi.rs)）与 `agent::execute`（[agent.rs](../crates/mi-model/src/storage/agent.rs)）提供 `mi draft read/validate/patch` 本地提案入口，采用 `api_version = 1` 的单行 JSON stdin/stdout 契约。请求通过 `Stamp`（`document_id`、`revision`、`sha256`）绑定已保存本地 `v2` 文档，只允许 `rename_profile`、`rename_layer` 与 `bind_action` 三种受限操作，不提供设备写入口或宿主执行权限。
 
 `patch` 使用 `0600` 权限与 `create_new` 写入独立 `format = "micro-input-proposal"` 文件，源工作台与 `active.json` 保持原字节不变。工作台经 `DocumentStore::inspect_agent_proposal`、`reject_agent_proposal` 与 `accept_agent_proposal` 在文档锁下复核 `Stamp` 与操作重放结果；用户拒绝则保持原修订，接受后创建独立草稿并由 `WorkbenchStore` 更新 C-ABI 投影。

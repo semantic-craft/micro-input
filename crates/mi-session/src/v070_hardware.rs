@@ -34,7 +34,8 @@ pub struct JoystickHardwareModeReceipt {
     pub changed: bool,
 }
 
-static SESSION_KEYMAP_CACHE: OnceLock<Mutex<Vec<(u64, Vec<u8>)>>> = OnceLock::new();
+type SessionKeymapCache = OnceLock<Mutex<Vec<(u64, Vec<u8>)>>>;
+static SESSION_KEYMAP_CACHE: SessionKeymapCache = OnceLock::new();
 
 fn cache_session_keymap(session_id: u64, keymap_bytes: Vec<u8>) {
     let cache = SESSION_KEYMAP_CACHE.get_or_init(|| Mutex::new(Vec::new()));

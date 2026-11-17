@@ -297,8 +297,11 @@ const K_AX_ERROR_SUCCESS: AXError = 0;
 const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
 #[cfg(target_os = "macos")]
-#[link(name = "ApplicationServices", kind = "framework")]
 #[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
     fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
@@ -1269,8 +1272,10 @@ mod macos_pasteboard {
     pub type Id = *mut c_void;
     type Sel = *mut c_void;
 
-    #[link(name = "AppKit", kind = "framework")]
     #[link(name = "Foundation", kind = "framework")]
+    unsafe extern "C" {}
+
+    #[link(name = "AppKit", kind = "framework")]
     #[link(name = "objc")]
     unsafe extern "C" {
         fn objc_getClass(name: *const c_char) -> Id;
@@ -2567,14 +2572,13 @@ impl HostOsDriver for MacOsSystemDriver {
                             } => {
                                 if let Some(&elem) = retained.get(node_index) {
                                     let action_cf = cf_string_from_str("AXPress");
-                                    let ok = if !action_cf.is_null() {
+                                    if !action_cf.is_null() {
                                         let err = AXUIElementPerformAction(elem, action_cf);
                                         CFRelease(action_cf);
                                         err == K_AX_ERROR_SUCCESS
                                     } else {
                                         false
-                                    };
-                                    ok
+                                    }
                                 } else {
                                     false
                                 }

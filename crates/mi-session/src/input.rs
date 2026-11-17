@@ -556,10 +556,10 @@ impl InputMonitor {
                                     true,
                                 )
                             } else if let Some(spec) = map_physical(&raw_id) {
-                                if spec.action_role != "encoder_step" {
-                                    if !pressed.switches.insert(spec.logical_switch.to_owned()) {
-                                        continue;
-                                    }
+                                if spec.action_role != "encoder_step"
+                                    && !pressed.switches.insert(spec.logical_switch.to_owned())
+                                {
+                                    continue;
                                 }
                                 (
                                     InputEventKind::Pressed,

@@ -399,6 +399,7 @@ pub(crate) async fn execute_v070_command_on_session(
     match &cmd.command {
         ValidatedV070DeviceCommand::Refresh => fetch_v070_snapshot_on_session(session, true)
             .await
+            .map(Box::new)
             .map(V070BridgeOutcome::Snapshot),
         ValidatedV070DeviceCommand::SelectLayer { layer } => {
             session
@@ -747,6 +748,7 @@ impl WorkbenchStore {
             let mut notif_rx = session_clone.notifications();
             let snap_result = fetch_v070_snapshot_on_session(&session_clone, false)
                 .await
+                .map(Box::new)
                 .map(V070BridgeOutcome::Snapshot);
             let _ = inbox.send(HardwareLoopEvent::V070CapabilityOutcome {
                 session_id: session_clone.id,
@@ -1721,7 +1723,7 @@ mod tests {
     #[test]
     fn apply_outcome_preserves_in_flight_command_against_stale_snapshot() {
         let make_snapshot = |layer: u8, name: &str| {
-            V070BridgeOutcome::Snapshot(V070SnapshotPayload {
+            V070BridgeOutcome::Snapshot(Box::new(V070SnapshotPayload {
                 session_id: 1,
                 version: "0.7.0-rc.16".into(),
                 active_profile: Some(3),
@@ -1749,7 +1751,7 @@ mod tests {
                     factory_name: "Creator Micro 2".into(),
                     max_length: 15,
                 },
-            })
+            }))
         };
 
         let mut controller = V070HardwareController::default();
@@ -2406,9 +2408,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         const SIX_SOURCE: &[u8] =
-            include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+            include_bytes!("../../../mi-model/fixtures/device/synthetic-six-layer-source.json");
         const SMART: &[u8] =
-            include_bytes!("../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
+            include_bytes!("../../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
 
         let compiled_six =
             mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART)).unwrap();
@@ -2816,5 +2818,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "v070_session_sa_rgb_store_tests.rs"]
-mod fw6_store_tests;
+mod sa_rgb_tests;

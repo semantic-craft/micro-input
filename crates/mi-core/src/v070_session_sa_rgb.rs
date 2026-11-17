@@ -643,10 +643,8 @@ impl SessionSaRgbReconciler {
     }
 }
 
-#[path = "v070_sa_rgb_coordinator.rs"]
 mod coordinator;
 pub(crate) use coordinator::SaRgbRuntimeCoordinator;
 
 #[cfg(test)]
-#[path = "v070_session_sa_rgb_tests.rs"]
 mod fw6_tests;

@@ -982,7 +982,6 @@ pub fn verify_codex_window_readback(
 }
 
 #[cfg(test)]
-#[path = "codex_sessions_tests.rs"]
 mod tests;
 
 #[cfg(test)]

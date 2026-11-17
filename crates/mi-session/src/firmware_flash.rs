@@ -206,7 +206,7 @@ struct DataPartition {
 fn data_partitions(bytes: &[u8]) -> Result<Vec<DataPartition>, String> {
     let table = bytes.get(0x8000..0x9000).ok_or("固件缺少完整分区表")?;
     let mut partitions = Vec::new();
-    for entry in table.chunks_exact(32) {
+    for entry in table.as_chunks::<32>().0 {
         if entry[..2] == [0xff, 0xff] || entry[..2] == [0xeb, 0xeb] {
             break;
         }

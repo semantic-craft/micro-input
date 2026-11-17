@@ -498,7 +498,7 @@ impl Comparison {
                 .path
                 .split('/')
                 .filter_map(|id| labels.get(id))
-                .last()
+                .next_back()
                 .cloned()
                 .unwrap_or_else(|| "文档".into());
             let field = match row.path.rsplit('/').next().unwrap_or("") {

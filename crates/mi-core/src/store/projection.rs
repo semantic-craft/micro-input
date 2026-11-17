@@ -1,3 +1,7 @@
+use super::inspector_editor_actions::{
+    custom_monogram, format_macro_references, resolve_merged_bottom_slot, resolve_silkscreen_icon,
+    resolve_slot_action_info, resolve_slot_graph_action_id,
+};
 use super::*;
 use crate::six_layer_runtime::InstallationStatus;
 use crate::{format_concise_keycap_caption_localized, ActiveHudContent};
@@ -1081,7 +1085,7 @@ impl ProjectionInputs<'_> {
             } else {
                 CodexKeycapId::ALL_34
                     .into_iter()
-                    .filter(|k| k.matches_query(&self.keycap_search_query))
+                    .filter(|k| k.matches_query(self.keycap_search_query))
                     .map(|k| KeycapCatalogItemProjection {
                         id: k,
                         silk_code: k.silk_code().to_string(),
@@ -1131,7 +1135,7 @@ impl ProjectionInputs<'_> {
             }
             rows
         } else if self.action_search_query.trim().is_empty()
-            && mi_model::i18n::is_all_category_filter(&self.action_category_filter)
+            && mi_model::i18n::is_all_category_filter(self.action_category_filter)
             && !self.favorites_only
             && self.favorite_action_ids.is_empty()
         {
@@ -1185,10 +1189,10 @@ impl ProjectionInputs<'_> {
             rows
         } else {
             let entries = action_library::search_localized(
-                &self.action_search_query,
-                &self.action_category_filter,
+                self.action_search_query,
+                self.action_category_filter,
                 self.favorites_only,
-                &self.favorite_action_ids,
+                self.favorite_action_ids,
                 self.command_execution_enabled,
                 locale,
             );
@@ -2008,7 +2012,7 @@ impl ProjectionInputs<'_> {
         let inspector = self.build_inspector_projection(can_edit_draft, &canvas);
 
         let mut overlay = self.overlay_controller.project_localized(
-            &self.screen_geometry,
+            self.screen_geometry,
             self.last_cursor_position,
             locale,
         );
@@ -2125,7 +2129,7 @@ impl ProjectionInputs<'_> {
             can_navigate_forward: self.navigation_history.can_go_forward(|_| true),
         };
         crate::radial::resolve_radial_slots_localized(
-            &self.radial_slot_configs,
+            self.radial_slot_configs,
             &ctx,
             |bundle_id| self.applications.get(bundle_id).copied().unwrap_or(false),
             locale,
@@ -2465,9 +2469,9 @@ pub fn format_popover_cheat_label(raw_label: &str) -> String {
     }
 }
 
-fn index_layer_controls<'a>(
-    layer: Option<&'a LayerNode>,
-) -> [Option<&'a mi_model::document::BindingNode>; 20] {
+fn index_layer_controls(
+    layer: Option<&LayerNode>,
+) -> [Option<&mi_model::document::BindingNode>; 20] {
     let mut slots = [None; 20];
     let Some(layer) = layer else {
         return slots;

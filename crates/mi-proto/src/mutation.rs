@@ -19,7 +19,7 @@ pub fn keymap_chunk_with_tx(
         || candidate.is_empty()
         || candidate.len() > MAX_FILE_BYTES
         || offset >= candidate.len()
-        || offset % CHUNK_BYTES != 0
+        || !offset.is_multiple_of(CHUNK_BYTES)
     {
         return Err(ProtoError::Invalid("invalid bounded keymap chunk".into()));
     }

@@ -177,7 +177,7 @@ pub struct V070SnapshotPayload {
 
 #[derive(Debug, Clone)]
 pub enum V070BridgeOutcome {
-    Snapshot(V070SnapshotPayload),
+    Snapshot(Box<V070SnapshotPayload>),
     ProfileLayer {
         profile_index: Option<u8>,
         layer_index: u8,

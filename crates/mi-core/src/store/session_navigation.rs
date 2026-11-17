@@ -1,3 +1,4 @@
+use super::inspector_editor_actions::bundle_id_for_place;
 use super::*;
 use mi_macos::HostOsDriver;
 use std::sync::{mpsc, Mutex};
@@ -917,6 +918,7 @@ pub(super) fn workspace_from_summary(summary: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::antigravity_daemon::poll_antigravity_daemon_candidates;
 
     fn candidate(id: &str, watermark: &str) -> FourAppLiveCandidate {
         FourAppLiveCandidate {

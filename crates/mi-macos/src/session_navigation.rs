@@ -268,17 +268,28 @@ fn is_fatal_codex_ax_error(error: &str) -> bool {
     )
 }
 
+struct CodexNavigationTarget<'a> {
+    codex_home: &'a Path,
+    thread_id: &'a str,
+    host_id: &'a str,
+    timeout: Duration,
+    poll_interval: Duration,
+}
+
 fn navigate_codex_session_with(
-    codex_home: &Path,
-    thread_id: &str,
-    host_id: &str,
+    target: CodexNavigationTarget<'_>,
     mut validate_lease: impl FnMut() -> Result<(), String>,
     is_current: impl Fn() -> bool,
     mut open_deeplink: impl FnMut(&str) -> Result<(), String>,
     mut observe_window: impl FnMut() -> Result<crate::codex_sessions::CodexWindowSnapshot, String>,
-    timeout: Duration,
-    poll_interval: Duration,
 ) -> Result<(), String> {
+    let CodexNavigationTarget {
+        codex_home,
+        thread_id,
+        host_id,
+        timeout,
+        poll_interval,
+    } = target;
     validate_lease()?;
     if !is_current() {
         return Err("blocked:session_navigation_retired".into());
@@ -355,15 +366,17 @@ pub fn navigate_codex_session(
     #[cfg(target_os = "macos")]
     {
         navigate_codex_session_with(
-            codex_home,
-            thread_id,
-            host_id,
+            CodexNavigationTarget {
+                codex_home,
+                thread_id,
+                host_id,
+                timeout: Duration::from_secs(4),
+                poll_interval: Duration::from_millis(100),
+            },
             validate_lease,
             is_current,
             open_codex_deeplink,
             crate::native_ax::observe_codex_window_state,
-            Duration::from_secs(4),
-            Duration::from_millis(100),
         )
     }
     #[cfg(not(target_os = "macos"))]
@@ -536,9 +549,13 @@ mod tests {
         let mut opened = Vec::new();
         let mut polls = 0usize;
         navigate_codex_session_with(
-            dir.path(),
-            test_support::UUID_A,
-            "local",
+            CodexNavigationTarget {
+                codex_home: dir.path(),
+                thread_id: test_support::UUID_A,
+                host_id: "local",
+                timeout: Duration::from_millis(200),
+                poll_interval: Duration::from_millis(1),
+            },
             || Ok(()),
             || true,
             |url| {
@@ -565,8 +582,6 @@ mod tests {
                     })
                 }
             },
-            Duration::from_millis(200),
-            Duration::from_millis(1),
         )
         .unwrap();
         assert_eq!(
@@ -577,9 +592,13 @@ mod tests {
 
         let mut opened_on_stale = false;
         let err = navigate_codex_session_with(
-            dir.path(),
-            test_support::UUID_A,
-            "local",
+            CodexNavigationTarget {
+                codex_home: dir.path(),
+                thread_id: test_support::UUID_A,
+                host_id: "local",
+                timeout: Duration::from_millis(50),
+                poll_interval: Duration::from_millis(1),
+            },
             || Err("blocked:session_input_retired".into()),
             || true,
             |_| {
@@ -587,17 +606,19 @@ mod tests {
                 Ok(())
             },
             || unreachable!("should not poll when lease fails"),
-            Duration::from_millis(50),
-            Duration::from_millis(1),
         )
         .unwrap_err();
         assert_eq!(err, "blocked:session_input_retired");
         assert!(!opened_on_stale);
 
         let err_sibling = navigate_codex_session_with(
-            dir.path(),
-            test_support::UUID_A,
-            "local",
+            CodexNavigationTarget {
+                codex_home: dir.path(),
+                thread_id: test_support::UUID_A,
+                host_id: "local",
+                timeout: Duration::from_millis(20),
+                poll_interval: Duration::from_millis(1),
+            },
             || Ok(()),
             || true,
             |_| Ok(()),
@@ -610,8 +631,6 @@ mod tests {
                     has_resume_error: false,
                 })
             },
-            Duration::from_millis(20),
-            Duration::from_millis(1),
         )
         .unwrap_err();
         assert!(err_sibling.contains("codex_conflicting_sibling_detected"));
@@ -632,9 +651,13 @@ mod tests {
         };
         let mut polls = 0usize;
         navigate_codex_session_with(
-            dir.path(),
-            test_support::UUID_A,
-            "local",
+            CodexNavigationTarget {
+                codex_home: dir.path(),
+                thread_id: test_support::UUID_A,
+                host_id: "local",
+                timeout: Duration::from_millis(200),
+                poll_interval: Duration::from_millis(1),
+            },
             || Ok(()),
             || true,
             |_| Ok(()),
@@ -646,8 +669,6 @@ mod tests {
                     Ok(good())
                 }
             },
-            Duration::from_millis(200),
-            Duration::from_millis(1),
         )
         .unwrap();
         assert_eq!(polls, 4);

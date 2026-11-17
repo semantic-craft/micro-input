@@ -1237,11 +1237,9 @@ impl Drop for Lock {
     }
 }
 
-#[path = "recovery.rs"]
 mod recovery;
 pub use recovery::RecoveryPreview;
 
-#[path = "agent.rs"]
 pub mod agent;
 
 impl DocumentStore {

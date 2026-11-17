@@ -98,7 +98,7 @@ impl SlotTable {
     pub fn is_pinned(&self, slot_index: usize) -> bool {
         self.slots
             .get(slot_index)
-            .map_or(false, |s| s.mode == SlotMode::Pinned)
+            .is_some_and(|s| s.mode == SlotMode::Pinned)
     }
 
     pub fn active_place(&self, slot_index: usize) -> Option<&NavigationPlace> {
