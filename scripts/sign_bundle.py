@@ -23,6 +23,11 @@ MACHO_MAGICS = {
 LSREGISTER = Path(
     '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 )
+DEVELOPER_ID_PREFIX = 'Developer ID Application:'
+APPLE_DEVELOPMENT_PREFIX = 'Apple Development:'
+# Preferred when several Developer ID Application identities are present.
+# Apple Development is used only when the keychain has no Developer ID.
+PREFERRED_DEVELOPER_ID_TEAM = 'LQAVR62TK2'
 
 
 def is_macho_file(path: Path) -> bool:
@@ -121,6 +126,24 @@ def collect_sign_targets(bundle_path: Path) -> list[Path]:
     return nested
 
 
+def _identity_names(find_identity_output: str) -> list[str]:
+    return re.findall(r'"([^"]+)"', find_identity_output)
+
+
+def _select_dev_identity(names: list[str]) -> str:
+    developer_ids = [name for name in names if name.startswith(DEVELOPER_ID_PREFIX)]
+    if developer_ids:
+        team_marker = f'({PREFERRED_DEVELOPER_ID_TEAM})'
+        for name in developer_ids:
+            if team_marker in name:
+                return name
+        return developer_ids[0]
+    for name in names:
+        if name.startswith(APPLE_DEVELOPMENT_PREFIX):
+            return name
+    return '-'
+
+
 def _discover_dev_identity() -> str:
     env_id = os.environ.get('MI_CODESIGN_IDENTITY', '').strip()
     if env_id:
@@ -133,8 +156,25 @@ def _discover_dev_identity() -> str:
         )
     except (OSError, subprocess.CalledProcessError):
         return '-'
-    match = re.search(r'"(Apple Development:[^"]+)"', out)
-    return match.group(1) if match else '-'
+    return _select_dev_identity(_identity_names(out))
+
+
+def _uses_hardened_runtime(mode: str, identity: str) -> bool:
+    return mode == 'release' or identity.startswith(DEVELOPER_ID_PREFIX)
+
+
+def _codesign_argv(target: Path, identity: str, *, hardened: bool) -> list[str]:
+    cmd = ['codesign', '--force']
+    if hardened:
+        # Same flags as release signing. Downloader.xpc keeps the entitlements
+        # Sparkle shipped; --deep would copy those onto components that must not have them.
+        cmd.extend(['--options', 'runtime', '--timestamp'])
+        if target.name == 'Downloader.xpc':
+            cmd.append('--preserve-metadata=entitlements')
+    else:
+        cmd.append('--timestamp=none')
+    cmd.extend(['--sign', identity, str(target)])
+    return cmd
 
 
 def _redact_identity(message: str, identity: str) -> str:
@@ -158,13 +198,9 @@ def sign_bundle(bundle_path: Path, mode: str = 'dev', identity: str | None = Non
         raise ValueError('Release signing forbids ad-hoc (-) identity')
 
     targets = collect_sign_targets(bundle_path)
+    hardened = _uses_hardened_runtime(mode, resolved_identity)
     for target in targets:
-        cmd = ['codesign', '--force']
-        if mode == 'release':
-            cmd.extend(['--options', 'runtime', '--timestamp'])
-        else:
-            cmd.append('--timestamp=none')
-        cmd.extend(['--sign', resolved_identity, str(target)])
+        cmd = _codesign_argv(target, resolved_identity, hardened=hardened)
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             err = _redact_identity((proc.stderr or proc.stdout or '').strip(), resolved_identity)

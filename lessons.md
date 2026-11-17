@@ -1,5 +1,11 @@
 # 项目教训
 
+## QA 包不能外壳 ad-hoc、内层另签
+
+- 起因与后果：`scripts/sign_bundle.py --mode dev` 自动选用第一张 `Apple Development` 证书（`--timestamp=none`、无硬化运行时）。该证书吊销后，`scripts/run --verify` 仍只对 QA 外壳做 ad-hoc 重签，嵌入的 Sparkle 保留已吊销签名。Gatekeeper 把 QA 包标成恶意软件（`CSSMERR_TP_CERT_REVOKED`）。
+- 修复：开发/QA 选证优先 `Developer ID Application:`（Team `LQAVR62TK2`），没有 Developer ID 才回退 `Apple Development:`；`MI_CODESIGN_IDENTITY` 仍可覆盖。选中 Developer ID 时走 `scripts/sign_bundle.py` 与发行相同的由内向外硬化运行时和时间戳，`Downloader.xpc` 保留 Sparkle 授权，不用 `--deep`。QA 改写 bundle id 后整包重签。`scripts/install-app --allow-dev` 与 `scripts/release-macos` 的自动选证不改。
+- 验证点：`scripts/tests/test_sign_bundle_launcher.py`、`scripts/tests/test_install_app_launcher.py`、`scripts/tests/test_run_verify_launcher.py`。Linux 上不能执行真实 `codesign`、`spctl` 或公证。Seen 1x（2026-11-17）。
+
 ## 时序门禁使用独立测试进程
 
 - 起因与后果：方案切换的 2 毫秒检查与合成硬件用例共用进程内的隔离运行时，整组执行时出现超限；未改动主线的同组对照也失败，单独执行则通过。

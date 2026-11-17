@@ -22,7 +22,7 @@ scripts/run            # 启动当前checkout的target/MicroInput.app
 scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收副本
 ```
 
-需要 macOS 14+、Rust stable 与 Swift 工具链。本地开发构建不加载凭据并使用本机开发或 ad-hoc 签名；正式发行包经 Developer ID 签名与 Apple 公证分发，在工作台「通用」设置与菜单栏提供基于 Sparkle 的自动与手动检查更新。仓库采用 MIT 许可证（见 [LICENSE](../LICENSE)）。
+需要 macOS 14+、Rust stable 与 Swift 工具链。本地开发与 QA 构建不加载公证凭据；钥匙串中有 `Developer ID Application` 时优先用它签名（多个时优先 Team `LQAVR62TK2`），否则回退 `Apple Development` 或 ad-hoc。正式发行包仍由 `scripts/release-macos` 自动选择 Developer ID 并经 Apple 公证分发，在工作台「通用」设置与菜单栏提供基于 Sparkle 的自动与手动检查更新。仓库采用 MIT 许可证（见 [LICENSE](../LICENSE)）。
 
 「通用 → 启动与语言」支持界面语言即时切换（跟随系统、简体中文 `zh-Hans`、English `en`），覆盖工作台、菜单栏弹层、AppKit 主菜单/Dock 菜单及被动速查/轮盘/HUD 面板，不改写 `workbench.json` 中的规范预设原名或用户自定义命名。开机自动启动通过 macOS `SMAppService.mainApp` 管理，限定正式应用身份（`craft.semantic.micro-input.dev`），隔离验收与临时构建目录自动禁用以避免污染系统登录项；系统处于待批准状态时提供一键打开「系统设置 → 登录项」恢复入口。开启「开机后静默驻留菜单栏」（默认开启）后，经登录项事件启动时不弹出主窗并以菜单栏 `.accessory` 模式运行，手动打开工作台时自动提升为常规窗口。
 

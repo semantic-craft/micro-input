@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import plistlib
 import shutil
@@ -35,8 +36,26 @@ def _write_plist(path: Path, bundle_id: str, executable: str, pkg_type: str = 'A
 
 def _copy_macho(dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile('/usr/bin/true', dest)
+    true_bin = Path('/usr/bin/true')
+    magic = b''
+    if true_bin.is_file():
+        with true_bin.open('rb') as handle:
+            magic = handle.read(4)
+    if magic in sign_bundle_mod.MACHO_MAGICS:
+        shutil.copyfile(true_bin, dest)
+    else:
+        # Host /usr/bin/true is not Mach-O (Linux). A magic header is enough for
+        # collect_sign_targets; real codesign is skipped when the tool is absent.
+        dest.write_bytes(b'\xcf\xfa\xed\xfe' + b'\x00' * 28)
     dest.chmod(0o755)
+
+
+def _record_codesign(commands: list[list[str]]):
+    def fake_run(cmd, **kwargs):
+        commands.append([str(part) for part in cmd])
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout='', stderr='')
+
+    return fake_run
 
 
 class SignBundleTests(unittest.TestCase):
@@ -164,7 +183,125 @@ class SignBundleTests(unittest.TestCase):
             self.assertNotIn('0123456789ABCDEF0123456789ABCDEF01234567', msg)
             self.assertIn('<REDACTED_SIGNING_IDENTITY>', msg)
 
-    def test_real_codesign_verify_deep_strict_survives_qa_copytree_and_outer_resign(self):
+    def test_dev_discovery_prefers_developer_id_team_and_keeps_env_override(self):
+        preferred = 'Developer ID Application: Example (LQAVR62TK2)'
+        other_dev_id = 'Developer ID Application: Other Team (TEAMOTHER1)'
+        apple_dev = 'Apple Development: Example (B6NUMVUKU7)'
+        keychain = '\n'.join([
+            f'  1) AAAA "{apple_dev}"',
+            f'  2) BBBB "{other_dev_id}"',
+            f'  3) CCCC "{preferred}"',
+            '     3 valid identities found',
+        ])
+        self.assertEqual(
+            sign_bundle_mod._select_dev_identity(sign_bundle_mod._identity_names(keychain)),
+            preferred,
+        )
+        self.assertEqual(
+            sign_bundle_mod._select_dev_identity([other_dev_id, apple_dev]),
+            other_dev_id,
+        )
+        self.assertEqual(sign_bundle_mod._select_dev_identity([apple_dev]), apple_dev)
+        self.assertEqual(sign_bundle_mod._select_dev_identity([]), '-')
+
+        with patch.dict(os.environ, {'MI_CODESIGN_IDENTITY': 'Apple Development: Override (DEV1111111)'}, clear=False), \
+                patch('subprocess.check_output', side_effect=AssertionError('keychain must not be read')):
+            self.assertEqual(
+                sign_bundle_mod._discover_dev_identity(),
+                'Apple Development: Override (DEV1111111)',
+            )
+        with patch.dict(os.environ, {'MI_CODESIGN_IDENTITY': ''}, clear=False), \
+                patch('subprocess.check_output', return_value=keychain):
+            self.assertEqual(sign_bundle_mod._discover_dev_identity(), preferred)
+        with patch.dict(os.environ, {'MI_CODESIGN_IDENTITY': ''}, clear=False), \
+                patch('subprocess.check_output', side_effect=FileNotFoundError):
+            self.assertEqual(sign_bundle_mod._discover_dev_identity(), '-')
+
+    def test_developer_id_reuses_release_hardened_runtime_without_deep(self):
+        identity = 'Developer ID Application: Example (LQAVR62TK2)'
+        with tempfile.TemporaryDirectory(prefix='mi-sign-devid-') as tmp:
+            app = self._build_nested_bundle(Path(tmp).resolve())
+            dev_cmds: list[list[str]] = []
+            release_cmds: list[list[str]] = []
+            with patch('subprocess.run', side_effect=_record_codesign(dev_cmds)):
+                dev_targets = sign_bundle_mod.sign_bundle(app, mode='dev', identity=identity)
+            with patch('subprocess.run', side_effect=_record_codesign(release_cmds)):
+                release_targets = sign_bundle_mod.sign_bundle(app, mode='release', identity=identity)
+
+            self.assertEqual(dev_cmds, release_cmds)
+            self.assertEqual(dev_targets, release_targets)
+            self.assertGreater(len(dev_cmds), 1)
+            signed = []
+            for cmd in dev_cmds:
+                self.assertNotIn('--deep', cmd)
+                self.assertNotIn('--timestamp=none', cmd)
+                self.assertEqual(cmd[cmd.index('--options') + 1], 'runtime')
+                self.assertIn('--timestamp', cmd)
+                self.assertEqual(cmd[cmd.index('--sign') + 1], identity)
+                target_name = Path(cmd[-1]).name
+                if target_name == 'Downloader.xpc':
+                    self.assertIn('--preserve-metadata=entitlements', cmd)
+                else:
+                    self.assertNotIn('--preserve-metadata=entitlements', cmd)
+                signed.append(target_name)
+            self.assertLess(signed.index('Downloader.xpc'), signed.index('Sparkle.framework'))
+            self.assertLess(signed.index('Installer.xpc'), signed.index('Sparkle.framework'))
+            self.assertLess(signed.index('Autoupdate'), signed.index('Sparkle.framework'))
+            self.assertLess(signed.index('Updater.app'), signed.index('Sparkle.framework'))
+            self.assertEqual(signed[-1], app.name)
+            self.assertLess(signed.index('Sparkle.framework'), len(signed) - 1)
+
+    def test_apple_development_and_adhoc_keep_timestamp_none(self):
+        with tempfile.TemporaryDirectory(prefix='mi-sign-devcert-') as tmp:
+            app = self._build_nested_bundle(Path(tmp).resolve())
+            for identity in ('Apple Development: Example (B6NUMVUKU7)', '-'):
+                commands: list[list[str]] = []
+                with patch('subprocess.run', side_effect=_record_codesign(commands)):
+                    sign_bundle_mod.sign_bundle(app, mode='dev', identity=identity)
+                self.assertGreater(len(commands), 1)
+                for cmd in commands:
+                    self.assertIn('--timestamp=none', cmd)
+                    self.assertNotIn('--options', cmd)
+                    self.assertNotIn('--deep', cmd)
+                    self.assertNotIn('--preserve-metadata=entitlements', cmd)
+                    self.assertEqual(cmd[cmd.index('--sign') + 1], identity)
+
+    def test_qa_plist_rewrite_resigns_nested_sparkle_and_outer_app_with_one_identity(self):
+        identity = 'Developer ID Application: Example (LQAVR62TK2)'
+        with tempfile.TemporaryDirectory(prefix='mi-sign-qa-') as tmp:
+            root = Path(tmp).resolve()
+            source_app = self._build_nested_bundle(root)
+            qa_app = root / 'Micro Input QA.app'
+            shutil.copytree(source_app, qa_app, symlinks=True)
+            info_path = qa_app / 'Contents/Info.plist'
+            with info_path.open('rb') as handle:
+                info = plistlib.load(handle)
+            info['CFBundleIdentifier'] = 'com.semanticcraft.microinput.qa'
+            info['SUEnableAutomaticChecks'] = False
+            with info_path.open('wb') as handle:
+                plistlib.dump(info, handle)
+
+            commands: list[list[str]] = []
+            with patch.dict(os.environ, {'MI_CODESIGN_IDENTITY': identity}, clear=False), \
+                    patch('subprocess.run', side_effect=_record_codesign(commands)):
+                sign_bundle_mod.sign_bundle(qa_app, mode='dev')
+
+            identities = {cmd[cmd.index('--sign') + 1] for cmd in commands}
+            self.assertEqual(identities, {identity})
+            rels = []
+            for cmd in commands:
+                target = Path(cmd[-1])
+                rels.append('.' if target == qa_app else str(target.relative_to(qa_app)))
+            self.assertIn('.', rels)
+            self.assertTrue(any(rel.endswith('Downloader.xpc') for rel in rels))
+            self.assertTrue(any(rel.endswith('Installer.xpc') for rel in rels))
+            self.assertTrue(any(rel.endswith('Autoupdate') for rel in rels))
+            self.assertTrue(any(rel.endswith('Updater.app') for rel in rels))
+            self.assertIn('Contents/Frameworks/Sparkle.framework', rels)
+            self.assertNotIn('-', identities)
+
+    @unittest.skipUnless(shutil.which('codesign'), 'requires macOS codesign')
+    def test_real_codesign_verify_deep_strict_after_consistent_inside_out_resign(self):
         with tempfile.TemporaryDirectory(prefix='mi-sign-real-') as tmp:
             root = Path(tmp).resolve()
             source_app = self._build_nested_bundle(root)
@@ -180,7 +317,7 @@ class SignBundleTests(unittest.TestCase):
             info['SUEnableAutomaticChecks'] = False
             with info_path.open('wb') as handle:
                 plistlib.dump(info, handle)
-            subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(qa_app)], check=True)
+            sign_bundle_mod.sign_bundle(qa_app, mode='dev', identity='-')
             subprocess.run(['codesign', '--verify', '--deep', '--strict', str(qa_app)], check=True)
 
 

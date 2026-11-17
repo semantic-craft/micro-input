@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import os
 from pathlib import Path
 import plistlib
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / 'release-macos'
 LOADER = importlib.machinery.SourceFileLoader('release_macos', str(SCRIPT_PATH))
@@ -36,6 +38,16 @@ class ReleaseMacOSTests(unittest.TestCase):
                 },
                 handle,
             )
+
+    def test_release_auto_select_still_uses_the_first_developer_id(self):
+        first = 'Developer ID Application: First Match (TEAMFIRST01)'
+        later = 'Developer ID Application: Example (LQAVR62TK2)'
+        output = f'  1) AAAA "{first}"\n  2) BBBB "{later}"\n     2 valid identities found\n'
+        with patch.dict(os.environ, {'MI_RELEASE_SIGN_IDENTITY': ''}, clear=False), \
+                patch.object(release_mod.subprocess, 'check_output', return_value=output):
+            self.assertEqual(release_mod.resolve_release_signing_identity(), first)
+        with patch.dict(os.environ, {'MI_RELEASE_SIGN_IDENTITY': later}, clear=False):
+            self.assertEqual(release_mod.resolve_release_signing_identity(), later)
 
     def test_parse_args_enforces_tag_format_and_rejects_unknown_flags(self):
         args = release_mod.parse_args(['v0.5.0', '--publish', '--install'])

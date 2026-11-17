@@ -323,7 +323,10 @@ def main() -> int:
         info['SUEnableAutomaticChecks'] = False
         with info_path.open('wb') as handle:
             plistlib.dump(info, handle)
-        subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(app)], check=True)
+        subprocess.run(
+            [sys.executable, str(root / 'scripts/sign_bundle.py'), str(app), '--mode', 'dev'],
+            check=True,
+        )
 
         audit_log = evidence_dir / 'audit.jsonl'
         run_env['MI_DOCUMENT_DIR'] = str(documents_dir)

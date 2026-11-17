@@ -295,6 +295,34 @@ class RunVerifyLauncherTests(unittest.TestCase):
         self.assertNotIn('__CFBundleIdentifier', captured_env)
         self.assertNotIn('XPC_SERVICE_NAME', captured_env)
 
+    def test_verify_resigns_qa_bundle_inside_out_instead_of_adhoc_outer_only(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+        child = FakeVerifyChild([0])
+        run_calls = []
+
+        def fake_run(cmd, **kwargs):
+            run_calls.append([str(part) for part in cmd])
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with patch.object(sys, 'argv', [str(script), '--verify', '--timeout=10']), \
+                patch('pathlib.Path.home', return_value=root / 'fake_home'), \
+                patch('subprocess.Popen', return_value=child), \
+                patch('subprocess.run', side_effect=fake_run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+
+        sign_cmds = [cmd for cmd in run_calls if any(part.endswith('sign_bundle.py') for part in cmd)]
+        self.assertEqual(len(sign_cmds), 1)
+        cmd = sign_cmds[0]
+        self.assertEqual(cmd[0], sys.executable)
+        self.assertTrue(cmd[-4].endswith('sign_bundle.py'))
+        self.assertTrue(cmd[-3].endswith('Micro Input QA.app'))
+        self.assertEqual(cmd[-2:], ['--mode', 'dev'])
+        self.assertFalse(any(call[:4] == ['codesign', '--force', '--sign', '-'] for call in run_calls))
+
     def test_verify_preserves_framework_symlinks_and_disables_updater(self):
         root = self._prepare_checkout()
         script = root / 'scripts/run'
@@ -339,10 +367,14 @@ class RunVerifyLauncherTests(unittest.TestCase):
         self.assertIs(captured['plist']['SUEnableAutomaticChecks'], False)
         self.assertEqual(captured['env'].get('MI_DISABLE_UPDATER'), '1')
         unregistered_targets = [cmd[-1] for cmd in run_calls if len(cmd) >= 3 and cmd[-2] == '-u']
-        self.assertTrue(
-            any(target.endswith('Sparkle.framework/Versions/B/Updater.app') for target in unregistered_targets),
-            f'Expected nested Updater.app unregistration in {unregistered_targets}',
-        )
+        lsreg = Path('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister')
+        if lsreg.is_file():
+            self.assertTrue(
+                any(target.endswith('Sparkle.framework/Versions/B/Updater.app') for target in unregistered_targets),
+                f'Expected nested Updater.app unregistration in {unregistered_targets}',
+            )
+        else:
+            self.assertEqual(unregistered_targets, [])
 
     def test_verify_prunes_completed_default_qa_runs_beyond_retention_cap(self):
         root = self._prepare_checkout()

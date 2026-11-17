@@ -133,6 +133,53 @@ class InstallAppTests(unittest.TestCase):
         self.fake_lsregister = self.root / 'lsregister'
         self.fake_lsregister.write_text('#!/bin/sh\n', encoding='utf-8')
 
+    def test_allow_dev_guard_still_rejects_apple_development_and_accepts_developer_id(self):
+        revoked = 'Authority=Apple Development: Example (B6NUMVUKU7)'
+        developer_id = 'Authority=Developer ID Application: Example (LQAVR62TK2)'
+        self.assertFalse(install_mod.has_developer_id_authority(revoked))
+        self.assertFalse(install_mod.has_developer_id_authority('Signature=adhoc'))
+        self.assertTrue(install_mod.has_developer_id_authority(developer_id))
+
+        dest = _make_fake_bundle(self.root / 'Applications/Micro Input.app', version='1')
+        apple_dev = _make_fake_bundle(
+            self.root / 'src-apple-dev/MicroInput.app',
+            version='2',
+            authority=revoked,
+            designated_req=APPLE_DEV_DR,
+        )
+        runner = FakeCommandRunner()
+        with self.assertRaises(install_mod.InstallerError) as ctx:
+            install_mod.install_app(
+                source=apple_dev,
+                dest=dest,
+                allow_dev=False,
+                runner=runner,
+                kill_fn=runner.kill,
+                sleep_fn=lambda _: None,
+                lsregister_path=self.fake_lsregister,
+            )
+        self.assertIn('--allow-dev', str(ctx.exception))
+        self.assertEqual(_read_bundle_version(dest), '1')
+        self.assertFalse(any(c[0] == 'tccutil' for c in runner.calls))
+
+        dev_id_src = _make_fake_bundle(
+            self.root / 'src-developer-id/MicroInput.app',
+            version='4',
+            authority=developer_id,
+            designated_req=DEV_ID_DR,
+        )
+        accepted = install_mod.install_app(
+            source=dev_id_src,
+            dest=dest,
+            allow_dev=False,
+            runner=FakeCommandRunner(),
+            kill_fn=lambda *_args: None,
+            sleep_fn=lambda _: None,
+            lsregister_path=self.fake_lsregister,
+        )
+        self.assertEqual(accepted.status, 'installed')
+        self.assertEqual(_read_bundle_version(dest), '4')
+
     def test_rejects_dev_and_adhoc_bundles_without_allow_dev_leaving_dest_and_tcc_untouched(self):
         dest = _make_fake_bundle(self.root / 'Applications/Micro Input.app', version='1')
         dev_src = _make_fake_bundle(
