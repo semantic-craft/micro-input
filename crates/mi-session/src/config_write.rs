@@ -446,9 +446,16 @@ impl DeviceSession {
             let mut queue = self.queue.lock().await;
             let before = self.three_layer_position(&mut queue).await?;
             let original = self.read_files_locked(&mut queue).await?;
-            let compiled = mi_model::apply::compile_six_layer_profile(
+            let fw = self.observed_firmware_version();
+            let default_joystick_mode = fw
+                .as_deref()
+                .filter(|v| mi_model::supports_v070_mouse_tokens(v))
+                .map(|_| "mouse");
+            let compiled = mi_model::apply::compile_six_layer_profile_for_firmware(
                 &original.keymap.bytes,
                 smart_bytes(&original),
+                fw.as_deref(),
+                default_joystick_mode,
             )
             .map_err(SessionError::Config)?;
             if self.three_layer_position(&mut queue).await? != before {

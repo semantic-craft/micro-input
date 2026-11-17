@@ -908,9 +908,9 @@ final class MicroInputTests: XCTestCase {
         store.dispatch("sidebar", ["SelectProfile": agRow.profileId])
         store.dispatch("canvas", ["SelectSurface": "Joystick"])
 
-        XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "logical_sectors")
+        XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "mouse")
         XCTAssertFalse(store.inspector.editableInspector?.joystickModeSummary.isEmpty ?? true)
-        XCTAssertEqual(store.canvas.joystickModeLabel, "8向摇杆")
+        XCTAssertEqual(store.canvas.joystickModeLabel, "硬件指针")
 
         let renderHost = {
             let view = CreatorMicroInlineInspectorView(

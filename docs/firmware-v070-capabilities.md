@@ -20,23 +20,23 @@
 | `mouse.config` | NVS `wl_mouse` | 读取（`params: null`）与等价回写均返回 13 个整型字段 |
 | `joystick.deadzone` | NVS `joystick` | 读取（`params: null`）与等价回写返回 `{"v": 0.15}` |
 
-### `mouse.config` 字段定义（实机默认值）
+### `mouse.config` 字段定义（Micro Input 标准高速档默认值）
 
 ```json
 {
-  "delay_ms": 100,
-  "interval_ms": 20,
-  "move_delta": 8,
-  "max_speed": 10,
-  "time_to_max": 30,
-  "wheel_delay_ms": 100,
-  "wheel_interval_ms": 80,
-  "wheel_delta": 1,
-  "wheel_max_speed": 8,
-  "wheel_time_to_max": 40,
-  "stick_speed": 2,
-  "stick_regulator": 20,
-  "stick_scroll": 40
+  "delay_ms": 80,
+  "interval_ms": 16,
+  "move_delta": 12,
+  "max_speed": 18,
+  "time_to_max": 24,
+  "wheel_delay_ms": 80,
+  "wheel_interval_ms": 60,
+  "wheel_delta": 2,
+  "wheel_max_speed": 12,
+  "wheel_time_to_max": 30,
+  "stick_speed": 16,
+  "stick_regulator": 10,
+  "stick_scroll": 30
 }
 ```
 
@@ -44,8 +44,8 @@
 
 - 请求（读）：`{"id": N, "method": "joystick.deadzone", "params": null}`
 - 请求（写）：`{"id": N, "method": "joystick.deadzone", "params": {"v": <f64>}}`
-- 响应：`{"id": N, "method": "joystick.deadzone", "result": {"v": 0.15}}`
-- 边界与步进约束：默认 `0.15`，UI 范围收敛在 `0.02..0.45`（实机兼容边界 `0.0025`–`100.0`，常规步进 `0.01`/`0.03`/`0.1`）。
+- 响应：`{"id": N, "method": "joystick.deadzone", "result": {"v": 0.07}}`
+- 边界与步进约束：Micro Input 默认 `0.07`（出厂初始 `0.15`），UI 范围收敛在 `0.02..0.45`（实机兼容边界 `0.0025`–`100.0`，常规步进 `0.01`/`0.03`/`0.1`）。
 
 ---
 

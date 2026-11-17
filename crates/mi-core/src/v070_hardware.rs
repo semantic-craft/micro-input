@@ -471,14 +471,14 @@ mod tests {
     fn flattened_projections_preserve_flat_json_and_deref_ergonomics() {
         let mut mouse = V070MouseConfigProjection::default();
         assert_eq!(mouse.move_delta, MouseConfig::default().move_delta);
-        mouse.move_delta = 12;
-        assert_eq!(mouse.config.move_delta, 12);
+        mouse.move_delta = 14;
+        assert_eq!(mouse.config.move_delta, 14);
 
         let mouse_json = serde_json::to_value(&mouse).unwrap();
         let obj = mouse_json.as_object().unwrap();
         assert!(obj.get("config").is_none());
         assert_eq!(obj["preset"], "standard");
-        assert_eq!(obj["move_delta"], 12);
+        assert_eq!(obj["move_delta"], 14);
         assert_eq!(obj["deadzone"], JoystickDeadzone::DEFAULT);
         let decoded_mouse: V070MouseConfigProjection = serde_json::from_value(json!({
             "preset": "fast",

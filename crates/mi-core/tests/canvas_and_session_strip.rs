@@ -1018,7 +1018,7 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         .consume_physical_input_event(mk_ev(1, "AG14", InputEventKind::Pressed), t0)
         .expect("idle turn opens model picker");
     assert_eq!(open_receipt.detail, "antigravity/model-picker-next");
-    assert!(store.is_model_picker_mouse_capture_enabled());
+    assert!(!store.is_model_picker_mouse_capture_enabled());
 
     // 2. Rotate CW/CCW while active -> model-picker-next / prev.
     let next_receipt = store
@@ -1036,36 +1036,23 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         .expect("CCW in active picker");
     assert_eq!(prev_receipt.detail, "antigravity/model-picker-prev");
 
-    // 3. Hardware mouse horizontal flick right/left -> effort-right / effort-left.
+    // 3. Hardware mouse deltas are never intercepted even while model picker is active.
+    let before_mouse_count = store.dispatched_receipts().len();
     store.inject_model_picker_mouse_delta_for_test(34.0, 2.0);
     store.poll_at(t0 + Duration::from_millis(200));
-    assert_eq!(
-        store
-            .dispatched_receipts()
-            .last()
-            .map(|r| r.detail.as_str()),
-        Some("antigravity/model-picker-effort-right")
-    );
     store.inject_model_picker_mouse_delta_for_test(-34.0, -1.0);
     store.poll_at(t0 + Duration::from_millis(450));
-    assert_eq!(
-        store
-            .dispatched_receipts()
-            .last()
-            .map(|r| r.detail.as_str()),
-        Some("antigravity/model-picker-effort-left")
-    );
+    assert_eq!(store.dispatched_receipts().len(), before_mouse_count);
 
-    // 4. Sector right (AG18) also selects effort while picker is active even in mouse mode.
-    let sector_right = store
+    // 4. Sector right (AG18) is not intercepted by model picker in mouse mode.
+    assert!(store
         .consume_physical_input_event(
             mk_ev(5, "AG18", InputEventKind::Pressed),
             t0 + Duration::from_millis(500),
         )
-        .expect("sector right in active picker");
-    assert_eq!(sector_right.detail, "antigravity/model-picker-effort-right");
+        .is_none());
 
-    // 5. Short tap ENC_CLK (< 350ms) confirms selection and disables mouse capture.
+    // 5. Short tap ENC_CLK (< 350ms) confirms selection.
     assert!(store
         .consume_physical_input_event(
             mk_ev(6, "ENC_CLK", InputEventKind::Pressed),
@@ -1112,10 +1099,17 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
             t0 + Duration::from_millis(1300),
         )
         .is_some());
-    assert!(store.is_model_picker_mouse_capture_enabled());
+    assert!(!store.is_model_picker_mouse_capture_enabled());
     store.system_will_sleep();
     assert!(!store.is_model_picker_mouse_capture_enabled());
     store.system_did_wake();
+    for _ in 0..50 {
+        store.poll_at(t0 + Duration::from_millis(1400));
+        if store.projection().v070_hardware.host_sleep_status == "awake" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 
     assert!(store
         .consume_physical_input_event(
@@ -1168,7 +1162,7 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         )
         .expect("idle turn opens model picker");
     assert_eq!(picker_open.detail, "antigravity/model-picker-next");
-    assert!(store.is_model_picker_mouse_capture_enabled());
+    assert!(!store.is_model_picker_mouse_capture_enabled());
 
     assert!(store
         .consume_physical_input_event(
@@ -1197,6 +1191,16 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         .is_none());
 
     store
+        .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+            KnobJoystickPreset::DualScrollProjectsAndChat,
+        ))
+        .unwrap();
+    store
+        .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+            KnobJoystickPreset::ModelSelectionAndMouse,
+        ))
+        .unwrap();
+    store
         .dispatch_inspector_action(InspectorAction::SetJoystickMode(
             JoystickControlMode::LogicalSectors,
         ))
@@ -1221,7 +1225,7 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         )
         .expect("CW after search cancelled");
     assert_eq!(normal_turn.detail, "antigravity/model-picker-next");
-    assert!(store.is_model_picker_mouse_capture_enabled());
+    assert!(!store.is_model_picker_mouse_capture_enabled());
 
     assert!(store
         .consume_physical_input_event(
@@ -1264,7 +1268,7 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         )
         .expect("CCW from idle activates model picker");
     assert_eq!(reopen_by_turn.detail, "antigravity/model-picker-prev");
-    assert!(store.is_model_picker_mouse_capture_enabled());
+    assert!(!store.is_model_picker_mouse_capture_enabled());
 
     store.foreground_changed(Some("com.apple.Safari"));
     assert!(!store.is_model_picker_mouse_capture_enabled());
@@ -1283,7 +1287,7 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
             .editable()
             .unwrap()
             .joystick_mode,
-        JoystickControlMode::LogicalSectors
+        JoystickControlMode::Mouse
     );
 }
 

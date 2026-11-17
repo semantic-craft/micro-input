@@ -391,7 +391,7 @@ struct CreatorMicroInlineInspectorView: View {
                             }
                         }
 
-                        Text(store.tr("旋转左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。"))
+                        Text(store.tr("摇杆全层固定为纯硬件高速鼠标指针，任何时候推动摇杆均直接高速移动光标，不拦截或抢占方向。"))
                             .font(UITheme.micro)
                             .foregroundStyle(UITheme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)

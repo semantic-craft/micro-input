@@ -508,7 +508,7 @@ final class DesignSystemVerificationTests: XCTestCase {
         let ag15 = try XCTUnwrap(hwSheet.keyCells.first(where: { $0.bindingId == "AG15" }))
         XCTAssertEqual(ag15.shortLabel, "鼠标指针")
         let ag18 = try XCTUnwrap(hwSheet.keyCells.first(where: { $0.bindingId == "AG18" }))
-        XCTAssertEqual(ag18.shortLabel, "模型力度")
+        XCTAssertEqual(ag18.shortLabel, "—")
 
         let (workbenchWindow, workbenchHost) = makeHostedWindow(
             ClassicWorkbenchView(store: store),

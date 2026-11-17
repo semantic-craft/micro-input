@@ -515,11 +515,12 @@ pub fn relocalize_status_message(msg: &str, next_locale: ResolvedLocale) -> Stri
                 return format!("Failed to open Accessibility settings ({err})");
             }
             if let Some(target) = msg
-                .strip_prefix("已弹出模型选择页 · 左右旋转选模型，按右选模型力度 (")
+                .strip_prefix("已弹出模型选择页 · 左右旋转选模型，短按确认 (")
+                .or_else(|| msg.strip_prefix("已弹出模型选择页 · 左右旋转选模型，按右选模型力度 ("))
                 .and_then(|s| s.strip_suffix(')'))
             {
                 return format!(
-                    "Model picker opened · Turn dial for model, tilt right for effort ({target})"
+                    "Model picker opened · Turn dial to select, tap to confirm ({target})"
                 );
             }
             if let Some(target) = msg

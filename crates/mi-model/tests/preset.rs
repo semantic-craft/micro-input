@@ -643,6 +643,16 @@ fn six_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
     // Bind Slice C & D actions (navigation, prompts, submit) onto Antigravity before exporting
     let ag_pid = ids[0].clone();
     let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+    d.set_control_settings(
+        &ag_pid,
+        &ag_lid,
+        mi_model::control_settings::ControlSettings {
+            joystick_mode: "logical_sectors".into(),
+            active_sectors: 4,
+            encoder_hold_action_id: None,
+        },
+    )
+    .unwrap();
     let catalog = mi_model::draft::actions();
     let find_cat = |id: &str| catalog.iter().find(|a| a.id == id).unwrap().clone();
     for (slot, action_id) in [

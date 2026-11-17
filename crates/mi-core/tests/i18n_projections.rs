@@ -96,7 +96,7 @@ fn live_language_switching_system_locale_and_host_preferences_roundtrip() {
         mi_model::i18n::localize_layer_name("默认层", ResolvedLocale::En),
         "Default Layer"
     );
-    assert_eq!(store.projection().canvas.joystick.mode, "logical_sectors");
+    assert_eq!(store.projection().canvas.joystick.mode, "mouse");
 
     match &store.projection().inspector.body {
         InspectorBodyProjection::Editable(body) => {

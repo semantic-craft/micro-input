@@ -67,6 +67,8 @@ impl Draft {
             // Dormant originals and independent assignments remain addressable.
             let required_slots = if settings.joystick_mode == "logical_sectors" {
                 16 + settings.active_sectors as usize
+            } else if matches!(settings.joystick_mode.as_str(), "mouse" | "scroll") {
+                layer.control_order.len().max(20)
             } else {
                 layer.control_order.len()
             };

@@ -454,13 +454,10 @@ mod tests {
             if profile_name == "Herdr" {
                 assert_eq!(by_id("AG01")["label"], "选择 Space / Tab (command p)");
                 assert_eq!(by_id("ENC_CLK")["label"], "显示 / 隐藏侧栏 (command b)");
-                assert_eq!(by_id("AG15")["label"], "聚焦上方面板 (command+option Up)");
-                assert_eq!(by_id("AG16")["label"], "聚焦左方面板 (command+option Left)");
-                assert_eq!(by_id("AG17")["label"], "聚焦下方面板 (command+option Down)");
-                assert_eq!(
-                    by_id("AG18")["label"],
-                    "聚焦右方面板 (command+option Right)"
-                );
+                assert_eq!(by_id("AG15")["label"], "不可用 / 未配置");
+                assert_eq!(by_id("AG16")["label"], "不可用 / 未配置");
+                assert_eq!(by_id("AG17")["label"], "不可用 / 未配置");
+                assert_eq!(by_id("AG18")["label"], "不可用 / 未配置");
             } else if profile_name == "Antigravity" {
                 assert_eq!(by_id("AG01")["label"], "聚焦输入框");
                 assert_eq!(by_id("AG02")["label"], "新建会话");
@@ -478,10 +475,10 @@ mod tests {
                 assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
                 assert_eq!(by_id("ENC_CLK")["label"], "搜索会话");
                 assert_eq!(state["encoder_hold_label"], "搜索会话");
-                assert_eq!(by_id("AG15")["label"], "向上滚动对话");
-                assert_eq!(by_id("AG16")["label"], "历史后退 (command [)");
-                assert_eq!(by_id("AG17")["label"], "向下滚动对话");
-                assert_eq!(by_id("AG18")["label"], "历史前进 (command ])");
+                assert_eq!(by_id("AG15")["label"], "不可用 / 未配置");
+                assert_eq!(by_id("AG16")["label"], "不可用 / 未配置");
+                assert_eq!(by_id("AG17")["label"], "不可用 / 未配置");
+                assert_eq!(by_id("AG18")["label"], "不可用 / 未配置");
             } else {
                 assert_eq!(by_id("AG01")["label"], "聚焦输入框");
                 assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
@@ -497,6 +494,18 @@ mod tests {
             .find(|pid| store.draft.document.editable.graph.profiles[*pid].name == "Antigravity")
             .unwrap();
         let lid = store.draft.document.editable.graph.profiles[ag_pid].layer_order[0].clone();
+        store
+            .draft
+            .set_control_settings(
+                ag_pid,
+                &lid,
+                crate::control_settings::ControlSettings {
+                    joystick_mode: "logical_sectors".into(),
+                    active_sectors: 4,
+                    encoder_hold_action_id: None,
+                },
+            )
+            .unwrap();
         let catalog = crate::draft::actions();
         let find_cat = |id: &str| catalog.iter().find(|a| a.id == id).unwrap().clone();
         store

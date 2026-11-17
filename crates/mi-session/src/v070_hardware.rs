@@ -751,7 +751,7 @@ mod tests {
         let mc = session.read_mouse_config().await.unwrap();
         assert_eq!(mc, MouseConfig::default());
         let mut custom_mc = mc;
-        custom_mc.move_delta = 12;
+        custom_mc.move_delta = 14;
         assert_eq!(
             session.write_mouse_config(&custom_mc).await.unwrap(),
             custom_mc

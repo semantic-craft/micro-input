@@ -201,7 +201,30 @@ fn host_mouse_commands_preserve_host_adapter_in_applied_six_layer_plan() {
     let ag_id = id("Antigravity");
     let codex_id = id("Codex");
     let dsh_id = id("DeepSeek Coder (DSH)");
+    let dsh_layer = draft.document.editable.graph.profiles[&dsh_id].layer_order[0].clone();
+    draft
+        .set_control_settings(
+            &dsh_id,
+            &dsh_layer,
+            mi_model::control_settings::ControlSettings {
+                joystick_mode: "logical_sectors".into(),
+                active_sectors: 4,
+                encoder_hold_action_id: None,
+            },
+        )
+        .unwrap();
     let ag_layer = draft.document.editable.graph.profiles[&ag_id].layer_order[0].clone();
+    draft
+        .set_control_settings(
+            &ag_id,
+            &ag_layer,
+            mi_model::control_settings::ControlSettings {
+                joystick_mode: "logical_sectors".into(),
+                active_sectors: 4,
+                encoder_hold_action_id: None,
+            },
+        )
+        .unwrap();
     let catalog = mi_model::draft::actions();
     let cycle_action = catalog
         .iter()
@@ -431,6 +454,18 @@ fn applied_six_layer_plan_tracks_and_gates_v070_joystick_hardware_modes() {
     let ag_id = id("Antigravity");
     let codex_id = id("Codex");
     let dsh_id = id("DeepSeek Coder (DSH)");
+    let dsh_layer = draft.document.editable.graph.profiles[&dsh_id].layer_order[0].clone();
+    draft
+        .set_control_settings(
+            &dsh_id,
+            &dsh_layer,
+            mi_model::control_settings::ControlSettings {
+                joystick_mode: "logical_sectors".into(),
+                active_sectors: 4,
+                encoder_hold_action_id: None,
+            },
+        )
+        .unwrap();
     let ag_layer = draft.document.editable.graph.profiles[&ag_id].layer_order[0].clone();
     draft
         .set_control_settings(
