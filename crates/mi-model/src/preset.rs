@@ -2960,7 +2960,10 @@ pub fn antigravity_layer_needs_side_panel_joystick_migration(
             .and_then(|id| doc.editable.graph.actions.get(id))
     };
     if cs.joystick_mode == "mouse" && cs.active_sectors == 0 {
-        return (16..=19u32).all(|slot| slot_action(&format!("logical-{slot}")).is_none());
+        return (16..=19u32).all(|slot| {
+            slot_action(&format!("logical-{slot}"))
+                .is_none_or(|a| a.id.starts_with("agent-model-picker-"))
+        });
     }
     if cs.joystick_mode == "logical_sectors" && cs.active_sectors == 4 {
         let is_cmd =
