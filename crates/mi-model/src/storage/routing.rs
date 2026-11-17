@@ -221,6 +221,11 @@ impl DocumentStore {
                         "model-picker-effort-left" => "降低模型力度（左）",
                         "model-picker-effort-right" => "选择 / 提高模型力度（右）",
                         "model-picker-cancel" => "取消模型选择",
+                        "subagent" | "subagent-open" => "选择 Subagent",
+                        "subagent-prev" => "选择上一 Subagent",
+                        "subagent-next" => "选择下一 Subagent",
+                        "subagent-confirm" => "确认打开 Subagent",
+                        "subagent-cancel" => "取消 Subagent 选择",
                         c if c.starts_with("submit-prompt:") => "粘贴指令并提交",
                         c if c.starts_with("prompt:") => "粘贴工程指令",
                         _ => "Agent 动作",
@@ -426,10 +431,14 @@ mod tests {
                 continue;
             }
             if profile_name == crate::preset::LOCAL_CODEX_PROFILE_NAME {
-                for slot in 0..6 {
+                assert_eq!(by_id("AG00")["available"], true);
+                assert_eq!(by_id("AG00")["label"], "选择 Subagent");
+                assert_eq!(by_id("AG01")["available"], true);
+                assert_eq!(by_id("AG01")["label"], "左键点击");
+                for slot in 2..6 {
                     let binding = format!("AG{slot:02}");
-                    assert_eq!(by_id(&binding)["available"], true);
-                    assert_eq!(by_id(&binding)["label"], format!("会话 {}", slot + 1));
+                    assert_eq!(by_id(&binding)["available"], false);
+                    assert_eq!(by_id(&binding)["label"], "不可用 / 未配置");
                 }
                 assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
                 assert_eq!(by_id("AG07")["label"], "聚焦输入框");
@@ -446,12 +455,12 @@ mod tests {
             }
 
             assert_eq!(by_id("AG00")["available"], true);
-            assert!(by_id("AG00")["label"]
-                .as_str()
-                .unwrap()
-                .starts_with("打开 "));
 
             if profile_name == "Herdr" {
+                assert!(by_id("AG00")["label"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("打开 "));
                 assert_eq!(by_id("AG01")["label"], "选择 Space / Tab (command p)");
                 assert_eq!(by_id("ENC_CLK")["label"], "显示 / 隐藏侧栏 (command b)");
                 assert_eq!(by_id("AG15")["label"], "不可用 / 未配置");
@@ -459,11 +468,13 @@ mod tests {
                 assert_eq!(by_id("AG17")["label"], "不可用 / 未配置");
                 assert_eq!(by_id("AG18")["label"], "不可用 / 未配置");
             } else if profile_name == "Antigravity" {
-                assert_eq!(by_id("AG01")["label"], "聚焦输入框");
-                assert_eq!(by_id("AG02")["label"], "新建会话");
-                assert_eq!(by_id("AG03")["label"], "选项目 / 新建项目");
-                assert_eq!(by_id("AG04")["label"], "选择模型");
-                assert_eq!(by_id("AG05")["label"], "项目工作区快切 (command+shift K)");
+                assert_eq!(by_id("AG00")["label"], "选择 Subagent");
+                assert_eq!(by_id("AG01")["label"], "左键点击");
+                for slot in 2..6 {
+                    let binding = format!("AG{slot:02}");
+                    assert_eq!(by_id(&binding)["available"], false);
+                    assert_eq!(by_id(&binding)["label"], "不可用 / 未配置");
+                }
                 assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
                 assert_eq!(by_id("AG07")["label"], "聚焦输入框");
                 assert_eq!(by_id("AG08")["label"], "打开内置浏览器");
@@ -480,7 +491,13 @@ mod tests {
                 assert_eq!(by_id("AG17")["label"], "不可用 / 未配置");
                 assert_eq!(by_id("AG18")["label"], "不可用 / 未配置");
             } else {
-                assert_eq!(by_id("AG01")["label"], "聚焦输入框");
+                assert_eq!(by_id("AG00")["label"], "选择 Subagent");
+                assert_eq!(by_id("AG01")["label"], "左键点击");
+                for slot in 2..6 {
+                    let binding = format!("AG{slot:02}");
+                    assert_eq!(by_id(&binding)["available"], false);
+                    assert_eq!(by_id(&binding)["label"], "不可用 / 未配置");
+                }
                 assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
                 assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
                 assert_eq!(by_id("ENC_CLK")["label"], "搜索会话");

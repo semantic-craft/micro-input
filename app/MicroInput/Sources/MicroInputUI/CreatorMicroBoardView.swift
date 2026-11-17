@@ -830,7 +830,7 @@ struct CreatorMicroSessionListView: View {
         let canvas = store.canvas
         let sessions = store.sessionStrip
         let keys = canvas.keycapCells.filter {
-            agentKind.supportsLiveSessionSlots && $0.slotRole == "TaskKey" && (0..<6).contains($0.primarySlot)
+            canvas.protectedLock == nil && agentKind.supportsLiveSessionSlots && $0.slotRole == "TaskKey" && (0..<6).contains($0.primarySlot)
         }
         if !keys.isEmpty {
             VStack(alignment: .leading, spacing: 12) {

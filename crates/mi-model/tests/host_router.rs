@@ -202,26 +202,27 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     // Released events never trigger host actions
     assert!(resolve_host_action(&draft.document, Some(ag_pid), "AG00", false).is_none());
 
-    // AG00 maps to logical-0 (Antigravity: OpenApp com.google.antigravity)
+    // AG00 maps to logical-0 (Antigravity: subagent picker), AG01 maps to logical-1 (left click)
     let resolved_0 = resolve_host_action(&draft.document, Some(ag_pid), "AG00", true).unwrap();
     assert_eq!(
         resolved_0,
-        ResolvedHostAction::OpenApp {
-            bundle_id: "com.google.antigravity".into(),
+        ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "subagent".into(),
         }
     );
 
     assert_eq!(
         resolve_host_action(&draft.document, Some(ag_pid), "AG01", true).unwrap(),
         ResolvedHostAction::AgentCommand {
-            adapter: "antigravity".into(),
-            command: "focus-input".into()
+            adapter: "host".into(),
+            command: "mouse-click:left".into()
         }
     );
+    for binding in ["AG02", "AG03", "AG04", "AG05"] {
+        assert!(resolve_host_action(&draft.document, Some(ag_pid), binding, true).is_none());
+    }
     for (binding, command) in [
-        ("AG02", "new-chat"),
-        ("AG03", "project"),
-        ("AG04", "model"),
         ("AG06", "live-voice"),
         ("AG07", "focus-input"),
         ("AG08", "browser"),
@@ -251,16 +252,6 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             command: "search".into(),
         })
     );
-    for binding in ["AG05"] {
-        assert!(
-            matches!(
-                resolve_host_action(&draft.document, Some(ag_pid), binding, true),
-                Some(ResolvedHostAction::Shortcut { target_bundle_id: Some(ref target), .. })
-                    if target == "com.google.antigravity"
-            ),
-            "Antigravity {binding} must resolve to com.google.antigravity shortcut"
-        );
-    }
     for binding in ["AG15", "AG16", "AG17", "AG18"] {
         assert!(resolve_host_action(&draft.document, Some(ag_pid), binding, true).is_none());
     }
@@ -304,17 +295,21 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
 
     assert_eq!(
         resolve_host_action(&draft.document, Some(dsh_pid), "AG00", true).unwrap(),
-        ResolvedHostAction::OpenApp {
-            bundle_id: "com.deepseek.dsh".into()
+        ResolvedHostAction::AgentCommand {
+            adapter: "dsh-desktop".into(),
+            command: "subagent".into()
         }
     );
     assert_eq!(
-        resolve_host_action(&draft.document, Some(dsh_pid), "AG02", true).unwrap(),
+        resolve_host_action(&draft.document, Some(dsh_pid), "AG01", true).unwrap(),
         ResolvedHostAction::AgentCommand {
-            adapter: "dsh-desktop".into(),
-            command: "search".into()
+            adapter: "host".into(),
+            command: "mouse-click:left".into()
         }
     );
+    for binding in ["AG02", "AG03", "AG04", "AG05"] {
+        assert!(resolve_host_action(&draft.document, Some(dsh_pid), binding, true).is_none());
+    }
 
     // Test Wide-Key fallback: if logical-10 has no action and logical-11 has an action, AG10 falls back to logical-11
     let lid = draft.document.editable.graph.profiles[ag_pid].layer_order[0].clone();
@@ -639,7 +634,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
             "{name} is controlled natively by its client app, not Micro Input host actions"
         );
     }
-    for (name, bundle) in [("DeepSeek Coder (DSH)", "com.deepseek.dsh")] {
+    for (name, adapter) in [("DeepSeek Coder (DSH)", "dsh-desktop")] {
         let pid = draft
             .document
             .editable
@@ -652,10 +647,21 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
             .clone();
         assert_eq!(
             resolve_host_action(&draft.document, Some(&pid), "AG00", true),
-            Some(ResolvedHostAction::OpenApp {
-                bundle_id: bundle.into()
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: adapter.into(),
+                command: "subagent".into()
             })
         );
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(&pid), "AG01", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "host".into(),
+                command: "mouse-click:left".into()
+            })
+        );
+        for binding in ["AG02", "AG03", "AG04", "AG05"] {
+            assert!(resolve_host_action(&draft.document, Some(&pid), binding, true).is_none());
+        }
         assert!(resolve_host_action(&draft.document, Some(&pid), "AG00", false).is_none());
         assert!(
             resolve_host_action(&draft.document, Some(&pid), "AG10", true).is_none(),

@@ -1740,6 +1740,17 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
     for (_, assignments) in &mut specs {
         assignments.retain(|(slot, ..)| *slot < 16);
     }
+    legacy_specs.extend(
+        specs
+            .iter()
+            .filter(|(name, _)| is_coding_agent_model_picker_starter_profile(name))
+            .cloned(),
+    );
+    for (name, assignments) in &mut specs {
+        if is_coding_agent_model_picker_starter_profile(name) {
+            replace_top_six_with_subagent_and_left_click(assignments);
+        }
+    }
 
     (specs, legacy_specs)
 }
@@ -1749,6 +1760,39 @@ fn is_coding_agent_model_picker_starter_profile(profile_name: &str) -> bool {
         profile_name.trim(),
         "Antigravity" | "DeepSeek Coder (DSH)" | LOCAL_CODEX_PROFILE_NAME
     )
+}
+
+fn canonical_coding_agent_top_row_assignments() -> [AgentAssignment; 2] {
+    [
+        (
+            0,
+            "agent-subagent",
+            "选择 Subagent",
+            "Agent",
+            "打开当前目标 Agent 的子智能体（Subagent）选择弹层，支持旋钮上下选择并短按打开",
+            ActionKind::AgentCommand {
+                adapter: "host".into(),
+                command: "subagent".into(),
+            },
+        ),
+        (
+            1,
+            "host-mouse-click-left",
+            "鼠标左键点击",
+            "鼠标控制",
+            "在当前光标位置发送左键按下与抬起（CGEvent）",
+            ActionKind::AgentCommand {
+                adapter: "host".into(),
+                command: "mouse-click:left".into(),
+            },
+        ),
+    ]
+}
+
+fn replace_top_six_with_subagent_and_left_click(assignments: &mut Vec<AgentAssignment>) {
+    assignments.retain(|(slot, ..)| !(0..=5).contains(slot));
+    assignments.extend(canonical_coding_agent_top_row_assignments());
+    assignments.sort_by_key(|(slot, ..)| *slot);
 }
 
 fn canonical_encoder_model_picker_assignments() -> [AgentAssignment; 3] {
@@ -2155,6 +2199,82 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                     }
                 }
                 if let Some(lid) = first_lid {
+                    if coding_agent_layer_needs_cockpit_top_six_migration(
+                        &work.document,
+                        profile_name,
+                        &lid,
+                    ) {
+                        for slot in 0..=5u32 {
+                            work.unassign(&json!(pid), &json!(lid), slot)?;
+                        }
+                        for (slot, id, name, category, detail, kind) in
+                            canonical_coding_agent_top_row_assignments()
+                        {
+                            let action = crate::draft::Action {
+                                id: id.into(),
+                                name: name.into(),
+                                category: category.into(),
+                                detail: detail.into(),
+                                payload: serde_json::to_value(kind).map_err(|e| e.to_string())?,
+                            };
+                            work.assign(&json!(pid), &json!(lid), slot, action)?;
+                        }
+                        let clear_preset_sectors = work
+                            .document
+                            .editable
+                            .graph
+                            .layers
+                            .get(&lid)
+                            .is_some_and(|layer| {
+                                layer.control_settings.as_ref().is_some_and(|cs| {
+                                    cs.joystick_mode == "logical_sectors" && cs.active_sectors == 4
+                                }) && (16..=19u32).all(|slot| {
+                                    let logical = format!("logical-{slot}");
+                                    layer
+                                        .controls
+                                        .values()
+                                        .find(|b| b.logical_control == logical)
+                                        .and_then(|b| b.action_id.as_ref())
+                                        .and_then(|aid| {
+                                            work.document.editable.graph.actions.get(aid)
+                                        })
+                                        .map_or(true, |a| {
+                                            a.id.starts_with("ag-")
+                                                || a.id.starts_with("navigate-")
+                                                || a.id.starts_with("desktop-")
+                                                || a.id.starts_with("codex-")
+                                                || a.id.starts_with("host-mouse-")
+                                        })
+                                })
+                            });
+                        if clear_preset_sectors {
+                            for slot in 16..=19u32 {
+                                work.unassign(&json!(pid), &json!(lid), slot)?;
+                            }
+                            let existing_hold = work
+                                .document
+                                .editable
+                                .graph
+                                .layers
+                                .get(&lid)
+                                .and_then(|l| l.control_settings.as_ref())
+                                .and_then(|cs| cs.encoder_hold_action_id.as_ref())
+                                .and_then(|aid| work.document.editable.graph.actions.get(aid))
+                                .cloned();
+                            work.set_control_settings(
+                                &pid,
+                                &lid,
+                                crate::control_settings::ControlSettings {
+                                    joystick_mode: "mouse".into(),
+                                    active_sectors: 0,
+                                    encoder_hold_action_id: None,
+                                },
+                            )?;
+                            if let Some(hold_action) = existing_hold {
+                                work.assign_encoder_hold(&json!(pid), &json!(lid), hold_action)?;
+                            }
+                        }
+                    }
                     if coding_agent_layer_needs_encoder_migration(
                         &work.document,
                         profile_name,
@@ -2435,6 +2555,42 @@ pub fn starter_profile_needs_hardware_mouse_migration(
         .any(|(_, assignments)| layer_matches_starter_assignments(doc, layer, assignments))
 }
 
+pub fn starter_profile_needs_legacy_spec_migration(
+    doc: &LocalDocumentV2,
+    profile_id: &str,
+) -> bool {
+    let Some(profile) = doc.editable.graph.profiles.get(profile_id) else {
+        return false;
+    };
+    if profile.name == "Codex" || profile.layer_order.len() != 1 {
+        return false;
+    }
+    let lid = &profile.layer_order[0];
+    let Some(layer) = doc.editable.graph.layers.get(lid) else {
+        return false;
+    };
+    if layer.name != "基础层" {
+        return false;
+    }
+    if coding_agent_layer_needs_cockpit_top_six_migration(doc, &profile.name, lid) {
+        return true;
+    }
+    let (specs, legacy_specs) = agent_starter_specs();
+    let already_current = layer
+        .control_settings
+        .as_ref()
+        .is_some_and(|cs| cs.joystick_mode == "mouse" && cs.active_sectors == 0)
+        && specs
+            .iter()
+            .filter(|(name, _)| *name == profile.name)
+            .any(|(_, assignments)| layer_matches_starter_assignments(doc, layer, assignments));
+    !already_current
+        && legacy_specs
+            .iter()
+            .filter(|(name, _)| *name == profile.name)
+            .any(|(_, assignments)| layer_matches_starter_assignments(doc, layer, assignments))
+}
+
 fn rebind_starter_slot_action(
     doc: &mut LocalDocumentV2,
     layer_id: &str,
@@ -2580,6 +2736,45 @@ pub fn coding_agent_layer_needs_encoder_migration(
         && is_cmd(hold_action, "agent-search", "search");
 
     pre_v080 || unmodified_v080 || unmodified_v090
+}
+
+pub fn coding_agent_layer_needs_cockpit_top_six_migration(
+    doc: &LocalDocumentV2,
+    profile_name: &str,
+    layer_id: &str,
+) -> bool {
+    if !is_coding_agent_model_picker_starter_profile(profile_name)
+        || doc.is_protected_oai_layer(layer_id)
+    {
+        return false;
+    }
+    let Some(layer) = doc.editable.graph.layers.get(layer_id) else {
+        return false;
+    };
+    if layer.name != "基础层" || layer.lighting.is_some() {
+        return false;
+    }
+    let mut has_legacy_session_marker = false;
+    for slot in 0..6u32 {
+        let logical = format!("logical-{slot}");
+        let Some(action) = layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == logical)
+            .and_then(|b| b.action_id.as_ref())
+            .and_then(|aid| doc.editable.graph.actions.get(aid))
+        else {
+            return false;
+        };
+        let expected_cmd = format!("slot-open:{slot}");
+        if action.payload.get("command").and_then(Value::as_str) != Some(expected_cmd.as_str()) {
+            return false;
+        }
+        if action.id.starts_with("cockpit-slot-") {
+            has_legacy_session_marker = true;
+        }
+    }
+    has_legacy_session_marker
 }
 
 pub fn install_four_app_cockpit_preset(
@@ -2911,7 +3106,7 @@ mod agent_migration_tests {
                 if customized {
                     legacy_agent_specs()[0].1.len()
                 } else {
-                    16
+                    12
                 }
             );
             if customized {
@@ -2955,8 +3150,25 @@ mod agent_migration_tests {
             );
         }
 
-        // Downgrade DeepSeek Coder (DSH) to pre-Slice-B 9-slot push-to-talk state (remove slots 13, 14, 15),
+        // Downgrade DeepSeek Coder (DSH) to pre-Slice-B 9-slot push-to-talk state (slots 0..=8, no dial),
         // and customize Herdr by adding a joystick prompt slot (slot 16 -> prompt-continue).
+        let (_, legacy_specs) = agent_starter_specs();
+        let pre_dial_dsh = legacy_specs
+            .iter()
+            .find(|(name, assignments)| {
+                *name == "DeepSeek Coder (DSH)"
+                    && assignments.len() == 9
+                    && assignments.iter().any(|(slot, _, _, _, _, k)| {
+                        *slot == 6
+                            && matches!(
+                                k,
+                                ActionKind::AgentCommand { command, .. } if command == "push-to-talk"
+                            )
+                    })
+            })
+            .expect("pre-dial 9-slot DSH legacy spec")
+            .1
+            .clone();
         for profile_name in ["DeepSeek Coder (DSH)"] {
             let pid = draft
                 .document
@@ -2969,26 +3181,36 @@ mod agent_migration_tests {
                 .0
                 .clone();
             let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+            for slot in 0..20u32 {
+                draft.unassign(&json!(pid), &json!(lid), slot).unwrap();
+            }
             draft
-                .mutate(|doc| {
-                    let layer = doc.editable.graph.layers.get_mut(&lid).unwrap();
-                    let mut removed = std::collections::BTreeSet::new();
-                    for slot in [13, 14, 15] {
-                        if let Some(aid) = layer
-                            .controls
-                            .values_mut()
-                            .find(|b| b.logical_control == format!("logical-{slot}"))
-                            .and_then(|b| b.action_id.take())
-                        {
-                            removed.insert(aid);
-                        }
-                    }
-                    for aid in removed {
-                        doc.editable.graph.actions.remove(&aid);
-                    }
-                    Ok(())
-                })
+                .set_control_settings(
+                    &pid,
+                    &lid,
+                    crate::control_settings::ControlSettings {
+                        joystick_mode: "logical_sectors".into(),
+                        active_sectors: 4,
+                        encoder_hold_action_id: None,
+                    },
+                )
                 .unwrap();
+            for (slot, id, name, category, detail, kind) in &pre_dial_dsh {
+                draft
+                    .assign(
+                        &json!(pid),
+                        &json!(lid),
+                        *slot,
+                        crate::draft::Action {
+                            id: (*id).into(),
+                            name: (*name).into(),
+                            category: (*category).into(),
+                            detail: (*detail).into(),
+                            payload: serde_json::to_value(kind).unwrap(),
+                        },
+                    )
+                    .unwrap();
+            }
         }
 
         let herdr_pid = draft

@@ -2247,10 +2247,10 @@ impl WorkbenchStore {
         {
             return false;
         }
-        if profiles
-            .keys()
-            .any(|pid| mi_model::preset::starter_profile_needs_hardware_mouse_migration(doc, pid))
-        {
+        if profiles.keys().any(|pid| {
+            mi_model::preset::starter_profile_needs_hardware_mouse_migration(doc, pid)
+                || mi_model::preset::starter_profile_needs_legacy_spec_migration(doc, pid)
+        }) {
             return false;
         }
         CANONICAL_DESKTOP_AGENT_PROFILES
@@ -2267,7 +2267,9 @@ impl WorkbenchStore {
                             .iter()
                             .any(|lid| doc.is_protected_oai_layer(lid));
                     }
-                    if mi_model::preset::starter_profile_needs_hardware_mouse_migration(doc, pid) {
+                    if mi_model::preset::starter_profile_needs_hardware_mouse_migration(doc, pid)
+                        || mi_model::preset::starter_profile_needs_legacy_spec_migration(doc, pid)
+                    {
                         return false;
                     }
                     if *canonical_name == "Antigravity" {
@@ -3648,6 +3650,10 @@ impl WorkbenchStore {
                         Ok(())
                     })
                     .map_err(WorkbenchError::Storage)?;
+                for slot in 0..6u32 {
+                    self.slot_role_overrides.remove(&(pid.clone(), slot));
+                    self.keycap_overrides.remove(&(pid.clone(), slot));
+                }
                 self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
@@ -3742,6 +3748,8 @@ impl WorkbenchStore {
                 let _ = self.apply_routing_operation(RoutingOperation::BottomRowLayout {
                     layout: BottomRowLayout::Split,
                 });
+                self.slot_role_overrides.retain(|(p, _), _| p != &pid);
+                self.keycap_overrides.retain(|(p, _), _| p != &pid);
                 self.bottom_row_layout = BottomRowLayout::Split;
                 self.merge_wide_key.store(false, Ordering::SeqCst);
                 self.normalize_surface_for_current_layer();
@@ -5345,6 +5353,9 @@ impl WorkbenchStore {
             crate::encoder_model_picker::EncoderOverlayKind::SearchConversations => {
                 format!("已打开搜索会话 · 上下旋转选择会话，短按确认 ({detail})")
             }
+            crate::encoder_model_picker::EncoderOverlayKind::SubagentPicker => {
+                format!("已打开 Subagent 选择 · 上下旋转选择，短按打开 ({detail})")
+            }
         }
     }
 
@@ -5423,11 +5434,16 @@ impl WorkbenchStore {
             session_id,
             action.clone(),
         );
-        if receipt.as_ref().is_some_and(|r| r.succeeded()) {
+        if let Some(ref ok_receipt) = receipt.as_ref().filter(|r| r.succeeded()) {
             let eff_adapter = target_adapter.unwrap_or_else(|| "antigravity".to_string());
-            let transition =
-                self.encoder_model_picker
-                    .activate_overlay_after_action(eff_adapter, &action, now);
+            let transition = self
+                .encoder_model_picker
+                .activate_overlay_after_action_with_detail(
+                    eff_adapter,
+                    &action,
+                    &ok_receipt.detail,
+                    now,
+                );
             self.apply_overlay_transition(transition, receipt.as_ref());
         }
         receipt
@@ -5831,15 +5847,18 @@ impl WorkbenchStore {
                     event.session_id,
                     action.clone(),
                 );
-                if receipt.as_ref().is_some_and(|r| r.succeeded()) {
+                if let Some(ref ok_receipt) = receipt.as_ref().filter(|r| r.succeeded()) {
                     let eff_adapter = target_adapter
                         .or_else(|| self.active_desktop_agent_adapter())
                         .unwrap_or_else(|| "antigravity".to_string());
-                    let transition = self.encoder_model_picker.activate_overlay_after_action(
-                        eff_adapter,
-                        &action,
-                        now,
-                    );
+                    let transition = self
+                        .encoder_model_picker
+                        .activate_overlay_after_action_with_detail(
+                            eff_adapter,
+                            &action,
+                            &ok_receipt.detail,
+                            now,
+                        );
                     if transition != crate::encoder_model_picker::OverlayTransition::None {
                         self.apply_overlay_transition(transition, receipt.as_ref());
                     }
@@ -8053,30 +8072,37 @@ fn resolve_merged_bottom_slot(doc: &LocalDocumentV2, layer: Option<&LayerNode>) 
 }
 
 fn resolve_silkscreen_icon(slot: u32, action: Option<&Action>) -> String {
-    if let Some(a) = action {
-        if a.id == "ag-live-voice"
-            || a.id == "desktop-live-voice"
-            || a.payload.get("command").and_then(|v| v.as_str()) == Some("live-voice")
-        {
-            return "🎙".to_string();
-        }
-        if a.payload.get("command").and_then(|v| v.as_str()) == Some("new-conversation-in-project")
-        {
-            return "＋".to_string();
-        }
-        if a.id.contains("dictation")
-            || a.id.contains("ptt")
-            || a.id == "apple-fn-key"
-            || a.payload.get("command").and_then(|v| v.as_str()) == Some("push-to-talk")
-        {
-            return "🎤".to_string();
-        }
-        if a.id.contains("submit") {
-            return "⏎".to_string();
-        }
-        if a.id.contains("slot-open") || a.id.contains("cockpit-slot") {
-            return "💬".to_string();
-        }
+    let Some(a) = action else {
+        return "□".to_string();
+    };
+    let cmd = a.payload.get("command").and_then(|v| v.as_str());
+    if a.id == "agent-subagent"
+        || a.id.contains("subagent")
+        || matches!(cmd, Some("subagent" | "subagent-open"))
+    {
+        return "⑃".to_string();
+    }
+    if a.id.starts_with("host-mouse-click") || cmd.is_some_and(|c| c.starts_with("mouse-click:")) {
+        return "🖱".to_string();
+    }
+    if a.id == "ag-live-voice" || a.id == "desktop-live-voice" || cmd == Some("live-voice") {
+        return "🎙".to_string();
+    }
+    if cmd == Some("new-conversation-in-project") {
+        return "＋".to_string();
+    }
+    if a.id.contains("dictation")
+        || a.id.contains("ptt")
+        || a.id == "apple-fn-key"
+        || cmd == Some("push-to-talk")
+    {
+        return "🎤".to_string();
+    }
+    if a.id.contains("submit") {
+        return "⏎".to_string();
+    }
+    if a.id.contains("slot-open") || a.id.contains("cockpit-slot") {
+        return "💬".to_string();
     }
     match slot {
         0..=5 => "💬".to_string(),

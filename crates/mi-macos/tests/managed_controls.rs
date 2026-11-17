@@ -4,7 +4,7 @@ use mi_macos::executor::{
 };
 use mi_macos::managed_controls::{
     blocked, ManagedAxControls, ManagedAxProvider, ManagedControl, ManagedWindow,
-    ManagedWindowIdentity, ModelPickerConfirmResult, ObservedDictationState,
+    ManagedWindowIdentity, ModelPickerConfirmResult, ObservedDictationState, SubagentOpenResult,
 };
 use mi_model::host_router::ResolvedHostAction;
 use std::sync::{Arc, Barrier, Mutex};
@@ -899,6 +899,15 @@ impl HostOsDriver for Driver {
     }
     fn confirm_model_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
         self.controls.confirm_model_picker(adapter)
+    }
+    fn open_subagent_picker(&self, adapter: &str) -> Result<SubagentOpenResult, String> {
+        self.controls.open_subagent_picker(adapter)
+    }
+    fn step_subagent_picker(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        self.controls.step_subagent_picker(adapter, key_code)
+    }
+    fn confirm_subagent_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
+        self.controls.confirm_subagent_picker(adapter)
     }
     fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
         self.controls.send_model_picker_key(adapter, key_code)
@@ -3187,4 +3196,265 @@ fn focus_input_with_primary_and_unfocused_side_question_input_focuses_primary() 
     let events = provider.events();
     assert!(events.contains(&"focus:3".to_string()));
     assert!(!events.contains(&"focus:31".to_string()));
+}
+
+#[test]
+fn subagent_picker_opens_steps_and_confirms_across_antigravity_dsh_and_codex() {
+    // 1) Antigravity: presses latest AXPopUpButton ("2 subagents running"), ignores "Stop subagent",
+    //    then steps Up/Down and confirms with Return.
+    let ag = Provider::with_target("com.google.antigravity", "开始听写");
+    {
+        let mut state = ag.0.lock().unwrap();
+        state.window.controls.extend([
+            ManagedControl {
+                id: 50,
+                role: "AXButton".into(),
+                label: "Stop subagent".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 51,
+                role: "AXPopUpButton".into(),
+                label: "1 subagent".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(false),
+            },
+            ManagedControl {
+                id: 52,
+                role: "AXPopUpButton".into(),
+                label: "2 subagents running".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(false),
+            },
+        ]);
+        state.after_press = Some(|fixture, _label, id| {
+            if let Some(ctrl) = fixture.window.controls.iter_mut().find(|c| c.id == id) {
+                if ctrl.role == "AXPopUpButton" {
+                    ctrl.expanded = Some(true);
+                }
+            }
+        });
+    }
+    let ag_exec = LiveHostActionExecutor::new(Driver {
+        controls: ag.controls(),
+        trusted: true,
+    });
+    let r_open = ag_exec.execute(
+        "antigravity",
+        "logical-0",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "subagent".into(),
+        },
+    );
+    assert_eq!(r_open.outcome, "executed", "{r_open:?}");
+    let r_next = ag_exec.execute(
+        "antigravity",
+        "logical-14",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "subagent-next".into(),
+        },
+    );
+    assert_eq!(r_next.outcome, "executed", "{r_next:?}");
+    let r_confirm = ag_exec.execute(
+        "antigravity",
+        "logical-15",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "subagent-confirm".into(),
+        },
+    );
+    assert_eq!(r_confirm.outcome, "executed", "{r_confirm:?}");
+    let ag_events = ag.events();
+    assert!(ag_events.contains(&"press:2 subagents running".to_string()));
+    assert!(!ag_events.contains(&"press:Stop subagent".to_string()));
+    assert!(ag_events.contains(&"window_key:arrow_down".to_string()));
+    assert!(ag_events.contains(&"window_key:return".to_string()));
+
+    // 2) DeepSeek Harness: matches Chinese SubagentHeaderLineage button ("3 个子智能体")
+    //    and keeps dialog open across knob step without re-pressing the toggle button.
+    let dsh = Provider::dsh();
+    {
+        let mut state = dsh.0.lock().unwrap();
+        state.window.controls.extend([
+            ManagedControl {
+                id: 60,
+                role: "AXButton".into(),
+                label: "在侧边栏打开".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 61,
+                role: "AXButton".into(),
+                label: "3 个子智能体".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ]);
+    }
+    let dsh_controls = dsh.controls();
+    dsh_controls.open_subagent_picker("dsh-desktop").unwrap();
+    dsh_controls
+        .step_subagent_picker("dsh-desktop", 0x7D)
+        .unwrap();
+    assert_eq!(
+        dsh_controls.confirm_subagent_picker("dsh-desktop").unwrap(),
+        ModelPickerConfirmResult::Confirmed
+    );
+    let dsh_events = dsh.events();
+    assert_eq!(
+        dsh_events
+            .iter()
+            .filter(|e| *e == "press:3 个子智能体")
+            .count(),
+        1,
+        "step_subagent_picker must not re-press AXButton while subagent dialog is active: {dsh_events:?}"
+    );
+    assert!(!dsh_events.contains(&"press:在侧边栏打开".to_string()));
+    assert!(dsh_events.contains(&"window_key:arrow_down".to_string()));
+    assert!(dsh_events.contains(&"window_key:return".to_string()));
+
+    // 3) Codex without any subagent control reports blocked:subagent_picker_unavailable with zero presses.
+    let codex = Provider::codex();
+    let codex_controls = codex.controls();
+    let err = codex_controls.open_subagent_picker("codex").unwrap_err();
+    assert_eq!(err, "blocked:subagent_picker_unavailable");
+    assert!(
+        !codex.events().iter().any(|e| e.starts_with("press:")),
+        "missing subagent picker must never press unrelated controls"
+    );
+
+    // 4) Antigravity with 0 subagents must NOT click "Toggle Overview Panel" or "Improvement Coding Worker Stop subagent".
+    let ag_zero = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = ag_zero.0.lock().unwrap();
+        state.window.controls.extend([
+            ManagedControl {
+                id: 70,
+                role: "AXCheckBox".into(),
+                label: "Toggle Overview Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 71,
+                role: "AXButton".into(),
+                label: "Improvement Coding Worker Stop subagent".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ]);
+    }
+    let ag_zero_controls = ag_zero.controls();
+    assert_eq!(
+        ag_zero_controls
+            .open_subagent_picker("antigravity")
+            .unwrap_err(),
+        "blocked:subagent_picker_unavailable"
+    );
+    assert!(
+        !ag_zero.events().iter().any(|e| e.starts_with("press:")),
+        "0-subagent conversation must never toggle Overview panel or press Stop subagent"
+    );
+
+    // 5) Antigravity direct "Open Subagent: ..." button reports OpenedDirectly and never sends stray Return on confirm.
+    let ag_direct = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = ag_direct.0.lock().unwrap();
+        state.window.controls.push(ManagedControl {
+            id: 80,
+            role: "AXButton".into(),
+            label: "Open Subagent: Code Quality Auditor & Release Engineer (DeepCoder)".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: None,
+        });
+    }
+    let ag_direct_exec = LiveHostActionExecutor::new(Driver {
+        controls: ag_direct.controls(),
+        trusted: true,
+    });
+    let r_direct = ag_direct_exec.execute(
+        "antigravity",
+        "logical-0",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "subagent".into(),
+        },
+    );
+    assert_eq!(r_direct.outcome, "executed");
+    assert_eq!(r_direct.detail, "antigravity/subagent-opened-direct");
+    let r_direct_confirm = ag_direct_exec.execute(
+        "antigravity",
+        "logical-15",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "subagent-confirm".into(),
+        },
+    );
+    assert_eq!(r_direct_confirm.outcome, "executed");
+    assert_eq!(
+        r_direct_confirm.detail,
+        "antigravity/subagent-picker-already-closed"
+    );
+    assert!(
+        !ag_direct
+            .events()
+            .contains(&"window_key:return".to_string()),
+        "direct subagent button must never fire stray Return into composer"
+    );
+
+    // 6) DSH live composer model picker label ("选择模型，当前 ...") is recognized directly as AXPopUpButton.
+    let dsh_model = Provider::dsh();
+    {
+        let mut state = dsh_model.0.lock().unwrap();
+        state.window.controls.push(ManagedControl {
+            id: 90,
+            role: "AXPopUpButton".into(),
+            label: "选择模型，当前 DeepSeek-V4.1-Flash，推理等级 High".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+        state.after_press = Some(|fixture, _label, id| {
+            if let Some(ctrl) = fixture.window.controls.iter_mut().find(|c| c.id == id) {
+                ctrl.expanded = Some(true);
+            }
+        });
+    }
+    dsh_model
+        .controls()
+        .open_model_picker("dsh-desktop")
+        .unwrap();
+    assert!(dsh_model
+        .events()
+        .contains(&"press:选择模型，当前 DeepSeek-V4.1-Flash，推理等级 High".to_string()));
 }

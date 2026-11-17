@@ -2115,6 +2115,13 @@ mod tests {
 
         for locked in [false, true] {
             let (dir, mut store) = store();
+            let local_codex = store.local_codex_profile_id().unwrap();
+            store.select_and_activate_profile(&local_codex).unwrap();
+            store
+                .dispatch_session_strip_action(
+                    crate::session_strip::SessionStripAction::BindTopSixAsSessionKeys,
+                )
+                .unwrap();
             let native = store
                 .find_canonical_profile_id(CanonicalAgent::Codex)
                 .unwrap();

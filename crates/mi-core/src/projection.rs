@@ -544,7 +544,18 @@ impl ProjectionInputs<'_> {
             let silkscreen_icon = Some(
                 override_keycap
                     .map(|k| k.glyph_symbol().to_string())
-                    .unwrap_or_else(|| resolve_silkscreen_icon(effective_slot, action_obj)),
+                    .unwrap_or_else(|| {
+                        if is_protected && action_obj.is_none() {
+                            match effective_slot {
+                                0..=5 => "💬".to_string(),
+                                10 | 11 => "🎤".to_string(),
+                                12 => "⏎".to_string(),
+                                _ => "⌘".to_string(),
+                            }
+                        } else {
+                            resolve_silkscreen_icon(effective_slot, action_obj)
+                        }
+                    }),
             );
             let concise_caption =
                 format_concise_keycap_caption_localized(&full_action_title, locale);
@@ -554,8 +565,18 @@ impl ProjectionInputs<'_> {
                 .filter(|&slot_idx| {
                     action_obj.is_some_and(|a| is_session_slot_action(a, slot_idx))
                 });
-            let keycap_enum = override_keycap
-                .unwrap_or_else(|| CodexKeycapId::infer_for_slot(effective_slot, action_obj));
+            let keycap_enum = override_keycap.unwrap_or_else(|| {
+                if is_protected && action_obj.is_none() {
+                    match effective_slot {
+                        0..=5 => CodexKeycapId::Apps,
+                        10 | 11 => CodexKeycapId::Mic,
+                        12 => CodexKeycapId::Play,
+                        _ => CodexKeycapId::Term,
+                    }
+                } else {
+                    CodexKeycapId::infer_for_slot(effective_slot, action_obj)
+                }
+            });
             let keycap_id = format!("{keycap_enum:?}");
             let cell_role = if !(0..6u32).contains(&primary_slot) {
                 KeycapRole::ActionKey

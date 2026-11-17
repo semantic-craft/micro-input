@@ -742,6 +742,7 @@ pub fn actions() -> Vec<Action> {
                 ("agent-submit", "停止听写并提交", "提交控制", "若听写激活则先停并确认停止，再聚焦目标输入区回车提交", json!({"type":"agent_command","adapter":"host","command":"submit"})),
                 ("agent-prompt-submit", "粘贴指令并提交（显式回车）", "提交控制", "显式配置下先停听写、聚焦目标输入区、暂存剪贴板粘贴后再回车", json!({"type":"agent_command","adapter":"host","command":"submit-prompt:Continue"})),
                 ("agent-search", "搜索会话", "Agent", "打开当前目标 Agent 的会话搜索面板（Cmd+K）并进入旋钮上下选择会话", json!({"type":"agent_command","adapter":"host","command":"search"})),
+                ("agent-subagent", "选择 Subagent", "Agent", "打开当前目标 Agent 的子智能体（Subagent）选择弹层，支持旋钮上下选择并短按打开", json!({"type":"agent_command","adapter":"host","command":"subagent"})),
                 ("agent-model-picker-open", "弹出模型选择页", "Agent", "打开当前目标 Agent 的模型选择弹层并进入旋钮选模型与推理力度会话", json!({"type":"agent_command","adapter":"host","command":"model-picker-open"})),
                 ("agent-model-picker-prev", "选择上一模型 / 档位", "Agent", "若模型选择弹层未开则直接原位展开，并向上移动高亮项（不抢占输入框焦点）", json!({"type":"agent_command","adapter":"host","command":"model-picker-prev"})),
                 ("agent-model-picker-next", "选择下一模型 / 档位", "Agent", "若模型选择弹层未开则直接原位展开，并向下移动高亮项（不抢占输入框焦点）", json!({"type":"agent_command","adapter":"host","command":"model-picker-next"})),

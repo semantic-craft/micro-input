@@ -284,9 +284,9 @@ private func v070Double(_ value: Any?) -> Double? {
 
 public struct V070MouseConfigModel: Equatable {
     public var preset = "standard"
-    public var delayMs = 80, intervalMs = 16, moveDelta = 12, maxSpeed = 18, timeToMax = 24
-    public var wheelDelayMs = 80, wheelIntervalMs = 60, wheelDelta = 2, wheelMaxSpeed = 12, wheelTimeToMax = 30
-    public var stickSpeed = 16, stickRegulator = 10, stickScroll = 30
+    public var delayMs = 70, intervalMs = 14, moveDelta = 14, maxSpeed = 22, timeToMax = 22
+    public var wheelDelayMs = 70, wheelIntervalMs = 55, wheelDelta = 2, wheelMaxSpeed = 14, wheelTimeToMax = 28
+    public var stickSpeed = 24, stickRegulator = 10, stickScroll = 25
     public var deadzone = 0.07
 
     public init() {}
@@ -666,6 +666,34 @@ public struct V070HardwareSettingsSection: View {
                         }
                     }
                 }
+                let currentStickSpeed = Int(mouseCurveDraft.stickSpeed.trimmingCharacters(in: .whitespacesAndNewlines)) ?? model.mouse.stickSpeed
+                let stickBounds = Double(min(1, currentStickSpeed))...Double(max(40, currentStickSpeed))
+                SettingsRow(
+                    tr("摇杆速度"),
+                    subtitle: tr("无级微调摇杆指针满偏速度（标准默认 24，越小越慢）"),
+                    showsDivider: true
+                ) {
+                    HStack(spacing: 10) {
+                        NeutralTrackSlider(
+                            value: intStringBinding($mouseCurveDraft.stickSpeed, fallback: model.mouse.stickSpeed),
+                            in: stickBounds,
+                            trackWidth: 132,
+                            showsPercentage: false
+                        )
+                        .disabled(model.busy)
+                        .accessibilityIdentifier("v070-stick-speed-quick-slider")
+                        Text("\(currentStickSpeed)")
+                            .font(UITheme.monoBadge)
+                            .foregroundStyle(UITheme.textSecondary)
+                            .frame(width: 42, alignment: .trailing)
+                        if currentStickSpeed != model.mouse.stickSpeed {
+                            Button(tr("保存速度")) { applyMouseCurveDraft() }
+                                .surfaceButton(.secondary)
+                                .disabled(model.busy || mouseCurveDraft.validated == nil)
+                                .accessibilityIdentifier("v070-stick-speed-save")
+                        }
+                    }
+                }
                 SettingsRow(tr("摇杆死区"), subtitle: tr("防漂移盲区（出厂默认 0.15，UI 范围 0.02–0.45）"), showsDivider: true) {
                     HStack(spacing: 10) {
                         NeutralTrackSlider(
@@ -688,7 +716,7 @@ public struct V070HardwareSettingsSection: View {
                         mouseSliderRow(tr("指针上限"), subtitle: tr("按键鼠标加速上限（推荐 4–40，固件上限 100）"), text: $mouseCurveDraft.maxSpeed, defaultRange: 1...40, unit: "px/tick", id: "v070-mouse-max-speed-slider")
                         mouseSliderRow(tr("滚轮步进"), subtitle: tr("旋钮或按键单步滚动（推荐 1–16，固件上限 127）"), text: $mouseCurveDraft.wheelDelta, defaultRange: 1...16, unit: "x/tick", id: "v070-mouse-wheel-delta-slider")
                         mouseSliderRow(tr("滚轮上限"), subtitle: tr("旋钮或按键滚轮上限（推荐 1–32，固件上限 100）"), text: $mouseCurveDraft.wheelMaxSpeed, defaultRange: 1...32, unit: "x/tick", id: "v070-mouse-wheel-max-speed-slider")
-                        mouseSliderRow(tr("摇杆指针"), subtitle: tr("模拟摇杆满偏转步长（推荐 1–16，固件上限 255）"), text: $mouseCurveDraft.stickSpeed, defaultRange: 1...16, unit: "px/tick", id: "v070-mouse-stick-speed-slider")
+                        mouseSliderRow(tr("摇杆指针"), subtitle: tr("模拟摇杆满偏转步长（推荐 8–40，固件上限 255）"), text: $mouseCurveDraft.stickSpeed, defaultRange: 1...40, unit: "px/tick", id: "v070-mouse-stick-speed-slider")
                         mouseSliderRow(tr("摇杆滚轮"), subtitle: tr("模拟摇杆滚轮分频间隔（10–120，越小越快；上限 255）"), text: $mouseCurveDraft.stickScroll, defaultRange: 10...120, unit: "ticks", id: "v070-mouse-stick-scroll-slider")
                         SettingsRow(tr("自定义参数"), subtitle: mouseCurveDraft.validationHint(locale) ?? tr("仅将上方 6 项自定义曲线参数写入设备"), showsDivider: false) {
                             Button(tr("应用鼠标参数")) { applyMouseCurveDraft() }
@@ -892,5 +920,45 @@ public struct V070HardwareSettingsSection: View {
         case "logical_sectors": return tr("宿主逻辑扇区")
         default: return tr("待同步")
         }
+    }
+}
+
+struct InspectorJoystickStickSpeedRow: View {
+    let store: CoreStore
+    let hw: V070HardwareSliceModel
+    @State private var stickSpeedDraft: Int
+
+    init(store: CoreStore, hw: V070HardwareSliceModel) {
+        self.store = store
+        self.hw = hw
+        _stickSpeedDraft = State(initialValue: hw.mouse.stickSpeed)
+    }
+
+    var body: some View {
+        let bounds = Double(min(1, stickSpeedDraft))...Double(max(40, stickSpeedDraft))
+        HStack(spacing: 8) {
+            Text(store.tr("摇杆速度")).font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
+            Spacer(minLength: 4)
+            NeutralTrackSlider(
+                value: Binding(get: { Double(stickSpeedDraft) }, set: { stickSpeedDraft = Int($0.rounded()) }),
+                in: bounds, trackWidth: 112, showsPercentage: false
+            )
+            .disabled(hw.busy)
+            .accessibilityIdentifier("inspector-stick-speed-slider")
+            Text("\(stickSpeedDraft)").font(UITheme.monoBadge).foregroundStyle(UITheme.textSecondary).frame(minWidth: 26, alignment: .trailing)
+            if stickSpeedDraft != hw.mouse.stickSpeed {
+                Button(store.tr("保存速度")) {
+                    store.dispatchV070Hardware(V070HardwareCommand.applyMouseConfig(
+                        moveDelta: hw.mouse.moveDelta, maxSpeed: hw.mouse.maxSpeed,
+                        wheelDelta: hw.mouse.wheelDelta, wheelMaxSpeed: hw.mouse.wheelMaxSpeed,
+                        stickSpeed: stickSpeedDraft, stickScroll: hw.mouse.stickScroll
+                    ))
+                }
+                .surfaceButton(.secondary)
+                .disabled(hw.busy || !(1...255).contains(stickSpeedDraft))
+                .accessibilityIdentifier("inspector-stick-speed-save")
+            }
+        }
+        .onChange(of: hw.mouse.stickSpeed) { _, next in stickSpeedDraft = next }
     }
 }

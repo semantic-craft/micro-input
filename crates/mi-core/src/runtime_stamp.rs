@@ -249,6 +249,7 @@ impl WorkbenchStore {
                 h.write_u8(match active.kind {
                     EncoderOverlayKind::ModelPicker => 0,
                     EncoderOverlayKind::SearchConversations => 1,
+                    EncoderOverlayKind::SubagentPicker => 2,
                 });
             }
         }

@@ -80,7 +80,8 @@ public struct ClassicWorkbenchView: View {
                             store: store,
                             updater: updater,
                             launchAtLogin: launchAtLogin,
-                            destination: destination
+                            destination: destination,
+                            onSelectDestination: { navigation.destination = $0 }
                         )
                     }
                 }
@@ -707,6 +708,7 @@ private struct WorkbenchSettingsPage: View {
     let updater: SoftwareUpdateController
     let launchAtLogin: LaunchAtLoginController
     let destination: WorkbenchDestination
+    var onSelectDestination: (WorkbenchDestination) -> Void = { _ in }
 
     var body: some View {
         let locale = store.locale
@@ -841,6 +843,21 @@ private struct WorkbenchSettingsPage: View {
 
                 case .general:
                     StartupAndLanguageSettingsSection(store: store, launchAtLogin: launchAtLogin)
+                    VStack(alignment: .leading, spacing: 10) {
+                        SettingsSectionHeader(store.tr("硬件与指针"))
+                        SettingsCard {
+                            SettingsRow(
+                                store.tr("鼠标速度与摇杆死区"),
+                                subtitle: store.tr("在「设备」页调整摇杆鼠标四档预设、无级速度滑块与死区")
+                            ) {
+                                Button(store.tr("前往调整")) {
+                                    onSelectDestination(.device)
+                                }
+                                .surfaceButton(.secondary)
+                                .accessibilityIdentifier("general-open-mouse-speed")
+                            }
+                        }
+                    }
                     AboutAndUpdatesSettingsSection(
                         updater: updater,
                         engineVersion: store.header.engineVersion,

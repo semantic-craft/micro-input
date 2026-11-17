@@ -20,23 +20,23 @@
 | `mouse.config` | NVS `wl_mouse` | 读取（`params: null`）与等价回写均返回 13 个整型字段 |
 | `joystick.deadzone` | NVS `joystick` | 读取（`params: null`）与等价回写返回 `{"v": 0.15}` |
 
-### `mouse.config` 字段定义（Micro Input 标准高速档默认值）
+### `mouse.config` 字段定义（Micro Input 标准档默认值，较快速档降速 20%）
 
 ```json
 {
-  "delay_ms": 80,
-  "interval_ms": 16,
-  "move_delta": 12,
-  "max_speed": 18,
-  "time_to_max": 24,
-  "wheel_delay_ms": 80,
-  "wheel_interval_ms": 60,
+  "delay_ms": 70,
+  "interval_ms": 14,
+  "move_delta": 14,
+  "max_speed": 22,
+  "time_to_max": 22,
+  "wheel_delay_ms": 70,
+  "wheel_interval_ms": 55,
   "wheel_delta": 2,
-  "wheel_max_speed": 12,
-  "wheel_time_to_max": 30,
-  "stick_speed": 16,
+  "wheel_max_speed": 14,
+  "wheel_time_to_max": 28,
+  "stick_speed": 24,
   "stick_regulator": 10,
-  "stick_scroll": 30
+  "stick_scroll": 25
 }
 ```
 

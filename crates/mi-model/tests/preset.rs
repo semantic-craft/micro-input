@@ -24,6 +24,29 @@ fn r26_local_codex_starter() -> Draft {
     let mut draft = Draft::default();
     preset::install_agent_starter_profiles(&mut draft).unwrap();
     let (pid, lid) = local_codex_ids(&draft);
+    for slot in 0..=5 {
+        draft.unassign(&json!(pid), &json!(lid), slot).unwrap();
+    }
+    for slot in 0..=5 {
+        draft
+            .assign(
+                &json!(pid),
+                &json!(lid),
+                slot,
+                Action {
+                    id: format!("slot-open-{slot}"),
+                    name: format!("会话 {}", slot + 1),
+                    category: "Codex 会话".into(),
+                    detail: "切换并回读对应状态的 Codex 会话".into(),
+                    payload: json!({
+                        "type": "agent_command",
+                        "adapter": "four-app",
+                        "command": format!("slot-open:{slot}")
+                    }),
+                },
+            )
+            .unwrap();
+    }
     for slot in [8, 9, 10] {
         draft.unassign(&json!(pid), &json!(lid), slot).unwrap();
     }
@@ -181,30 +204,48 @@ fn previous_local_codex_starter() -> Draft {
 }
 
 #[test]
-fn local_codex_top_six_route_to_session_slot_commands() {
+fn local_codex_top_six_route_to_subagent_left_click_and_unbound_second_row() {
     use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
     let mut draft = Draft::default();
     preset::install_agent_starter_profiles(&mut draft).unwrap();
     let (pid, lid) = local_codex_ids(&draft);
     let layer = &draft.document.editable.graph.layers[&lid];
-    for slot in 0..6u32 {
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(&pid), "AG00", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "subagent".into(),
+        })
+    );
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(&pid), "AG01", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "mouse-click:left".into(),
+        })
+    );
+    let b0 = layer
+        .controls
+        .values()
+        .find(|binding| binding.logical_control == "logical-0")
+        .unwrap();
+    let a0 = &draft.document.editable.graph.actions[b0.action_id.as_ref().unwrap()];
+    assert_eq!(a0.id, "agent-subagent");
+    assert_eq!(a0.name, "选择 Subagent");
+    let b1 = layer
+        .controls
+        .values()
+        .find(|binding| binding.logical_control == "logical-1")
+        .unwrap();
+    let a1 = &draft.document.editable.graph.actions[b1.action_id.as_ref().unwrap()];
+    assert_eq!(a1.id, "host-mouse-click-left");
+    assert_eq!(a1.name, "鼠标左键点击");
+    for slot in 2..6u32 {
         assert_eq!(
             resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
-            Some(ResolvedHostAction::AgentCommand {
-                adapter: "four-app".into(),
-                command: format!("slot-open:{slot}"),
-            })
+            None,
+            "second row slot {slot} must be unbound by default"
         );
-        let binding = layer
-            .controls
-            .values()
-            .find(|binding| binding.logical_control == format!("logical-{slot}"))
-            .unwrap();
-        let action = &draft.document.editable.graph.actions[binding.action_id.as_ref().unwrap()];
-        assert_eq!(action.id, format!("slot-open-{slot}"));
-        assert_eq!(action.name, format!("会话 {}", slot + 1));
-        assert_eq!(action.category, "Codex 会话");
-        assert_eq!(action.detail, "切换并回读对应状态的 Codex 会话");
     }
 }
 
@@ -292,13 +333,24 @@ fn unchanged_local_codex_starters_migrate_top_six_and_bottom_seven_preserving_na
         let before = draft.document.editable.clone();
         preset::install_agent_starter_profiles(&mut draft).unwrap();
         assert!(draft.document.editable != before);
-        for slot in 0..6u32 {
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(&pid), "AG00", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "codex".into(),
+                command: "subagent".into(),
+            })
+        );
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(&pid), "AG01", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "host".into(),
+                command: "mouse-click:left".into(),
+            })
+        );
+        for slot in 2..6u32 {
             assert_eq!(
                 resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
-                Some(ResolvedHostAction::AgentCommand {
-                    adapter: "four-app".into(),
-                    command: format!("slot-open:{slot}"),
-                })
+                None
             );
         }
         assert_eq!(

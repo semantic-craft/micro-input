@@ -389,6 +389,7 @@ struct CreatorMicroInlineInspectorView: View {
                                     .accessibilityIdentifier("inspector-mouse-preset-\(presetId)")
                                 }
                             }
+                            InspectorJoystickStickSpeedRow(store: store, hw: hw)
                         }
 
                         Text(store.tr("摇杆全层固定为纯硬件高速鼠标指针，任何时候推动摇杆均直接高速移动光标，不拦截或抢占方向。"))

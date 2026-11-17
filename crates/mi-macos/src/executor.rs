@@ -1,6 +1,6 @@
 use crate::managed_controls::{
     CodexReasoningAction, ManagedAxControls, ManagedControlReadiness, ModelPickerConfirmResult,
-    ObservedDictationState,
+    ObservedDictationState, SubagentOpenResult,
 };
 use crate::native_ax::NativeAxProvider;
 use mi_model::host_router::{ResolvedHostAction, ResolvedMacroEvent};
@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const APPLE_FN_KEY_CODE: u16 = 0x3F;
 pub const KEY_CODE_V: u16 = 0x09;
@@ -642,12 +642,12 @@ pub fn bundle_id_for_adapter(adapter: &str) -> Option<&'static str> {
 
 pub fn model_picker_navigation_key_code(command: &str) -> Option<u16> {
     match command.trim() {
-        "model-picker-prev" | "search-prev" => Some(0x7E),
-        "model-picker-next" | "search-next" => Some(0x7D),
+        "model-picker-prev" | "search-prev" | "subagent-prev" => Some(0x7E),
+        "model-picker-next" | "search-next" | "subagent-next" => Some(0x7D),
         "model-picker-effort-right" => Some(0x7C),
         "model-picker-effort-left" => Some(0x7B),
-        "model-picker-confirm" | "search-confirm" => Some(KEY_CODE_RETURN),
-        "model-picker-cancel" => Some(0x35),
+        "model-picker-confirm" | "search-confirm" | "subagent-confirm" => Some(KEY_CODE_RETURN),
+        "model-picker-cancel" | "subagent-cancel" => Some(0x35),
         _ => None,
     }
 }
@@ -924,6 +924,16 @@ pub trait HostOsDriver: Send + Sync {
         self.send_model_picker_key(adapter, key_code)
     }
     fn confirm_model_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
+        self.send_model_picker_key(adapter, KEY_CODE_RETURN)?;
+        Ok(ModelPickerConfirmResult::Confirmed)
+    }
+    fn open_subagent_picker(&self, _adapter: &str) -> Result<SubagentOpenResult, String> {
+        Err("blocked:subagent_picker_unavailable".into())
+    }
+    fn step_subagent_picker(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        self.send_model_picker_key(adapter, key_code)
+    }
+    fn confirm_subagent_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
         self.send_model_picker_key(adapter, KEY_CODE_RETURN)?;
         Ok(ModelPickerConfirmResult::Confirmed)
     }
@@ -1856,6 +1866,43 @@ impl ClipboardBackend for InMemoryClipboardBackend {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LastMouseClickState {
+    button: MouseButtonKind,
+    at: Instant,
+    x: f64,
+    y: f64,
+    count: i64,
+}
+
+fn next_mouse_click_state(
+    prev: Option<LastMouseClickState>,
+    button: MouseButtonKind,
+    now: Instant,
+    x: f64,
+    y: f64,
+) -> LastMouseClickState {
+    const MAX_INTERVAL: Duration = Duration::from_millis(500);
+    const MAX_DISTANCE_PT: f64 = 8.0;
+    let count = match prev {
+        Some(last)
+            if last.button == button
+                && now.saturating_duration_since(last.at) <= MAX_INTERVAL
+                && (x - last.x).hypot(y - last.y) <= MAX_DISTANCE_PT =>
+        {
+            (last.count % 3) + 1
+        }
+        _ => 1,
+    };
+    LastMouseClickState {
+        button,
+        at: now,
+        x,
+        y,
+        count,
+    }
+}
+
 pub struct MacOsSystemDriver {
     clipboard_backend: Arc<dyn ClipboardBackend>,
     snapshot_empty_flags: Mutex<HashMap<u64, bool>>,
@@ -1863,6 +1910,7 @@ pub struct MacOsSystemDriver {
     isolated: AtomicBool,
     model_picker_mouse_deltas: Arc<Mutex<Vec<(f64, f64)>>>,
     model_picker_mouse_tap: Mutex<Option<ModelPickerMouseTap>>,
+    last_mouse_click: Mutex<Option<LastMouseClickState>>,
 }
 
 impl std::fmt::Debug for MacOsSystemDriver {
@@ -1889,6 +1937,7 @@ impl Default for MacOsSystemDriver {
             isolated: AtomicBool::new(false),
             model_picker_mouse_deltas: Arc::new(Mutex::new(Vec::new())),
             model_picker_mouse_tap: Mutex::new(None),
+            last_mouse_click: Mutex::new(None),
         }
     }
 }
@@ -1910,6 +1959,7 @@ impl MacOsSystemDriver {
             isolated: AtomicBool::new(true),
             model_picker_mouse_deltas: Arc::new(Mutex::new(Vec::new())),
             model_picker_mouse_tap: Mutex::new(None),
+            last_mouse_click: Mutex::new(None),
         }
     }
 
@@ -1922,6 +1972,7 @@ impl MacOsSystemDriver {
             isolated: AtomicBool::new(true),
             model_picker_mouse_deltas: Arc::new(Mutex::new(Vec::new())),
             model_picker_mouse_tap: Mutex::new(None),
+            last_mouse_click: Mutex::new(None),
         }
     }
 
@@ -2434,8 +2485,15 @@ impl HostOsDriver for MacOsSystemDriver {
                 CFRelease(source);
                 return Err("cg_mouse_click_event_null".to_string());
             }
-            CGEventSetIntegerValueField(down, K_CG_MOUSE_EVENT_CLICK_STATE, 1);
-            CGEventSetIntegerValueField(up, K_CG_MOUSE_EVENT_CLICK_STATE, 1);
+            let click_state = if let Ok(mut guard) = self.last_mouse_click.lock() {
+                let next = next_mouse_click_state(*guard, button, Instant::now(), loc.x, loc.y);
+                *guard = Some(next);
+                next.count
+            } else {
+                1
+            };
+            CGEventSetIntegerValueField(down, K_CG_MOUSE_EVENT_CLICK_STATE, click_state);
+            CGEventSetIntegerValueField(up, K_CG_MOUSE_EVENT_CLICK_STATE, click_state);
             CGEventPost(CG_HID_EVENT_TAP, down);
             CGEventPost(CG_HID_EVENT_TAP, up);
             CFRelease(down);
@@ -2633,6 +2691,39 @@ impl HostOsDriver for MacOsSystemDriver {
         Ok(ModelPickerConfirmResult::Confirmed)
     }
 
+    fn open_subagent_picker(&self, adapter: &str) -> Result<SubagentOpenResult, String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        if is_managed_adapter(adapter) {
+            return self.managed_controls.open_subagent_picker(adapter);
+        }
+        Err("blocked:subagent_picker_unavailable".into())
+    }
+
+    fn step_subagent_picker(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        if is_managed_adapter(adapter) {
+            return self
+                .managed_controls
+                .step_subagent_picker(adapter, key_code);
+        }
+        self.agent_shortcut(adapter, key_code, &[])
+    }
+
+    fn confirm_subagent_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        if is_managed_adapter(adapter) {
+            return self.managed_controls.confirm_subagent_picker(adapter);
+        }
+        self.agent_shortcut(adapter, KEY_CODE_RETURN, &[])?;
+        Ok(ModelPickerConfirmResult::Confirmed)
+    }
+
     fn resolve_default_managed_adapter(&self, profile_id: &str) -> &'static str {
         if let Some(inferred) = infer_managed_adapter_from_profile_id(profile_id) {
             return inferred;
@@ -2728,6 +2819,7 @@ pub enum RecordedOsEvent {
     ToggleLiveVoice(String),
     CodexReasoning(CodexReasoningAction),
     OpenModelPicker(String),
+    OpenSubagentPicker(String),
     OpenSideQuestion(String),
     SendModelPickerKey {
         adapter: String,
@@ -3044,6 +3136,16 @@ impl HostOsDriver for RecordingOsDriver {
         Ok(())
     }
 
+    fn open_subagent_picker(&self, adapter: &str) -> Result<SubagentOpenResult, String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events
+            .push(RecordedOsEvent::OpenSubagentPicker(adapter.to_string()));
+        Ok(SubagentOpenResult::PopupOpened)
+    }
+
     fn open_side_question(&self, adapter: &str) -> Result<(), String> {
         let mut st = self.state.lock().unwrap();
         if !self.accessibility_trusted.load(Ordering::SeqCst) {
@@ -3070,6 +3172,15 @@ impl HostOsDriver for RecordingOsDriver {
     }
 
     fn confirm_model_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
+        self.send_model_picker_key(adapter, KEY_CODE_RETURN)?;
+        Ok(ModelPickerConfirmResult::Confirmed)
+    }
+
+    fn step_subagent_picker(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        self.send_model_picker_key(adapter, key_code)
+    }
+
+    fn confirm_subagent_picker(&self, adapter: &str) -> Result<ModelPickerConfirmResult, String> {
         self.send_model_picker_key(adapter, KEY_CODE_RETURN)?;
         Ok(ModelPickerConfirmResult::Confirmed)
     }
@@ -3789,7 +3900,12 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 let effective_adapter = if matches!(adapter.as_str(), "host" | "active-agent")
                     && (matches!(
                         command.as_str(),
-                        "model" | "effort" | "model-picker-open" | "search"
+                        "model"
+                            | "effort"
+                            | "model-picker-open"
+                            | "search"
+                            | "subagent"
+                            | "subagent-open"
                     ) || model_picker_navigation_key_code(command).is_some())
                 {
                     self.driver.resolve_default_managed_adapter(profile_id)
@@ -3822,6 +3938,27 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                                 Err(error) => make_receipt(managed_error_outcome(&error), error),
                             }
                         }
+                        "subagent-prev" | "subagent-next" => {
+                            match self
+                                .driver
+                                .step_subagent_picker(effective_adapter, key_code)
+                            {
+                                Ok(()) => make_receipt("executed", desc.detail),
+                                Err(error) => make_receipt(managed_error_outcome(&error), error),
+                            }
+                        }
+                        "subagent-confirm" => {
+                            match self.driver.confirm_subagent_picker(effective_adapter) {
+                                Ok(ModelPickerConfirmResult::Confirmed) => {
+                                    make_receipt("executed", desc.detail)
+                                }
+                                Ok(ModelPickerConfirmResult::PopupAlreadyClosed) => make_receipt(
+                                    "executed",
+                                    format!("{effective_adapter}/subagent-picker-already-closed"),
+                                ),
+                                Err(error) => make_receipt(managed_error_outcome(&error), error),
+                            }
+                        }
                         _ => match self
                             .driver
                             .send_model_picker_key(effective_adapter, key_code)
@@ -3839,6 +3976,24 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     }
                     return match self.driver.open_model_picker(effective_adapter) {
                         Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    };
+                }
+                if matches!(command.as_str(), "subagent" | "subagent-open") {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    if !is_managed_adapter(effective_adapter) {
+                        return make_receipt("blocked", "subagent_picker_unavailable".into());
+                    }
+                    return match self.driver.open_subagent_picker(effective_adapter) {
+                        Ok(SubagentOpenResult::PopupOpened) => {
+                            make_receipt("executed", desc.detail)
+                        }
+                        Ok(SubagentOpenResult::OpenedDirectly) => make_receipt(
+                            "executed",
+                            format!("{effective_adapter}/subagent-opened-direct"),
+                        ),
                         Err(error) => make_receipt(managed_error_outcome(&error), error),
                     };
                 }
@@ -5181,5 +5336,70 @@ mod serialized_effect_tests {
         assert_eq!(live_rt.releases.load(Ordering::SeqCst), 1);
         assert_eq!(live_rt.tap_releases.load(Ordering::SeqCst), 1);
         assert_eq!(live_rt.source_releases.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mouse_click_state_progresses_to_double_and_triple_click_then_resets_on_delay_or_motion() {
+        let t0 = Instant::now();
+        let c1 = next_mouse_click_state(None, MouseButtonKind::Left, t0, 100.0, 200.0);
+        assert_eq!(c1.count, 1);
+
+        let c2 = next_mouse_click_state(
+            Some(c1),
+            MouseButtonKind::Left,
+            t0 + Duration::from_millis(180),
+            101.5,
+            201.0,
+        );
+        assert_eq!(c2.count, 2);
+
+        let c3 = next_mouse_click_state(
+            Some(c2),
+            MouseButtonKind::Left,
+            t0 + Duration::from_millis(320),
+            102.0,
+            201.0,
+        );
+        assert_eq!(c3.count, 3);
+
+        // Fourth rapid click wraps cleanly to 1
+        let c4 = next_mouse_click_state(
+            Some(c3),
+            MouseButtonKind::Left,
+            t0 + Duration::from_millis(420),
+            102.0,
+            201.0,
+        );
+        assert_eq!(c4.count, 1);
+
+        // Slight stick tremor (<= 8pt) within macOS 500ms window still counts as double-click
+        let c_slight_jitter = next_mouse_click_state(
+            Some(c1),
+            MouseButtonKind::Left,
+            t0 + Duration::from_millis(480),
+            106.0,
+            200.0,
+        );
+        assert_eq!(c_slight_jitter.count, 2);
+
+        // Exceeding distance threshold (> 8pt) resets to 1
+        let c_moved = next_mouse_click_state(
+            Some(c1),
+            MouseButtonKind::Left,
+            t0 + Duration::from_millis(120),
+            112.0,
+            200.0,
+        );
+        assert_eq!(c_moved.count, 1);
+
+        // Exceeding interval threshold (> 500ms) resets to 1
+        let c_slow = next_mouse_click_state(
+            Some(c1),
+            MouseButtonKind::Left,
+            t0 + Duration::from_millis(550),
+            100.0,
+            200.0,
+        );
+        assert_eq!(c_slow.count, 1);
     }
 }
