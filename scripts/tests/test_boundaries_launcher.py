@@ -39,6 +39,16 @@ class CheckBoundariesTests(unittest.TestCase):
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "firmware-1794634846067366000-95189"))
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "xw-notary"))
         self.assertTrue(module.find_clean_room_leaks("scripts/release.sh", "notarytool --keychain-profile xw-notary"))
+        self.assertTrue(module.find_clean_room_leaks("scripts/release-macos", "micro-input-notary"))
+        self.assertTrue(module.find_clean_room_leaks("docs/note.md", "custom-app-notary"))
+        self.assertEqual(
+            module.find_clean_room_leaks("scripts/release-macos", "macos-notary-profile"),
+            [],
+        )
+        self.assertEqual(
+            module.find_clean_room_leaks("scripts/release-macos", "macos-notary submit"),
+            [],
+        )
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "input-app-lean-triage"))
         self.assertTrue(module.find_clean_room_leaks("crates/mi-core/src/a.rs", "input-app-lean-triage"))
 

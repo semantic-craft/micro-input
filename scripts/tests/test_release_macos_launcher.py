@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 import plistlib
+import stat
 import tempfile
 import unittest
 
@@ -186,6 +187,82 @@ Load command 23
         self.assertLessEqual(len(formatted), 2000)
         self.assertNotIn('TEAM889900', formatted)
         self.assertNotIn('SECRET_TOKEN', formatted)
+
+    def _write_notary_stub(self, path: Path, body: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'#!/bin/sh\n{body}\n', encoding='utf-8')
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+    def test_resolve_notary_profile_requires_env_or_helper_without_legacy_default(self):
+        legacy_default = 'micro-input' + '-notary'
+        with tempfile.TemporaryDirectory(prefix='mi-notary-empty-') as tmp:
+            fake_home = Path(tmp).resolve()
+            with self.assertRaises(RuntimeError) as ctx:
+                release_mod.resolve_notary_profile(env={'PATH': ''}, home=fake_home)
+            msg = str(ctx.exception)
+            self.assertIn('MI_NOTARY_PROFILE', msg)
+            self.assertIn('NOTARY_PROFILE', msg)
+            self.assertIn('macos-notary-profile', msg)
+            self.assertNotIn(legacy_default, msg)
+
+            blank_stub = fake_home / '.local/bin/macos-notary-profile'
+            self._write_notary_stub(blank_stub, 'printf "   \\n"')
+            with self.assertRaises(RuntimeError):
+                release_mod.resolve_notary_profile(env={'PATH': ''}, home=fake_home)
+
+            failing_stub = fake_home / '.local/bin/macos-notary-profile'
+            self._write_notary_stub(failing_stub, 'echo "missing keychain item" >&2; exit 1')
+            with self.assertRaises(RuntimeError) as fail_ctx:
+                release_mod.resolve_notary_profile(env={'PATH': ''}, home=fake_home)
+            self.assertIn('macos-notary-profile failed', str(fail_ctx.exception))
+
+    def test_resolve_notary_profile_precedence_and_helper_stubs(self):
+        with tempfile.TemporaryDirectory(prefix='mi-notary-stub-') as tmp:
+            root = Path(tmp).resolve()
+            path_bin = root / 'bin'
+            fake_home = root / 'home'
+            self._write_notary_stub(path_bin / 'macos-notary-profile', 'echo "stub-path-profile"')
+            self._write_notary_stub(
+                fake_home / '.local/bin/macos-notary-profile',
+                'echo "stub-home-profile"',
+            )
+
+            self.assertEqual(
+                release_mod.resolve_notary_profile(
+                    env={
+                        'MI_NOTARY_PROFILE': '  env-mi-profile  ',
+                        'NOTARY_PROFILE': 'env-shared-profile',
+                        'PATH': str(path_bin),
+                    },
+                    home=fake_home,
+                ),
+                'env-mi-profile',
+            )
+            self.assertEqual(
+                release_mod.resolve_notary_profile(
+                    env={
+                        'MI_NOTARY_PROFILE': '   ',
+                        'NOTARY_PROFILE': 'env-shared-profile',
+                        'PATH': str(path_bin),
+                    },
+                    home=fake_home,
+                ),
+                'env-shared-profile',
+            )
+            self.assertEqual(
+                release_mod.resolve_notary_profile(
+                    env={'PATH': str(path_bin)},
+                    home=fake_home,
+                ),
+                'stub-path-profile',
+            )
+            self.assertEqual(
+                release_mod.resolve_notary_profile(
+                    env={'PATH': ''},
+                    home=fake_home,
+                ),
+                'stub-home-profile',
+            )
 
 
 if __name__ == '__main__':

@@ -27,6 +27,13 @@ _CLEAN_ROOM_COMMON_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ('device flash backup id', re.compile(r'firmware-\d{12,}', re.IGNORECASE)),
     ('internal triage path', re.compile(r'input-app-lean-triage', re.IGNORECASE)),
     ('personal notary profile', re.compile(r'\bxw-notary\b', re.IGNORECASE)),
+    (
+        'custom notary profile',
+        re.compile(
+            r'(?<![\\a-z0-9])(?!xw-notary(?![a-z0-9-])|macos-notary(?![a-z0-9-]))[a-z0-9][a-z0-9-]*-notary(?![a-z0-9-])',
+            re.IGNORECASE,
+        ),
+    ),
 )
 _MAC_RE = re.compile(
     r'(?<![0-9A-Za-z])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Za-z])'
