@@ -287,7 +287,7 @@ public struct V070MouseConfigModel: Equatable {
     public var delayMs = 70, intervalMs = 14, moveDelta = 14, maxSpeed = 22, timeToMax = 22
     public var wheelDelayMs = 70, wheelIntervalMs = 55, wheelDelta = 2, wheelMaxSpeed = 14, wheelTimeToMax = 28
     public var stickSpeed = 24, stickRegulator = 10, stickScroll = 25
-    public var deadzone = 0.07
+    public var deadzone = 0.15
 
     public init() {}
     public init(json: [String: Any]) {

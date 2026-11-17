@@ -8,6 +8,7 @@
 - 技术架构借鉴 [`metasequoiaime/msime`](https://github.com/metasequoiaime/msime) 的「纯 Rust 跨平台内核 + 薄 C-ABI 边界 + 原生宿主薄壳」设计：全部协议、模型、跨进程桥接、macOS 宿主执行与工作台状态机收敛在纯 Rust 内核（`crates/mi-proto`、`crates/mi-transport`、`crates/mi-model`、`crates/mi-session`、`crates/mi-bridge`、`crates/mi-macos`、`crates/mi-core`），经 9 函数极简 C-ABI 静态库（`crates/mi-ffi`）暴露给 100% 原生 macOS SwiftUI/AppKit 薄壳（`app/MicroInput`），彻底退役 UniFFI、`crates/mi-gpui` 及肥 Swift 业务层。
 - 兼容功能或协议工作查 docs/status.md 中对应调研原件，分别标明观察、官方说明、社区线索和未知；社区旧版参数不能充当当前固件规格。
 - 真实设备操作保留已有映射。默认先做只读或脱敏夹具验证；涉及写入时依据当轮用户授权并验证恢复。Profile 选择在原 Input 中可能自动同步设备。
+- 修改预设默认映射、六层摇杆硬件模式或更新 `/Applications/Micro Input.app` 后，除运行 `scripts/verify-offline` 外，必须核对本机真实 `~/Library/Application Support/MicroInput/`（`workbench.json`、`six-layer-runtime.json`）迁移结果（覆盖旧预设残留槽位而非仅凭洁净夹具），并检查 `ioreg` 当前连接为 USB 还是 BLE 及设备端 `keymap` / `joystick.deadzone` 实际读回，不得在未确认设备已写入的前提下直接交付或假定用户端已生效。
 - 本地私有研究与设备原件保留在受 Git 忽略的私有工作目录，不提交到仓库；正式实现结论以脱敏协议与行为规格进入源码或 docs，不提交厂商内部片段、用户宏载荷、应用数据库或原始日志。
 - 全部项目事实、工单与进度统一在本仓库内维护，不双写外部目录。
 

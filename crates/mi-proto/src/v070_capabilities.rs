@@ -284,7 +284,7 @@ impl JoystickDeadzone {
     pub const MAX: f64 = 0.95;
     pub const UI_MIN: f64 = 0.02;
     pub const UI_MAX: f64 = 0.45;
-    pub const DEFAULT: f64 = 0.07;
+    pub const DEFAULT: f64 = 0.15;
 
     pub fn new(v: f64) -> Result<Self, ProtoError> {
         let dz = Self { v };
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn joystick_deadzone_enforces_firmware_range_and_finiteness() {
-        assert_eq!(JoystickDeadzone::default().v, 0.07);
+        assert_eq!(JoystickDeadzone::default().v, 0.15);
         assert!(encode_write_joystick_deadzone(JoystickDeadzone { v: 0.0025 }, 1).is_ok());
         assert!(encode_write_joystick_deadzone(JoystickDeadzone { v: 0.95 }, 2).is_ok());
         assert!(encode_write_joystick_deadzone(JoystickDeadzone { v: 0.0024 }, 3).is_err());
