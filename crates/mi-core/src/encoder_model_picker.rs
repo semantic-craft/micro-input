@@ -15,6 +15,7 @@ pub const MOUSE_FLICK_HORIZONTAL_DOMINANCE: f64 = 1.5;
 pub enum EncoderOverlayKind {
     ModelPicker,
     SearchConversations,
+    SubagentPicker,
 }
 
 impl EncoderOverlayKind {
@@ -33,6 +34,9 @@ impl EncoderOverlayKind {
                     Some(Self::ModelPicker)
                 }
                 "search" => Some(Self::SearchConversations),
+                "subagent" | "subagent-open" | "subagent-prev" | "subagent-next" => {
+                    Some(Self::SubagentPicker)
+                }
                 _ => None,
             },
             _ => None,
@@ -69,6 +73,9 @@ pub enum ModelPickerCommand {
     SearchPrev,
     SearchNext,
     SearchConfirm,
+    SubagentPrev,
+    SubagentNext,
+    SubagentConfirm,
 }
 
 impl ModelPickerCommand {
@@ -84,6 +91,9 @@ impl ModelPickerCommand {
             Self::SearchPrev => "search-prev",
             Self::SearchNext => "search-next",
             Self::SearchConfirm => "search-confirm",
+            Self::SubagentPrev => "subagent-prev",
+            Self::SubagentNext => "subagent-next",
+            Self::SubagentConfirm => "subagent-confirm",
         }
     }
 
@@ -241,16 +251,18 @@ impl EncoderModelPicker {
     }
 
     pub fn prepare_for_hold_action(&mut self, next_kind: Option<EncoderOverlayKind>) -> bool {
-        let was_model_picker = self
-            .active
-            .as_ref()
-            .is_some_and(|s| s.kind == EncoderOverlayKind::ModelPicker);
+        let was_popup_overlay = self.active.as_ref().is_some_and(|s| {
+            matches!(
+                s.kind,
+                EncoderOverlayKind::ModelPicker | EncoderOverlayKind::SubagentPicker
+            )
+        });
         let entering_search = next_kind == Some(EncoderOverlayKind::SearchConversations);
         if self.active.is_some() {
             self.active = None;
             self.flick.clear();
         }
-        was_model_picker && entering_search
+        was_popup_overlay && entering_search
     }
 
     pub fn apply_hold_execution_outcome(
@@ -284,7 +296,10 @@ impl EncoderModelPicker {
         detail: &str,
     ) -> ConfirmExecutionDisposition {
         self.cancel();
-        if succeeded && detail.ends_with("/model-picker-already-closed") {
+        if succeeded
+            && (detail.ends_with("/model-picker-already-closed")
+                || detail.ends_with("/subagent-picker-already-closed"))
+        {
             ConfirmExecutionDisposition::FallbackToShortPress
         } else {
             ConfirmExecutionDisposition::Completed
@@ -297,15 +312,29 @@ impl EncoderModelPicker {
         action: &ResolvedHostAction,
         now: Instant,
     ) -> OverlayTransition {
+        self.activate_overlay_after_action_with_detail(adapter, action, "", now)
+    }
+
+    pub fn activate_overlay_after_action_with_detail(
+        &mut self,
+        adapter: impl Into<String>,
+        action: &ResolvedHostAction,
+        detail: &str,
+        now: Instant,
+    ) -> OverlayTransition {
         if matches!(action, ResolvedHostAction::Shortcut { key_code: 0x35, .. })
             || matches!(
                 action,
                 ResolvedHostAction::AgentCommand { command, .. }
-                    if command == "model-picker-cancel"
+                    if matches!(command.as_str(), "model-picker-cancel" | "subagent-cancel")
             )
         {
             self.cancel();
             return OverlayTransition::Cancelled;
+        }
+        if detail.ends_with("/subagent-opened-direct") {
+            self.cancel();
+            return OverlayTransition::None;
         }
         if let Some(kind) = EncoderOverlayKind::from_action(action) {
             self.active = Some(ActiveModelPickerSession {
@@ -387,6 +416,8 @@ impl EncoderModelPicker {
             let cmd = match (active.kind, clockwise) {
                 (EncoderOverlayKind::SearchConversations, true) => ModelPickerCommand::SearchNext,
                 (EncoderOverlayKind::SearchConversations, false) => ModelPickerCommand::SearchPrev,
+                (EncoderOverlayKind::SubagentPicker, true) => ModelPickerCommand::SubagentNext,
+                (EncoderOverlayKind::SubagentPicker, false) => ModelPickerCommand::SubagentPrev,
                 (EncoderOverlayKind::ModelPicker, true) => ModelPickerCommand::ModelPickerNext,
                 (EncoderOverlayKind::ModelPicker, false) => ModelPickerCommand::ModelPickerPrev,
             };
@@ -462,6 +493,7 @@ impl EncoderModelPicker {
             let command = match active.kind {
                 EncoderOverlayKind::ModelPicker => ModelPickerCommand::ModelPickerConfirm,
                 EncoderOverlayKind::SearchConversations => ModelPickerCommand::SearchConfirm,
+                EncoderOverlayKind::SubagentPicker => ModelPickerCommand::SubagentConfirm,
             };
             return EncoderReleaseOutcome::ModelPickerConfirm {
                 adapter: active.adapter,
@@ -1024,5 +1056,32 @@ mod tests {
             picker.apply_confirm_execution_outcome(true, "antigravity/model-picker-confirm");
         assert_eq!(closed, ConfirmExecutionDisposition::Completed);
         assert!(!picker.is_active(t0 + Duration::from_millis(195)));
+
+        // Direct one-shot subagent open must not hijack knob into SubagentPicker overlay,
+        // whereas popup open does activate SubagentPicker.
+        let subagent_action = ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "subagent".into(),
+        };
+        assert_eq!(
+            picker.activate_overlay_after_action_with_detail(
+                "antigravity",
+                &subagent_action,
+                "antigravity/subagent-opened-direct",
+                t0 + Duration::from_millis(200),
+            ),
+            OverlayTransition::None
+        );
+        assert!(!picker.is_active(t0 + Duration::from_millis(200)));
+        assert_eq!(
+            picker.activate_overlay_after_action_with_detail(
+                "antigravity",
+                &subagent_action,
+                "antigravity/subagent-picker-opened",
+                t0 + Duration::from_millis(210),
+            ),
+            OverlayTransition::Entered(EncoderOverlayKind::SubagentPicker)
+        );
+        assert!(picker.is_active(t0 + Duration::from_millis(210)));
     }
 }

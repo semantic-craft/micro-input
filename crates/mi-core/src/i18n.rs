@@ -531,6 +531,14 @@ pub fn relocalize_status_message(msg: &str, next_locale: ResolvedLocale) -> Stri
                     "Search conversations opened · Turn dial to select, tap to confirm ({target})"
                 );
             }
+            if let Some(target) = msg
+                .strip_prefix("已打开 Subagent 选择 · 上下旋转选择，短按打开 (")
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                return format!(
+                    "Subagent picker opened · Turn dial to select, tap to open ({target})"
+                );
+            }
             let fw = localize_firmware_message(msg, ResolvedLocale::En);
             if fw != msg {
                 return fw;
@@ -950,6 +958,7 @@ pub fn concise_keycap_caption_en(raw_label: &str) -> String {
         "Cycle Working / Attention" => return "Cycle Work".to_string(),
         "Focus Active Input" => return "Focus In".to_string(),
         "Search Conversations" => return "Search".to_string(),
+        "Select Subagent" => return "Subagent".to_string(),
         "Open Model Picker" => return "Models".to_string(),
         "Previous Model / Effort" => return "Prev Model".to_string(),
         "Next Model / Effort" => return "Next Model".to_string(),

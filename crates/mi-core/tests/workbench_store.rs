@@ -189,13 +189,24 @@ fn opening_saved_desktop_presets_migrates_unchanged_local_codex_once() {
         serde_json::to_value(&doc.editable.graph.layers[&native_lid]).unwrap(),
         native_before
     );
-    for slot in 0..6u32 {
+    assert_eq!(
+        resolve_host_action(doc, Some(&pid), "AG00", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "subagent".into(),
+        })
+    );
+    assert_eq!(
+        resolve_host_action(doc, Some(&pid), "AG01", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "mouse-click:left".into(),
+        })
+    );
+    for slot in 2..6u32 {
         assert_eq!(
             resolve_host_action(doc, Some(&pid), &format!("AG{slot:02}"), true),
-            Some(ResolvedHostAction::AgentCommand {
-                adapter: "four-app".into(),
-                command: format!("slot-open:{slot}"),
-            })
+            None
         );
     }
     for (slot, command) in [
@@ -250,6 +261,25 @@ fn restore_r26_local_codex_starter(store: &mut WorkbenchStore) -> (String, Strin
     store
         .document_store
         .update(|draft| {
+            for slot in 0..=5 {
+                draft.unassign(&json!(pid), &json!(lid), slot)?;
+                draft.assign(
+                    &json!(pid),
+                    &json!(lid),
+                    slot,
+                    Action {
+                        id: format!("slot-open-{slot}"),
+                        name: format!("会话 {}", slot + 1),
+                        category: "Codex 会话".into(),
+                        detail: "切换并回读对应状态的 Codex 会话".into(),
+                        payload: json!({
+                            "type": "agent_command",
+                            "adapter": "four-app",
+                            "command": format!("slot-open:{slot}")
+                        }),
+                    },
+                )?;
+            }
             for slot in [8, 9, 10] {
                 draft.unassign(&json!(pid), &json!(lid), slot)?;
             }
@@ -1535,7 +1565,7 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCas
             .handle_hardware_loop_event(mi_core::HardwareLoopEvent::Input(event), Instant::now())
             .unwrap();
         assert!(receipt.succeeded());
-        assert_eq!(receipt.target, "com.google.antigravity");
+        assert_eq!(receipt.target, "antigravity");
         assert_eq!(store.dispatched_receipts().len(), 1);
         assert_eq!(
             store.projection().sidebar.board_layers.observed_layer,
@@ -1566,10 +1596,10 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCas
         send("ACT00");
     }
     for (step, (slot, managed_token, unmanaged_token, target)) in [
-        (1, "AG00", "AG00", "com.google.antigravity"),
+        (1, "AG00", "AG00", "antigravity"),
         (2, "ACT07", "AG07", "codex"),
-        (3, "AG13", "AG00", "com.deepseek.dsh"),
-        (1, "AG00", "AG00", "com.google.antigravity"),
+        (3, "AG13", "AG00", "dsh-desktop"),
+        (1, "AG00", "AG00", "antigravity"),
     ]
     .into_iter()
     .enumerate()
@@ -3029,5 +3059,202 @@ fn set_command_execution_enabled_persists_across_return_to_host_and_reopen() {
             assert!(edit.command_execution_enabled);
         }
         other => panic!("expected Editable inspector, got {other:?}"),
+    }
+}
+
+#[test]
+fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_session_keys() {
+    use mi_model::draft::Action;
+    use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
+    use serde_json::json;
+
+    let temp = TempDir::new().unwrap();
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let find_pid = |s: &WorkbenchStore, name: &str| {
+        s.document_store
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == name)
+            .unwrap()
+            .0
+            .clone()
+    };
+
+    for (name, expected_adapter) in [
+        ("Antigravity", "antigravity"),
+        ("DeepSeek Coder (DSH)", "dsh-desktop"),
+        (mi_model::preset::LOCAL_CODEX_PROFILE_NAME, "codex"),
+    ] {
+        let pid = find_pid(&store, name);
+        store.select_and_activate_profile(&pid).unwrap();
+        let doc = &store.document_store.draft.document;
+        assert_eq!(
+            resolve_host_action(doc, Some(&pid), "AG00", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: expected_adapter.into(),
+                command: "subagent".into(),
+            })
+        );
+        assert_eq!(
+            resolve_host_action(doc, Some(&pid), "AG01", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "host".into(),
+                command: "mouse-click:left".into(),
+            })
+        );
+        for slot in 2..6u32 {
+            assert_eq!(
+                resolve_host_action(doc, Some(&pid), &format!("AG{slot:02}"), true),
+                None,
+                "{name} second-row slot {slot} must be unbound"
+            );
+        }
+        let cells = &store.projection().canvas.keycap_cells;
+        assert_eq!(cells[0].keycap_id, "Branch");
+        assert_eq!(cells[0].slot_role, "ActionKey");
+        assert_eq!(cells[1].keycap_id, "Nav");
+        assert_eq!(cells[1].slot_role, "ActionKey");
+        for cell in &cells[2..6] {
+            assert_eq!(cell.keycap_id, "Blank");
+            assert_eq!(cell.slot_role, "ActionKey");
+            assert!(!cell.is_available);
+        }
+    }
+
+    // Simulate legacy Antigravity with slot-open-0 + cockpit-slot-1..5 (and logical_sectors = 4),
+    // verify reopen migrates top-6 to subagent + mouse-click:left + unbound 2..5 and mouse mode.
+    let ag_pid = find_pid(&store, "Antigravity");
+    let ag_lid =
+        store.document_store.draft.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+    store
+        .document_store
+        .update(|draft| {
+            for slot in 0..6u32 {
+                let id = if slot == 0 {
+                    "slot-open-0".to_string()
+                } else {
+                    format!("cockpit-slot-{slot}")
+                };
+                draft.assign(
+                    &json!(ag_pid),
+                    &json!(ag_lid),
+                    slot,
+                    Action {
+                        id,
+                        name: format!("会话 {}", slot + 1),
+                        category: "四应用总控".into(),
+                        detail: "legacy cockpit".into(),
+                        payload: json!({
+                            "type": "agent_command",
+                            "adapter": "four-app",
+                            "command": format!("slot-open:{slot}")
+                        }),
+                    },
+                )?;
+            }
+            draft.set_control_settings(
+                &ag_pid,
+                &ag_lid,
+                mi_model::control_settings::ControlSettings {
+                    joystick_mode: "logical_sectors".into(),
+                    active_sectors: 4,
+                    encoder_hold_action_id: None,
+                },
+            )?;
+            draft.assign_encoder_hold(
+                &json!(ag_pid),
+                &json!(ag_lid),
+                mi_model::preset::canonical_encoder_hold_action(),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    std::fs::write(
+        temp.path().join("workbench.json"),
+        serde_json::to_vec(&store.document_store.draft.document).unwrap(),
+    )
+    .unwrap();
+    drop(store);
+
+    let mut migrated = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert!(migrated.has_all_desktop_agent_presets());
+    let doc = &migrated.document_store.draft.document;
+    assert_eq!(
+        resolve_host_action(doc, Some(&ag_pid), "AG00", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "subagent".into(),
+        })
+    );
+    assert_eq!(
+        resolve_host_action(doc, Some(&ag_pid), "AG01", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "mouse-click:left".into(),
+        })
+    );
+    for slot in 2..6u32 {
+        assert_eq!(
+            resolve_host_action(doc, Some(&ag_pid), &format!("AG{slot:02}"), true),
+            None
+        );
+    }
+    assert_eq!(
+        doc.editable.graph.layers[&ag_lid]
+            .control_settings
+            .as_ref()
+            .unwrap()
+            .joystick_mode,
+        "mouse"
+    );
+
+    // Explicit BindTopSixAsSessionKeys must survive reopen without being overwritten.
+    migrated.select_and_activate_profile(&ag_pid).unwrap();
+    migrated
+        .dispatch_session_strip_action(mi_core::SessionStripAction::BindTopSixAsSessionKeys)
+        .unwrap();
+    drop(migrated);
+
+    let mut reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let doc_after = &reopened.document_store.draft.document;
+    for slot in 0..6u32 {
+        assert_eq!(
+            resolve_host_action(doc_after, Some(&ag_pid), &format!("AG{slot:02}"), true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
+    }
+
+    // Inspector TaskKey override must be cleared by RestoreDefaultLayout so top-6 revert to ActionKey.
+    reopened.select_and_activate_profile(&ag_pid).unwrap();
+    reopened
+        .dispatch_inspector_action(mi_core::InspectorAction::SelectSlot(0))
+        .unwrap();
+    reopened
+        .dispatch_inspector_action(mi_core::InspectorAction::SetSlotRole(
+            mi_core::KeycapRole::TaskKey,
+        ))
+        .unwrap();
+    assert_eq!(
+        reopened.projection().canvas.keycap_cells[0].slot_role,
+        "TaskKey"
+    );
+    reopened
+        .dispatch_session_strip_action(mi_core::SessionStripAction::RestoreDefaultLayout)
+        .unwrap();
+    let restored_cells = &reopened.projection().canvas.keycap_cells;
+    assert_eq!(restored_cells[0].slot_role, "ActionKey");
+    assert_eq!(restored_cells[0].full_action_title, "选择 Subagent");
+    assert_eq!(restored_cells[1].slot_role, "ActionKey");
+    assert_eq!(restored_cells[1].full_action_title, "鼠标左键点击");
+    for slot in 2..6usize {
+        assert_eq!(restored_cells[slot].slot_role, "ActionKey");
+        assert_eq!(restored_cells[slot].keycap_id, "Blank");
     }
 }

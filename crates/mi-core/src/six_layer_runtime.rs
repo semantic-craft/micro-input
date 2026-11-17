@@ -106,6 +106,75 @@ impl SavedSixLayerState {
                                 == Some(cmd)
                     })
                 };
+            let d0 = slot_action("logical-0");
+            let d1 = slot_action("logical-1");
+            let d2 = slot_action("logical-2");
+            let d3 = slot_action("logical-3");
+            let d4 = slot_action("logical-4");
+            let d5 = slot_action("logical-5");
+            let doc_has_v2_top_six = is_action_cmd(d0, "agent-subagent", "subagent")
+                && is_action_cmd(d1, "host-mouse-click-left", "mouse-click:left")
+                && d2.is_none()
+                && d3.is_none()
+                && d4.is_none()
+                && d5.is_none();
+            if doc_has_v2_top_six && host.actions.len() >= 6 {
+                let b0 = host.actions[0].as_ref();
+                let b1 = host.actions[1].as_ref();
+                let already_v2 = matches!(
+                    b0,
+                    Some(ResolvedHostAction::AgentCommand { command, .. }) if command == "subagent"
+                ) && matches!(
+                    b1,
+                    Some(ResolvedHostAction::AgentCommand { adapter, command })
+                        if adapter == "host" && command == "mouse-click:left"
+                ) && host.actions[2..6].iter().all(Option::is_none);
+                let baked_session_top_six = (0..6).all(|slot| {
+                    matches!(
+                        host.actions[slot].as_ref(),
+                        Some(ResolvedHostAction::AgentCommand { command, .. })
+                            if command == &format!("slot-open:{slot}")
+                    )
+                });
+                let baked_legacy_starter_top_six =
+                    matches!(b0, Some(ResolvedHostAction::OpenApp { .. }))
+                        && matches!(
+                            b1,
+                            Some(ResolvedHostAction::AgentCommand { command, .. })
+                                if command == "focus-input"
+                        );
+                if !already_v2 && (baked_session_top_six || baked_legacy_starter_top_six) {
+                    host.actions[0] = Some(ResolvedHostAction::AgentCommand {
+                        adapter: host.adapter.clone(),
+                        command: "subagent".into(),
+                    });
+                    host.actions[1] = Some(ResolvedHostAction::AgentCommand {
+                        adapter: "host".into(),
+                        command: "mouse-click:left".into(),
+                    });
+                    for slot in 2..6 {
+                        host.actions[slot] = None;
+                    }
+                    changed = true;
+                }
+            }
+            if layer
+                .control_settings
+                .as_ref()
+                .is_some_and(|cs| cs.joystick_mode == "mouse" && cs.active_sectors == 0)
+            {
+                if host.joystick_mode.as_deref() != Some("MOUSE") {
+                    host.joystick_mode = Some("MOUSE".into());
+                    changed = true;
+                }
+                if host.actions.len() >= 20 && host.actions[16..20].iter().any(Option::is_some) {
+                    for slot in 16..20 {
+                        host.actions[slot] = None;
+                    }
+                    changed = true;
+                }
+            }
+
             let d13 = slot_action("logical-13");
             let d14 = slot_action("logical-14");
             let d15 = slot_action("logical-15");
@@ -138,13 +207,16 @@ impl SavedSixLayerState {
             let b15 = host.actions.get(15).and_then(|a| a.as_ref());
             let b_hold = host.encoder_hold_action.as_ref();
 
-            let baked_pre_v080 = b_hold.is_none()
+            let baked_pre_v080 = (b_hold.is_none() || is_host_cmd(b_hold, "search"))
                 && ((is_host_cmd(b13, "scroll-up")
                     && is_host_cmd(b14, "scroll-down")
                     && is_host_cmd(b15, "scroll-to-bottom"))
                     || (is_host_cmd(b13, "prev-conversation")
                         && is_host_cmd(b14, "next-conversation")
-                        && is_host_cmd(b15, "search")));
+                        && is_host_cmd(b15, "search"))
+                    || (is_host_cmd(b13, "cycle-attention-prev")
+                        && is_host_cmd(b14, "cycle-attention-next")
+                        && is_host_cmd(b15, "four-app-attention")));
 
             let baked_v080 = is_host_cmd(b13, "model-picker-prev")
                 && is_host_cmd(b14, "model-picker-next")
@@ -2744,8 +2816,12 @@ fn execute_clicks_with_encoder_picker(
                 ResolvedHostAction::AgentCommand { adapter, .. } => adapter.as_str(),
                 _ => layer_adapter.map(|(_, a)| a).unwrap_or("antigravity"),
             };
-            let transition =
-                picker.activate_overlay_after_action(resolved_adapter, action, event.received_at);
+            let transition = picker.activate_overlay_after_action_with_detail(
+                resolved_adapter,
+                action,
+                &receipt.detail,
+                event.received_at,
+            );
             match transition {
                 OverlayTransition::Entered(kind) => {
                     let current_bundle = routing.lock().unwrap().bundle_id.clone();

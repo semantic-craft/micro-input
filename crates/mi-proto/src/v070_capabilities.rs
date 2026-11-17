@@ -121,49 +121,49 @@ impl MouseSpeedPreset {
     pub fn to_mouse_config(self) -> MouseConfig {
         match self {
             Self::Precise => MouseConfig {
-                delay_ms: 110,
-                interval_ms: 22,
-                move_delta: 4,
-                max_speed: 8,
+                delay_ms: 105,
+                interval_ms: 20,
+                move_delta: 5,
+                max_speed: 10,
                 time_to_max: 32,
-                wheel_delay_ms: 110,
-                wheel_interval_ms: 85,
+                wheel_delay_ms: 105,
+                wheel_interval_ms: 80,
                 wheel_delta: 1,
-                wheel_max_speed: 4,
-                wheel_time_to_max: 45,
-                stick_speed: 6,
-                stick_regulator: 16,
-                stick_scroll: 50,
+                wheel_max_speed: 6,
+                wheel_time_to_max: 44,
+                stick_speed: 9,
+                stick_regulator: 10,
+                stick_scroll: 45,
             },
             Self::Slow => MouseConfig {
-                delay_ms: 95,
-                interval_ms: 18,
-                move_delta: 8,
-                max_speed: 12,
-                time_to_max: 28,
-                wheel_delay_ms: 95,
-                wheel_interval_ms: 75,
-                wheel_delta: 1,
-                wheel_max_speed: 8,
-                wheel_time_to_max: 40,
-                stick_speed: 10,
-                stick_regulator: 12,
-                stick_scroll: 40,
-            },
-            Self::Standard => MouseConfig {
-                delay_ms: 80,
+                delay_ms: 85,
                 interval_ms: 16,
-                move_delta: 12,
-                max_speed: 18,
-                time_to_max: 24,
-                wheel_delay_ms: 80,
-                wheel_interval_ms: 60,
+                move_delta: 10,
+                max_speed: 16,
+                time_to_max: 26,
+                wheel_delay_ms: 85,
+                wheel_interval_ms: 65,
                 wheel_delta: 2,
-                wheel_max_speed: 12,
-                wheel_time_to_max: 30,
+                wheel_max_speed: 10,
+                wheel_time_to_max: 34,
                 stick_speed: 16,
                 stick_regulator: 10,
-                stick_scroll: 30,
+                stick_scroll: 32,
+            },
+            Self::Standard => MouseConfig {
+                delay_ms: 70,
+                interval_ms: 14,
+                move_delta: 14,
+                max_speed: 22,
+                time_to_max: 22,
+                wheel_delay_ms: 70,
+                wheel_interval_ms: 55,
+                wheel_delta: 2,
+                wheel_max_speed: 14,
+                wheel_time_to_max: 28,
+                stick_speed: 24,
+                stick_regulator: 10,
+                stick_scroll: 25,
             },
             Self::Fast => MouseConfig {
                 delay_ms: 60,
@@ -176,8 +176,8 @@ impl MouseSpeedPreset {
                 wheel_delta: 3,
                 wheel_max_speed: 18,
                 wheel_time_to_max: 24,
-                stick_speed: 24,
-                stick_regulator: 8,
+                stick_speed: 30,
+                stick_regulator: 10,
                 stick_scroll: 20,
             },
         }
@@ -697,20 +697,25 @@ mod tests {
     #[test]
     fn mouse_config_presets_and_validation_match_firmware_defaults() {
         let standard = MouseConfig::default();
-        assert_eq!(standard.delay_ms, 80);
-        assert_eq!(standard.interval_ms, 16);
-        assert_eq!(standard.move_delta, 12);
-        assert_eq!(standard.max_speed, 18);
-        assert_eq!(standard.time_to_max, 24);
-        assert_eq!(standard.wheel_delay_ms, 80);
-        assert_eq!(standard.wheel_interval_ms, 60);
+        assert_eq!(standard.delay_ms, 70);
+        assert_eq!(standard.interval_ms, 14);
+        assert_eq!(standard.move_delta, 14);
+        assert_eq!(standard.max_speed, 22);
+        assert_eq!(standard.time_to_max, 22);
+        assert_eq!(standard.wheel_delay_ms, 70);
+        assert_eq!(standard.wheel_interval_ms, 55);
         assert_eq!(standard.wheel_delta, 2);
-        assert_eq!(standard.wheel_max_speed, 12);
-        assert_eq!(standard.wheel_time_to_max, 30);
-        assert_eq!(standard.stick_speed, 16);
+        assert_eq!(standard.wheel_max_speed, 14);
+        assert_eq!(standard.wheel_time_to_max, 28);
+        assert_eq!(standard.stick_speed, 24);
         assert_eq!(standard.stick_regulator, 10);
-        assert_eq!(standard.stick_scroll, 30);
+        assert_eq!(standard.stick_scroll, 25);
         assert_eq!(standard.matching_preset(), Some(MouseSpeedPreset::Standard));
+        let fast = MouseSpeedPreset::Fast.to_mouse_config();
+        assert_eq!(fast.stick_speed, 30);
+        assert_eq!(fast.stick_regulator, 10);
+        // Standard effective stick gain (24/10 = 2.40) is exactly 20% slower than Fast (30/10 = 3.00).
+        assert_eq!(standard.stick_speed * 5, fast.stick_speed * 4);
         assert_eq!(
             MouseSpeedPreset::parse("FAST").unwrap(),
             MouseSpeedPreset::Fast
@@ -720,7 +725,7 @@ mod tests {
         let wire = encode_write_mouse_config(&standard, 10).unwrap();
         let v: Value = serde_json::from_slice(&wire).unwrap();
         assert_eq!(v["method"], "mouse.config");
-        assert_eq!(v["params"]["stick_scroll"], 30);
+        assert_eq!(v["params"]["stick_scroll"], 25);
 
         let reply = json!({"id": 10, "method": "mouse.config", "result": v["params"]});
         assert_eq!(decode_mouse_config_response(&reply, 10).unwrap(), standard);

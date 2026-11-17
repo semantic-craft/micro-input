@@ -266,6 +266,12 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                         | "search-prev"
                         | "search-next"
                         | "search-confirm"
+                        | "subagent"
+                        | "subagent-open"
+                        | "subagent-prev"
+                        | "subagent-next"
+                        | "subagent-confirm"
+                        | "subagent-cancel"
                 ) =>
             {
                 prerequisites.push(

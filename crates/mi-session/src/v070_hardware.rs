@@ -751,7 +751,7 @@ mod tests {
         let mc = session.read_mouse_config().await.unwrap();
         assert_eq!(mc, MouseConfig::default());
         let mut custom_mc = mc;
-        custom_mc.move_delta = 14;
+        custom_mc.move_delta = 16;
         assert_eq!(
             session.write_mouse_config(&custom_mc).await.unwrap(),
             custom_mc
@@ -1152,5 +1152,57 @@ mod tests {
 
         session.shutdown().await;
         responder.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Creator Micro 2 (303A:8298) on 0.7.0-rc.16+"]
+    async fn live_v070_sync_standard_mouse_speed() {
+        use mi_proto::v070_capabilities::MouseSpeedPreset;
+        use mi_transport::HidTransport;
+
+        let target =
+            mi_transport::discover_target_keyboard().expect("Creator Micro 2 not connected");
+        let transport = mi_transport::MacTransport::exclusive_vendor();
+        let link = transport
+            .open(&target.vendor_path)
+            .expect("failed to open exclusive vendor link");
+        let session = DeviceSession::new(
+            link,
+            Box::new(NativeFramer::default()),
+            Arc::new(ReadOnlySchema),
+            SessionConfig::default(),
+        );
+
+        let info = session
+            .read_identity_info()
+            .await
+            .expect("read_identity_info failed");
+        let before_mc = session
+            .read_mouse_config()
+            .await
+            .expect("read_mouse_config before failed");
+        let deadzone = session
+            .read_joystick_deadzone()
+            .await
+            .expect("read_joystick_deadzone failed");
+
+        let standard_mc = MouseSpeedPreset::Standard.to_mouse_config();
+        let written_mc = session
+            .write_mouse_config(&standard_mc)
+            .await
+            .expect("write_mouse_config failed");
+        let after_mc = session
+            .read_mouse_config()
+            .await
+            .expect("read_mouse_config after failed");
+
+        println!(
+            "live_v070_sync_standard_mouse_speed: version={:?} deadzone={:.3} before={:?} after={:?}",
+            info.version, deadzone, before_mc, after_mc
+        );
+        assert_eq!(written_mc, standard_mc);
+        assert_eq!(after_mc, standard_mc);
+
+        session.shutdown().await;
     }
 }

@@ -604,8 +604,23 @@ impl CodexKeycapId {
     }
 
     pub fn infer_for_slot(slot: u32, action: Option<&Action>) -> Self {
-        if let Some(a) = action {
+        let Some(a) = action else {
+            return Self::Blank;
+        };
+        {
             let cmd = a.payload.get("command").and_then(|v| v.as_str());
+            if a.id == "agent-subagent"
+                || a.id.contains("subagent")
+                || cmd == Some("subagent")
+                || cmd == Some("subagent-open")
+            {
+                return Self::Branch;
+            }
+            if a.id.starts_with("host-mouse-click")
+                || cmd.is_some_and(|c| c.starts_with("mouse-click:"))
+            {
+                return Self::Nav;
+            }
             if a.id == "ag-live-voice"
                 || a.id == "desktop-live-voice"
                 || a.id.contains("live-voice")

@@ -364,6 +364,9 @@ pub(crate) fn parse_v070_action(
             config.max_speed = max_speed;
             config.wheel_delta = wheel_delta;
             config.wheel_max_speed = wheel_max_speed;
+            if stick_speed != base_mouse.stick_speed {
+                config.stick_regulator = MouseConfig::default().stick_regulator;
+            }
             config.stick_speed = stick_speed;
             config.stick_scroll = stick_scroll;
             config.validate().map_err(|e| e.to_string())?;
@@ -471,14 +474,14 @@ mod tests {
     fn flattened_projections_preserve_flat_json_and_deref_ergonomics() {
         let mut mouse = V070MouseConfigProjection::default();
         assert_eq!(mouse.move_delta, MouseConfig::default().move_delta);
-        mouse.move_delta = 14;
-        assert_eq!(mouse.config.move_delta, 14);
+        mouse.move_delta = 16;
+        assert_eq!(mouse.config.move_delta, 16);
 
         let mouse_json = serde_json::to_value(&mouse).unwrap();
         let obj = mouse_json.as_object().unwrap();
         assert!(obj.get("config").is_none());
         assert_eq!(obj["preset"], "standard");
-        assert_eq!(obj["move_delta"], 14);
+        assert_eq!(obj["move_delta"], 16);
         assert_eq!(obj["deadzone"], JoystickDeadzone::DEFAULT);
         let decoded_mouse: V070MouseConfigProjection = serde_json::from_value(json!({
             "preset": "fast",
@@ -634,6 +637,32 @@ mod tests {
             parsed_mouse,
             ParsedV070Action::DeviceCommand(ValidatedV070DeviceCommand::ApplyMouseConfig { .. })
         ));
+
+        let mut legacy_fast_base = MouseConfig::default();
+        legacy_fast_base.stick_speed = 24;
+        legacy_fast_base.stick_regulator = 8;
+        let normalized_mouse = parse_v070_action(
+            V070HardwareAction::ApplyMouseConfig {
+                move_delta: 14,
+                max_speed: 22,
+                wheel_delta: 2,
+                wheel_max_speed: 14,
+                stick_speed: 20,
+                stick_scroll: 25,
+            },
+            &legacy_fast_base,
+            MAX_DEVICE_NAME_LEN,
+        )
+        .unwrap();
+        match normalized_mouse {
+            ParsedV070Action::DeviceCommand(ValidatedV070DeviceCommand::ApplyMouseConfig {
+                config,
+            }) => {
+                assert_eq!(config.stick_speed, 20);
+                assert_eq!(config.stick_regulator, 10);
+            }
+            other => panic!("unexpected parsed action: {other:?}"),
+        }
 
         assert!(parse_v070_action(
             V070HardwareAction::ApplyJoystickDeadzone { deadzone: 0.0024 },

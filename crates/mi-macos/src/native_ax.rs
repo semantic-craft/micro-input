@@ -2478,6 +2478,28 @@ mod macos {
                 && matches!(data.role.as_str(), "AXPopUpButton" | "AXButton")
                 && data.pressable
                 && crate::managed_controls::is_dsh_model_picker_trigger(&data.label);
+            let antigravity_subagent_trigger = is_antigravity
+                && data.pressable
+                && ((data.role == "AXPopUpButton"
+                    && crate::managed_controls::is_antigravity_subagent_popup_trigger(
+                        &data.label,
+                    ))
+                    || (data.role == "AXButton"
+                        && (crate::managed_controls::is_antigravity_overview_subagents_button(
+                            &data.label,
+                        ) || crate::managed_controls::is_antigravity_open_subagent_button(
+                            &data.label,
+                        ))));
+            let codex_subagent_trigger = is_codex
+                && matches!(data.role.as_str(), "AXPopUpButton" | "AXButton")
+                && data.pressable
+                && crate::managed_controls::is_codex_subagent_picker_trigger(&data.label);
+            let dsh_subagent_trigger = is_dsh
+                && matches!(data.role.as_str(), "AXPopUpButton" | "AXButton")
+                && data.pressable
+                && crate::managed_controls::is_dsh_subagent_picker_trigger(&data.label);
+            let subagent_trigger =
+                antigravity_subagent_trigger || codex_subagent_trigger || dsh_subagent_trigger;
 
             let is_antigravity_side_question_btn = is_antigravity
                 && matches!(
@@ -2528,6 +2550,7 @@ mod macos {
                 && !codex_model_trigger
                 && !codex_popover_item
                 && !dsh_model_trigger
+                && !subagent_trigger
             {
                 return None;
             }
@@ -2537,6 +2560,7 @@ mod macos {
                 || codex_reasoning_trigger
                 || codex_model_trigger
                 || dsh_model_trigger
+                || subagent_trigger
             {
                 true
             } else if is_antigravity_side_question_btn {
@@ -4171,6 +4195,162 @@ mod macos {
                 controls.read(&snapshot.identity).unwrap().identity,
                 snapshot.identity
             );
+        }
+
+        #[test]
+        fn control_from_node_data_exposes_subagent_and_dsh_model_triggers_while_dropping_stop_buttons(
+        ) {
+            let make_provider = |bundle: &str| NativeAxProvider {
+                target: Some(Target {
+                    identity: ManagedWindowIdentity {
+                        bundle_id: bundle.into(),
+                        pid: 42,
+                        window_id: 1,
+                        scope_id: 0,
+                        title: "window".into(),
+                    },
+                    window: CapturedWindow {
+                        bundle_id: bundle.into(),
+                        pid: 42,
+                        application: Owned::text("app").unwrap(),
+                        element: Owned::text("win").unwrap(),
+                        title: "window".into(),
+                    },
+                    scope: Owned::text("win").unwrap(),
+                }),
+                ..Default::default()
+            };
+
+            let ag = make_provider("com.google.antigravity");
+            assert!(ag
+                .control_from_node_data(
+                    1,
+                    NodeData {
+                        role: "AXPopUpButton".into(),
+                        label: "1 subagent running".into(),
+                        enabled: true,
+                        pressable: true,
+                        expanded: Some(false),
+                        ..Default::default()
+                    }
+                )
+                .is_some());
+            assert!(ag
+                .control_from_node_data(
+                    2,
+                    NodeData {
+                        role: "AXButton".into(),
+                        label: "Open Subagent: Code Quality Auditor & Release Engineer (DeepCoder)"
+                            .into(),
+                        enabled: true,
+                        pressable: true,
+                        ..Default::default()
+                    }
+                )
+                .is_some());
+            for stop_label in [
+                "Stop subagent",
+                "Improvement Coding Worker Stop subagent",
+                "Close Layer 0 Coding Worker",
+            ] {
+                assert!(
+                    ag.control_from_node_data(
+                        3,
+                        NodeData {
+                            role: "AXButton".into(),
+                            label: stop_label.into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        }
+                    )
+                    .is_none(),
+                    "must drop {stop_label}"
+                );
+            }
+
+            let dsh = make_provider("com.deepseek.dsh");
+            assert!(dsh
+                .control_from_node_data(
+                    10,
+                    NodeData {
+                        role: "AXPopUpButton".into(),
+                        label: "选择模型，当前 DeepSeek-V4.1-Flash，推理等级 High".into(),
+                        enabled: true,
+                        pressable: true,
+                        expanded: Some(false),
+                        ..Default::default()
+                    }
+                )
+                .is_some());
+            assert!(dsh
+                .control_from_node_data(
+                    11,
+                    NodeData {
+                        role: "AXButton".into(),
+                        label: "3 个子智能体".into(),
+                        enabled: true,
+                        pressable: true,
+                        ..Default::default()
+                    }
+                )
+                .is_some());
+
+            let codex = make_provider("com.openai.codex");
+            assert!(codex
+                .control_from_node_data(
+                    20,
+                    NodeData {
+                        role: "AXPopUpButton".into(),
+                        label: "2 subagents".into(),
+                        enabled: true,
+                        pressable: true,
+                        expanded: Some(false),
+                        ..Default::default()
+                    }
+                )
+                .is_some());
+        }
+
+        #[test]
+        #[ignore = "read-only observation of running Antigravity and DSH windows"]
+        fn live_native_ax_provider_surfaces_subagent_and_model_controls_readonly() {
+            let mut provider = NativeAxProvider::default();
+            if let Ok(ag_win) = provider.capture_full_window("com.google.antigravity") {
+                println!(
+                    "live Antigravity filtered controls ({}): {:?}",
+                    ag_win.controls.len(),
+                    ag_win
+                        .controls
+                        .iter()
+                        .map(|c| (&c.role, &c.label, c.expanded))
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    !ag_win
+                        .controls
+                        .iter()
+                        .any(|c| c.label.to_lowercase().contains("stop subagent")),
+                    "filtered Antigravity controls must never include Stop subagent"
+                );
+            }
+            if let Ok(dsh_win) = provider.capture_full_window("com.deepseek.dsh") {
+                println!(
+                    "live DSH filtered controls ({}): {:?}",
+                    dsh_win.controls.len(),
+                    dsh_win
+                        .controls
+                        .iter()
+                        .map(|c| (&c.role, &c.label, c.expanded))
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    dsh_win.controls.iter().any(|c| {
+                        crate::managed_controls::is_dsh_model_picker_trigger(&c.label)
+                    }),
+                    "filtered DSH controls must surface the composer model picker popup"
+                );
+            }
         }
 
         #[test]

@@ -308,10 +308,10 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
     {
         return Err(format!("unexpected encoder hold action: {hold_action:?}"));
     }
-    for binding in ["AG00", "AG01", "AG02", "AG03", "AG13", "AG14", "ENC_CLK"] {
+    for binding in ["AG00", "AG01", "AG06", "AG07", "AG13", "AG14", "ENC_CLK"] {
         fire_binding(&mut receipts, &draft.document, &antigravity_pid, binding)?;
     }
-    for binding in ["AG00", "AG01", "AG02", "AG03"] {
+    for binding in ["AG00", "AG01", "AG06", "AG07"] {
         fire_binding(&mut receipts, &draft.document, &dsh_pid, binding)?;
     }
 

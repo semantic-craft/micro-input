@@ -1435,7 +1435,9 @@ mod tests {
         assert_eq!(p.v070_hardware.active_layer, Some(1));
         assert_eq!(p.v070_hardware.device_name.max_length, 15);
         assert!(p.v070_hardware.pm_state.usb_host_hold);
-        assert_eq!(p.v070_hardware.mouse.move_delta, 12);
+        assert_eq!(p.v070_hardware.mouse.move_delta, 14);
+        assert_eq!(p.v070_hardware.mouse.stick_speed, 24);
+        assert_eq!(p.v070_hardware.mouse.stick_regulator, 10);
         assert_eq!(p.v070_hardware.mouse.deadzone, 0.15);
 
         let before_invalid = store.projection().v070_hardware.clone();

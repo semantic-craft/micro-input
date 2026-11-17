@@ -122,8 +122,9 @@ async fn verified_input_subscription_merges_wide_key_and_resolves_host_actions()
         .resolve_input_action(ev0.binding_id.unwrap(), true)
         .unwrap();
     let resolved: serde_json::Value = serde_json::from_str(&resolved_json).unwrap();
-    assert_eq!(resolved["action_type"], "open_app");
-    assert_eq!(resolved["bundle_id"], "com.google.antigravity");
+    assert_eq!(resolved["action_type"], "agent_command");
+    assert_eq!(resolved["adapter"], "antigravity");
+    assert_eq!(resolved["command"], "subagent");
 
     core.emit_synthetic_binding_event("AG10".into(), true)
         .await

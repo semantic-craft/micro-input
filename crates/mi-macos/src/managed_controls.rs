@@ -121,6 +121,12 @@ pub enum ModelPickerConfirmResult {
     PopupAlreadyClosed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentOpenResult {
+    PopupOpened,
+    OpenedDirectly,
+}
+
 const MODEL_PICKER_FALLBACK_TTL: Duration = Duration::from_secs(12);
 
 fn is_codex_trigger_excluded(label: &str) -> bool {
@@ -236,6 +242,10 @@ pub(crate) fn is_dsh_model_picker_trigger(label: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
+    let lower = trimmed.to_lowercase();
+    if lower.contains("subagent") || trimmed.contains("子智能体") {
+        return false;
+    }
     let exact = [
         "model",
         "select model",
@@ -253,7 +263,14 @@ pub(crate) fn is_dsh_model_picker_trigger(label: &str) -> bool {
     if exact.iter().any(|item| trimmed.eq_ignore_ascii_case(item)) {
         return true;
     }
-    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("select model")
+        || lower.starts_with("choose model")
+        || lower.starts_with("switch model")
+        || trimmed.starts_with("选择模型")
+        || trimmed.starts_with("切换模型")
+    {
+        return true;
+    }
     let prefixes = [
         "deepseek",
         "claude",
@@ -285,6 +302,7 @@ pub(crate) fn is_antigravity_model_picker_trigger(label: &str) -> bool {
         "customize sections",
         "notifications",
         "extensions",
+        "subagent",
     ];
     if excluded.iter().any(|ex| lower.contains(ex)) {
         return false;
@@ -296,6 +314,73 @@ pub(crate) fn is_antigravity_model_picker_trigger(label: &str) -> bool {
         || trimmed == "模型"
         || trimmed.starts_with("选择模型")
         || trimmed.starts_with("切换模型")
+}
+
+pub(crate) fn is_antigravity_subagent_popup_trigger(label: &str) -> bool {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    if lower.contains("stop subagent")
+        || lower.contains("cancel subagent")
+        || lower.starts_with("open subagent:")
+        || lower.starts_with("close ")
+        || trimmed.starts_with("打开子智能体")
+        || trimmed.contains("停止子智能体")
+    {
+        return false;
+    }
+    lower.contains("subagent") || trimmed.contains("子智能体")
+}
+
+pub(crate) fn is_antigravity_overview_subagents_button(label: &str) -> bool {
+    let trimmed = label.trim();
+    let lower = trimmed.to_lowercase();
+    lower == "subagents"
+        || lower.starts_with("subagents ")
+        || trimmed == "子智能体"
+        || trimmed.starts_with("子智能体 ")
+}
+
+pub(crate) fn is_antigravity_open_subagent_button(label: &str) -> bool {
+    let trimmed = label.trim();
+    let lower = trimmed.to_lowercase();
+    lower.starts_with("open subagent:") || trimmed.starts_with("打开子智能体")
+}
+
+pub(crate) fn is_dsh_subagent_picker_trigger(label: &str) -> bool {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    let excluded = [
+        "stop subagent",
+        "cancel subagent",
+        "open in sidebar",
+        "在侧边栏打开",
+    ];
+    if excluded.iter().any(|ex| lower.contains(ex)) {
+        return false;
+    }
+    lower.contains("subagent") || trimmed.contains("子智能体")
+}
+
+pub(crate) fn is_codex_subagent_picker_trigger(label: &str) -> bool {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    let excluded = ["stop subagent", "cancel subagent"];
+    if excluded.iter().any(|ex| lower.contains(ex)) {
+        return false;
+    }
+    lower.contains("subagent")
+        || lower.contains("switch agent")
+        || lower.contains("select agent")
+        || trimmed.contains("子智能体")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,11 +516,12 @@ fn observe_model_picker_popup_state(
     }
 }
 
-fn confirm_popup_expansion<P: ManagedAxProvider>(
+fn confirm_popup_expansion_with_reason<P: ManagedAxProvider>(
     provider: &mut P,
     target: &ManagedWindowIdentity,
     control_id: u64,
     timeout: Duration,
+    unconfirmed_reason: &str,
 ) -> Result<bool, String> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -447,12 +533,27 @@ fn confirm_popup_expansion<P: ManagedAxProvider>(
             None => return Ok(false),
             Some(false) => {
                 if Instant::now() >= deadline {
-                    return Err("unconfirmed:model_picker_open_readback".into());
+                    return Err(format!("unconfirmed:{unconfirmed_reason}"));
                 }
                 std::thread::sleep(Duration::from_millis(15));
             }
         }
     }
+}
+
+fn confirm_popup_expansion<P: ManagedAxProvider>(
+    provider: &mut P,
+    target: &ManagedWindowIdentity,
+    control_id: u64,
+    timeout: Duration,
+) -> Result<bool, String> {
+    confirm_popup_expansion_with_reason(
+        provider,
+        target,
+        control_id,
+        timeout,
+        "model_picker_open_readback",
+    )
 }
 
 fn poll_optional_popup_expansion<P: ManagedAxProvider>(
@@ -479,7 +580,57 @@ fn poll_optional_popup_expansion<P: ManagedAxProvider>(
     }
 }
 
+fn select_latest_subagent_trigger(
+    window: &ManagedWindow,
+    matches_popup_label: fn(&str) -> bool,
+    matches_button_label: Option<fn(&str) -> bool>,
+) -> Option<&ManagedControl> {
+    if let Some(popup) = window.controls.iter().rfind(|c| {
+        c.enabled && c.pressable && c.role == "AXPopUpButton" && matches_popup_label(&c.label)
+    }) {
+        return Some(popup);
+    }
+    let button_matcher = matches_button_label?;
+    window
+        .controls
+        .iter()
+        .rfind(|c| c.enabled && c.pressable && c.role == "AXButton" && button_matcher(&c.label))
+}
+
+fn observe_subagent_picker_popup_state(
+    window: &ManagedWindow,
+    adapter: DictationAdapter,
+) -> ObservedModelPickerPopupState {
+    let trigger = match adapter {
+        DictationAdapter::Antigravity => {
+            select_latest_subagent_trigger(window, is_antigravity_subagent_popup_trigger, None)
+        }
+        DictationAdapter::Dsh => select_latest_subagent_trigger(
+            window,
+            is_dsh_subagent_picker_trigger,
+            Some(is_dsh_subagent_picker_trigger),
+        ),
+        DictationAdapter::Codex => select_latest_subagent_trigger(
+            window,
+            is_codex_subagent_picker_trigger,
+            Some(is_codex_subagent_picker_trigger),
+        ),
+    };
+    match trigger.and_then(|c| c.expanded) {
+        Some(true) => ObservedModelPickerPopupState::Open,
+        Some(false) => ObservedModelPickerPopupState::Closed,
+        None => ObservedModelPickerPopupState::Unknown,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivePickerKind {
+    Model,
+    Subagent,
+}
+
 struct ActivePickerTarget {
+    kind: ActivePickerKind,
     adapter: DictationAdapter,
     identity: ManagedWindowIdentity,
     updated_at: Instant,
@@ -1136,6 +1287,7 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
 
     fn active_picker_state(
         &self,
+        kind: ActivePickerKind,
         adapter: DictationAdapter,
         identity: &ManagedWindowIdentity,
     ) -> Option<bool> {
@@ -1147,7 +1299,7 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             *guard = None;
             return None;
         }
-        (active.adapter == adapter && &active.identity == identity)
+        (active.kind == kind && active.adapter == adapter && &active.identity == identity)
             .then_some(active.ax_open_confirmed)
     }
 
@@ -1161,7 +1313,8 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             ObservedModelPickerPopupState::Closed => {
                 let has_focused_editable = window.controls.iter().any(|c| c.editable && c.focused);
                 if adapter == DictationAdapter::Codex
-                    && self.active_picker_state(adapter, &window.identity) == Some(false)
+                    && self.active_picker_state(ActivePickerKind::Model, adapter, &window.identity)
+                        == Some(false)
                     && !has_focused_editable
                 {
                     Ok(ObservedModelPickerPopupState::Unknown)
@@ -1175,12 +1328,14 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
 
     fn record_active_picker_target(
         &self,
+        kind: ActivePickerKind,
         adapter: DictationAdapter,
         identity: &ManagedWindowIdentity,
         ax_open_confirmed: bool,
     ) {
         if let Ok(mut guard) = self.active_picker_target.lock() {
             *guard = Some(ActivePickerTarget {
+                kind,
                 adapter,
                 identity: identity.clone(),
                 updated_at: Instant::now(),
@@ -1209,6 +1364,154 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             .map_err(|_| blocked("ax_lock_poisoned"))?;
         validate_uncleared_target(provider, &mut targets, &window.identity)?;
         Ok(window)
+    }
+
+    fn capture_full_window_for_key(
+        &self,
+        provider: &mut P,
+        adapter: DictationAdapter,
+    ) -> Result<ManagedWindow, String> {
+        let bundle = adapter_bundle(adapter);
+        let window = provider.capture_full_window(bundle)?;
+        validate_target(&window.identity, bundle)?;
+        let mut targets = self
+            .uncleared_targets
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        validate_uncleared_target(provider, &mut targets, &window.identity)?;
+        Ok(window)
+    }
+
+    fn press_subagent_trigger_in_window(
+        provider: &mut P,
+        window: &ManagedWindow,
+        trigger: &ManagedControl,
+    ) -> Result<(ManagedWindowIdentity, bool), String> {
+        let trigger_id = trigger.id;
+        let initial_expanded = trigger.expanded;
+        let is_popup = trigger.role == "AXPopUpButton";
+        provider.activate_window(&window.identity)?;
+        let confirmed = if initial_expanded == Some(true) {
+            true
+        } else {
+            provider.press(&window.identity, trigger_id)?;
+            if is_popup && initial_expanded == Some(false) {
+                confirm_popup_expansion_with_reason(
+                    provider,
+                    &window.identity,
+                    trigger_id,
+                    Duration::from_millis(250),
+                    "subagent_picker_open_readback",
+                )?
+            } else {
+                false
+            }
+        };
+        Ok((window.identity.clone(), confirmed))
+    }
+
+    fn open_subagent_picker_in_window(
+        &self,
+        provider: &mut P,
+        adapter: DictationAdapter,
+        window: ManagedWindow,
+    ) -> Result<(ManagedWindowIdentity, bool, SubagentOpenResult), String> {
+        match adapter {
+            DictationAdapter::Antigravity => {
+                if let Some(trigger) = select_latest_subagent_trigger(
+                    &window,
+                    is_antigravity_subagent_popup_trigger,
+                    None,
+                ) {
+                    let (id, confirmed) =
+                        Self::press_subagent_trigger_in_window(provider, &window, trigger)?;
+                    return Ok((id, confirmed, SubagentOpenResult::PopupOpened));
+                }
+                let full_window = self.capture_full_window_for_key(provider, adapter)?;
+                if let Some(trigger) = select_latest_subagent_trigger(
+                    &full_window,
+                    is_antigravity_subagent_popup_trigger,
+                    None,
+                ) {
+                    let (id, confirmed) =
+                        Self::press_subagent_trigger_in_window(provider, &full_window, trigger)?;
+                    return Ok((id, confirmed, SubagentOpenResult::PopupOpened));
+                }
+                if let Some(overview_btn) = full_window.controls.iter().rfind(|c| {
+                    c.enabled
+                        && c.pressable
+                        && c.role == "AXButton"
+                        && is_antigravity_overview_subagents_button(&c.label)
+                }) {
+                    provider.activate_window(&full_window.identity)?;
+                    provider.press(&full_window.identity, overview_btn.id)?;
+                    return Ok((
+                        full_window.identity,
+                        false,
+                        SubagentOpenResult::OpenedDirectly,
+                    ));
+                }
+                if let Some(open_btn) = full_window.controls.iter().rfind(|c| {
+                    c.enabled
+                        && c.pressable
+                        && c.role == "AXButton"
+                        && is_antigravity_open_subagent_button(&c.label)
+                }) {
+                    provider.activate_window(&full_window.identity)?;
+                    provider.press(&full_window.identity, open_btn.id)?;
+                    return Ok((
+                        full_window.identity,
+                        false,
+                        SubagentOpenResult::OpenedDirectly,
+                    ));
+                }
+                Err(blocked("subagent_picker_unavailable"))
+            }
+            DictationAdapter::Dsh => {
+                if let Some(trigger) = select_latest_subagent_trigger(
+                    &window,
+                    is_dsh_subagent_picker_trigger,
+                    Some(is_dsh_subagent_picker_trigger),
+                ) {
+                    let (id, confirmed) =
+                        Self::press_subagent_trigger_in_window(provider, &window, trigger)?;
+                    return Ok((id, confirmed, SubagentOpenResult::PopupOpened));
+                }
+                let full_window = self.capture_full_window_for_key(provider, adapter)?;
+                if let Some(trigger) = select_latest_subagent_trigger(
+                    &full_window,
+                    is_dsh_subagent_picker_trigger,
+                    Some(is_dsh_subagent_picker_trigger),
+                ) {
+                    let (id, confirmed) =
+                        Self::press_subagent_trigger_in_window(provider, &full_window, trigger)?;
+                    return Ok((id, confirmed, SubagentOpenResult::PopupOpened));
+                }
+                Err(blocked("subagent_picker_unavailable"))
+            }
+            DictationAdapter::Codex => {
+                if let Some(trigger) = select_latest_subagent_trigger(
+                    &window,
+                    is_codex_subagent_picker_trigger,
+                    Some(is_codex_subagent_picker_trigger),
+                ) {
+                    let (id, confirmed) =
+                        Self::press_subagent_trigger_in_window(provider, &window, trigger)?;
+                    return Ok((id, confirmed, SubagentOpenResult::PopupOpened));
+                }
+                let full_window = self.capture_full_window_for_key(provider, adapter)?;
+                if let Some(trigger) = select_latest_subagent_trigger(
+                    &full_window,
+                    is_codex_subagent_picker_trigger,
+                    Some(is_codex_subagent_picker_trigger),
+                ) {
+                    let (id, confirmed) =
+                        Self::press_subagent_trigger_in_window(provider, &full_window, trigger)?;
+                    return Ok((id, confirmed, SubagentOpenResult::PopupOpened));
+                }
+                Err(blocked("subagent_picker_unavailable"))
+            }
+        }
     }
 
     fn open_model_picker_in_window(
@@ -1367,7 +1670,12 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         let window = self.capture_window_for_key(&mut *provider, adapter)?;
         let (target_identity, ax_open_confirmed) =
             self.open_model_picker_in_window(&mut *provider, adapter, window)?;
-        self.record_active_picker_target(adapter, &target_identity, ax_open_confirmed);
+        self.record_active_picker_target(
+            ActivePickerKind::Model,
+            adapter,
+            &target_identity,
+            ax_open_confirmed,
+        );
         Ok(())
     }
 
@@ -1381,7 +1689,8 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
         let window = self.capture_window_for_key(&mut *provider, adapter)?;
-        let prior_ax_confirmed = self.active_picker_state(adapter, &window.identity);
+        let prior_ax_confirmed =
+            self.active_picker_state(ActivePickerKind::Model, adapter, &window.identity);
         let observed = self.effective_popup_state(&window, adapter)?;
         let is_open = match observed {
             ObservedModelPickerPopupState::Open => true,
@@ -1398,7 +1707,12 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             self.open_model_picker_in_window(&mut *provider, adapter, window)?
         };
         provider.send_window_key(&target_identity, key_code, &[])?;
-        self.record_active_picker_target(adapter, &target_identity, ax_open_confirmed);
+        self.record_active_picker_target(
+            ActivePickerKind::Model,
+            adapter,
+            &target_identity,
+            ax_open_confirmed,
+        );
         Ok(())
     }
 
@@ -1425,6 +1739,142 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         }
     }
 
+    pub fn open_subagent_picker(&self, adapter: &str) -> Result<SubagentOpenResult, String> {
+        let adapter = managed_adapter(adapter)?;
+        if adapter == DictationAdapter::Codex {
+            let _ = self.begin_codex_reasoning_turn();
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = self.capture_window_for_key(&mut *provider, adapter)?;
+        let (target_identity, ax_open_confirmed, mode) =
+            self.open_subagent_picker_in_window(&mut *provider, adapter, window)?;
+        match mode {
+            SubagentOpenResult::PopupOpened => {
+                self.record_active_picker_target(
+                    ActivePickerKind::Subagent,
+                    adapter,
+                    &target_identity,
+                    ax_open_confirmed,
+                );
+            }
+            SubagentOpenResult::OpenedDirectly => {
+                self.clear_active_picker_target();
+            }
+        }
+        Ok(mode)
+    }
+
+    pub fn step_subagent_picker(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        let adapter = managed_adapter(adapter)?;
+        if adapter == DictationAdapter::Codex {
+            let _ = self.begin_codex_reasoning_turn();
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = self.capture_window_for_key(&mut *provider, adapter)?;
+        let mut resolved_identity = window.identity.clone();
+        let mut prior_ax_confirmed =
+            self.active_picker_state(ActivePickerKind::Subagent, adapter, &window.identity);
+        let mut observed = observe_subagent_picker_popup_state(&window, adapter);
+        if observed == ObservedModelPickerPopupState::Unknown && window.identity.scope_id != 0 {
+            if let Ok(full_window) = self.capture_full_window_for_key(&mut *provider, adapter) {
+                let full_observed = observe_subagent_picker_popup_state(&full_window, adapter);
+                let full_prior = self.active_picker_state(
+                    ActivePickerKind::Subagent,
+                    adapter,
+                    &full_window.identity,
+                );
+                if full_observed != ObservedModelPickerPopupState::Unknown || full_prior.is_some() {
+                    resolved_identity = full_window.identity;
+                    observed = full_observed;
+                    prior_ax_confirmed = full_prior;
+                }
+            }
+        }
+        let is_open = match observed {
+            ObservedModelPickerPopupState::Open => true,
+            ObservedModelPickerPopupState::Closed => false,
+            ObservedModelPickerPopupState::Unknown => prior_ax_confirmed.is_some(),
+        };
+        let (target_identity, ax_open_confirmed) = if is_open {
+            (
+                resolved_identity,
+                observed == ObservedModelPickerPopupState::Open
+                    || prior_ax_confirmed.unwrap_or(false),
+            )
+        } else {
+            let (id, confirmed, mode) =
+                self.open_subagent_picker_in_window(&mut *provider, adapter, window)?;
+            if mode == SubagentOpenResult::OpenedDirectly {
+                self.clear_active_picker_target();
+                return Ok(());
+            }
+            (id, confirmed)
+        };
+        provider.send_window_key(&target_identity, key_code, &[])?;
+        self.record_active_picker_target(
+            ActivePickerKind::Subagent,
+            adapter,
+            &target_identity,
+            ax_open_confirmed,
+        );
+        Ok(())
+    }
+
+    pub fn confirm_subagent_picker(
+        &self,
+        adapter: &str,
+    ) -> Result<ModelPickerConfirmResult, String> {
+        let adapter = managed_adapter(adapter)?;
+        if adapter == DictationAdapter::Codex {
+            let _ = self.begin_codex_reasoning_turn();
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = self.capture_window_for_key(&mut *provider, adapter)?;
+        let mut target_identity = window.identity.clone();
+        let mut prior_ax_confirmed =
+            self.active_picker_state(ActivePickerKind::Subagent, adapter, &window.identity);
+        let mut observed = observe_subagent_picker_popup_state(&window, adapter);
+        if observed == ObservedModelPickerPopupState::Unknown && window.identity.scope_id != 0 {
+            if let Ok(full_window) = self.capture_full_window_for_key(&mut *provider, adapter) {
+                let full_observed = observe_subagent_picker_popup_state(&full_window, adapter);
+                let full_prior = self.active_picker_state(
+                    ActivePickerKind::Subagent,
+                    adapter,
+                    &full_window.identity,
+                );
+                if full_observed != ObservedModelPickerPopupState::Unknown || full_prior.is_some() {
+                    target_identity = full_window.identity;
+                    observed = full_observed;
+                    prior_ax_confirmed = full_prior;
+                }
+            }
+        }
+        match observed {
+            ObservedModelPickerPopupState::Closed => {
+                self.clear_active_picker_target();
+                Ok(ModelPickerConfirmResult::PopupAlreadyClosed)
+            }
+            ObservedModelPickerPopupState::Unknown if prior_ax_confirmed.is_none() => {
+                self.clear_active_picker_target();
+                Ok(ModelPickerConfirmResult::PopupAlreadyClosed)
+            }
+            ObservedModelPickerPopupState::Open | ObservedModelPickerPopupState::Unknown => {
+                self.clear_active_picker_target();
+                provider.send_window_key(&target_identity, 0x24, &[])?;
+                Ok(ModelPickerConfirmResult::Confirmed)
+            }
+        }
+    }
+
     pub fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
         let adapter = managed_adapter(adapter)?;
         if adapter == DictationAdapter::Codex {
@@ -1438,8 +1888,15 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         if key_code == 0x35 {
             self.clear_active_picker_target();
         } else if matches!(key_code, 0x7B | 0x7C) {
-            if let Some(ax_open_confirmed) = self.active_picker_state(adapter, &window.identity) {
-                self.record_active_picker_target(adapter, &window.identity, ax_open_confirmed);
+            if let Some(ax_open_confirmed) =
+                self.active_picker_state(ActivePickerKind::Model, adapter, &window.identity)
+            {
+                self.record_active_picker_target(
+                    ActivePickerKind::Model,
+                    adapter,
+                    &window.identity,
+                    ax_open_confirmed,
+                );
             }
         }
         provider.send_window_key(&window.identity, key_code, &[])
