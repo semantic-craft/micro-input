@@ -2636,6 +2636,12 @@ mod macos {
                 data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
                 if data.role == "AXPopUpButton" {
                     data.expanded = bool_attribute(attrs.next().flatten())?;
+                } else if data.role == "AXButton" && data.label.trim() == "Toggle Side Panel" {
+                    if let Ok(vals) = element.attributes(&["AXExpanded"], deadline) {
+                        if let Some(val) = vals.into_iter().next().flatten() {
+                            data.expanded = bool_attribute(Some(val)).ok().flatten();
+                        }
+                    }
                 }
                 data.pressable =
                     button && element.actions()?.iter().any(|action| action == "AXPress");
@@ -4333,6 +4339,23 @@ mod macos {
                         .any(|c| c.label.to_lowercase().contains("stop subagent")),
                     "filtered Antigravity controls must never include Stop subagent"
                 );
+                if let Some(toggle) = ag_win
+                    .controls
+                    .iter()
+                    .find(|c| c.role == "AXButton" && c.label.trim() == "Toggle Side Panel")
+                {
+                    let reread = provider
+                        .read_control(&ag_win.identity, toggle.id)
+                        .expect("read_control on Toggle Side Panel");
+                    assert_eq!(
+                        reread.expanded, toggle.expanded,
+                        "read_control must preserve AXExpanded on Toggle Side Panel"
+                    );
+                    assert!(
+                        reread.expanded.is_some(),
+                        "Toggle Side Panel must expose Some(bool) AXExpanded via read_control"
+                    );
+                }
             }
             if let Ok(dsh_win) = provider.capture_full_window("com.deepseek.dsh") {
                 println!(

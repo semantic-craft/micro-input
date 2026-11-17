@@ -96,7 +96,35 @@ fn live_language_switching_system_locale_and_host_preferences_roundtrip() {
         mi_model::i18n::localize_layer_name("默认层", ResolvedLocale::En),
         "Default Layer"
     );
+    assert_eq!(store.projection().canvas.joystick.mode, "logical_sectors");
+    for sector in &store.projection().canvas.joystick.sectors {
+        assert!(
+            !contains_cjk(&sector.concise_label) && !sector.concise_label.contains('…'),
+            "English Antigravity joystick sector {} must fit without CJK/ellipsis: {}",
+            sector.logical_slot,
+            sector.concise_label
+        );
+    }
+    let codex_row = store
+        .projection()
+        .sidebar
+        .rows
+        .iter()
+        .find(|r| r.display_name == "Codex")
+        .expect("Codex row");
+    let codex_id = codex_row.profile_id.clone();
+    store.select_and_activate_profile(&codex_id).unwrap();
     assert_eq!(store.projection().canvas.joystick.mode, "mouse");
+    let ag_id = store
+        .projection()
+        .sidebar
+        .rows
+        .iter()
+        .find(|r| r.display_name == "Antigravity")
+        .expect("Antigravity row")
+        .profile_id
+        .clone();
+    store.select_and_activate_profile(&ag_id).unwrap();
 
     match &store.projection().inspector.body {
         InspectorBodyProjection::Editable(body) => {

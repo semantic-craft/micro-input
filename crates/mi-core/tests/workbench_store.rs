@@ -1557,7 +1557,7 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCas
             Some(2)
         );
 
-        let mut event = board_test_event("AG00", mi_session::InputEventKind::Pressed);
+        let mut event = board_test_event("AG07", mi_session::InputEventKind::Pressed);
         event.session_id = session_id;
         event.ingress_sequence = ingress_sequence + 1;
         event.board_layer = Some(1);
@@ -1596,10 +1596,10 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCas
         send("ACT00");
     }
     for (step, (slot, managed_token, unmanaged_token, target)) in [
-        (1, "AG00", "AG00", "antigravity"),
+        (1, "AG07", "AG07", "antigravity"),
         (2, "ACT07", "AG07", "codex"),
         (3, "AG13", "AG00", "dsh-desktop"),
-        (1, "AG00", "AG00", "antigravity"),
+        (1, "AG07", "AG07", "antigravity"),
     ]
     .into_iter()
     .enumerate()
@@ -3084,8 +3084,53 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
             .clone()
     };
 
+    // Antigravity starter defaults: top-6 are live session status keys + left/right sidebar joystick.
+    let ag_pid = find_pid(&store, "Antigravity");
+    let ag_lid =
+        store.document_store.draft.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+    store.select_and_activate_profile(&ag_pid).unwrap();
+    {
+        let doc = &store.document_store.draft.document;
+        for slot in 0..6u32 {
+            assert_eq!(
+                resolve_host_action(doc, Some(&ag_pid), &format!("AG{slot:02}"), true),
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "four-app".into(),
+                    command: format!("slot-open:{slot}"),
+                })
+            );
+        }
+        for (binding, cmd) in [
+            ("AG15", "scroll-up"),
+            ("AG16", "open-side-panel"),
+            ("AG17", "scroll-down"),
+            ("AG18", "close-side-panel"),
+        ] {
+            assert_eq!(
+                resolve_host_action(doc, Some(&ag_pid), binding, true),
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "antigravity".into(),
+                    command: cmd.into(),
+                })
+            );
+        }
+        let ag_cs = doc.editable.graph.layers[&ag_lid]
+            .control_settings
+            .as_ref()
+            .unwrap();
+        assert_eq!(ag_cs.joystick_mode, "logical_sectors");
+        assert_eq!(ag_cs.active_sectors, 4);
+    }
+    for (slot, cell) in store.projection().canvas.keycap_cells[..6]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(cell.slot_role, "TaskKey");
+        assert_eq!(cell.is_session_slot, Some(slot));
+    }
+
+    // DSH & Codex starter defaults remain subagent + mouse-click:left + unbound 2..5 + mouse mode.
     for (name, expected_adapter) in [
-        ("Antigravity", "antigravity"),
         ("DeepSeek Coder (DSH)", "dsh-desktop"),
         (mi_model::preset::LOCAL_CODEX_PROFILE_NAME, "codex"),
     ] {
@@ -3125,14 +3170,61 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
         }
     }
 
-    // Simulate legacy Antigravity with slot-open-0 + cockpit-slot-1..5 (and logical_sectors = 4),
-    // verify reopen migrates top-6 to subagent + mouse-click:left + unbound 2..5 and mouse mode.
-    let ag_pid = find_pid(&store, "Antigravity");
-    let ag_lid =
-        store.document_store.draft.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+    // Simulate #160 Antigravity (subagent + mouse-click:left + unbound 2..5 + mouse mode)
+    // AND legacy DSH with slot-open-0 + cockpit-slot-1..5 + logical_sectors,
+    // verify reopen migrates Antigravity to session top-6 + logical_sectors sidebar, and DSH to #160 + mouse.
+    let dsh_pid = find_pid(&store, "DeepSeek Coder (DSH)");
+    let dsh_lid = store.document_store.draft.document.editable.graph.profiles[&dsh_pid].layer_order
+        [0]
+    .clone();
     store
         .document_store
         .update(|draft| {
+            draft.assign(
+                &json!(ag_pid),
+                &json!(ag_lid),
+                0,
+                Action {
+                    id: "agent-subagent".into(),
+                    name: "选择 Subagent".into(),
+                    category: "Agent".into(),
+                    detail: "legacy #160".into(),
+                    payload: json!({"type":"agent_command","adapter":"antigravity","command":"subagent"}),
+                },
+            )?;
+            draft.assign(
+                &json!(ag_pid),
+                &json!(ag_lid),
+                1,
+                Action {
+                    id: "host-mouse-click-left".into(),
+                    name: "鼠标左键点击".into(),
+                    category: "Agent".into(),
+                    detail: "legacy #160".into(),
+                    payload: json!({"type":"agent_command","adapter":"host","command":"mouse-click:left"}),
+                },
+            )?;
+            for slot in 2..6u32 {
+                draft.unassign(&json!(ag_pid), &json!(ag_lid), slot)?;
+            }
+            for slot in 16..20u32 {
+                draft.unassign(&json!(ag_pid), &json!(ag_lid), slot)?;
+            }
+            draft.set_control_settings(
+                &ag_pid,
+                &ag_lid,
+                mi_model::control_settings::ControlSettings {
+                    joystick_mode: "mouse".into(),
+                    active_sectors: 0,
+                    encoder_hold_action_id: None,
+                },
+            )?;
+            draft.assign_encoder_hold(
+                &json!(ag_pid),
+                &json!(ag_lid),
+                mi_model::preset::canonical_encoder_hold_action(),
+            )?;
+
             for slot in 0..6u32 {
                 let id = if slot == 0 {
                     "slot-open-0".to_string()
@@ -3140,8 +3232,8 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
                     format!("cockpit-slot-{slot}")
                 };
                 draft.assign(
-                    &json!(ag_pid),
-                    &json!(ag_lid),
+                    &json!(dsh_pid),
+                    &json!(dsh_lid),
                     slot,
                     Action {
                         id,
@@ -3157,8 +3249,8 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
                 )?;
             }
             draft.set_control_settings(
-                &ag_pid,
-                &ag_lid,
+                &dsh_pid,
+                &dsh_lid,
                 mi_model::control_settings::ControlSettings {
                     joystick_mode: "logical_sectors".into(),
                     active_sectors: 4,
@@ -3166,8 +3258,8 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
                 },
             )?;
             draft.assign_encoder_hold(
-                &json!(ag_pid),
-                &json!(ag_lid),
+                &json!(dsh_pid),
+                &json!(dsh_lid),
                 mi_model::preset::canonical_encoder_hold_action(),
             )?;
             Ok(())
@@ -3182,38 +3274,72 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
 
     let mut migrated = WorkbenchStore::open_isolated(temp.path()).unwrap();
     assert!(migrated.has_all_desktop_agent_presets());
-    let doc = &migrated.document_store.draft.document;
-    assert_eq!(
-        resolve_host_action(doc, Some(&ag_pid), "AG00", true),
-        Some(ResolvedHostAction::AgentCommand {
-            adapter: "antigravity".into(),
-            command: "subagent".into(),
-        })
-    );
-    assert_eq!(
-        resolve_host_action(doc, Some(&ag_pid), "AG01", true),
-        Some(ResolvedHostAction::AgentCommand {
-            adapter: "host".into(),
-            command: "mouse-click:left".into(),
-        })
-    );
-    for slot in 2..6u32 {
+    {
+        let doc = &migrated.document_store.draft.document;
+        for slot in 0..6u32 {
+            assert_eq!(
+                resolve_host_action(doc, Some(&ag_pid), &format!("AG{slot:02}"), true),
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "four-app".into(),
+                    command: format!("slot-open:{slot}"),
+                })
+            );
+        }
         assert_eq!(
-            resolve_host_action(doc, Some(&ag_pid), &format!("AG{slot:02}"), true),
-            None
+            resolve_host_action(doc, Some(&ag_pid), "AG16", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "open-side-panel".into(),
+            })
+        );
+        assert_eq!(
+            resolve_host_action(doc, Some(&ag_pid), "AG18", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "close-side-panel".into(),
+            })
+        );
+        assert_eq!(
+            doc.editable.graph.layers[&ag_lid]
+                .control_settings
+                .as_ref()
+                .unwrap()
+                .joystick_mode,
+            "logical_sectors"
+        );
+
+        assert_eq!(
+            resolve_host_action(doc, Some(&dsh_pid), "AG00", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "dsh-desktop".into(),
+                command: "subagent".into(),
+            })
+        );
+        assert_eq!(
+            resolve_host_action(doc, Some(&dsh_pid), "AG01", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "host".into(),
+                command: "mouse-click:left".into(),
+            })
+        );
+        for slot in 2..6u32 {
+            assert_eq!(
+                resolve_host_action(doc, Some(&dsh_pid), &format!("AG{slot:02}"), true),
+                None
+            );
+        }
+        assert_eq!(
+            doc.editable.graph.layers[&dsh_lid]
+                .control_settings
+                .as_ref()
+                .unwrap()
+                .joystick_mode,
+            "mouse"
         );
     }
-    assert_eq!(
-        doc.editable.graph.layers[&ag_lid]
-            .control_settings
-            .as_ref()
-            .unwrap()
-            .joystick_mode,
-        "mouse"
-    );
 
-    // Explicit BindTopSixAsSessionKeys must survive reopen without being overwritten.
-    migrated.select_and_activate_profile(&ag_pid).unwrap();
+    // Explicit BindTopSixAsSessionKeys on DSH must survive reopen without being overwritten.
+    migrated.select_and_activate_profile(&dsh_pid).unwrap();
     migrated
         .dispatch_session_strip_action(mi_core::SessionStripAction::BindTopSixAsSessionKeys)
         .unwrap();
@@ -3223,7 +3349,7 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
     let doc_after = &reopened.document_store.draft.document;
     for slot in 0..6u32 {
         assert_eq!(
-            resolve_host_action(doc_after, Some(&ag_pid), &format!("AG{slot:02}"), true),
+            resolve_host_action(doc_after, Some(&dsh_pid), &format!("AG{slot:02}"), true),
             Some(ResolvedHostAction::AgentCommand {
                 adapter: "four-app".into(),
                 command: format!("slot-open:{slot}"),
@@ -3231,8 +3357,9 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
         );
     }
 
-    // Inspector TaskKey override must be cleared by RestoreDefaultLayout so top-6 revert to ActionKey.
-    reopened.select_and_activate_profile(&ag_pid).unwrap();
+    // Inspector TaskKey override on DSH must be cleared by RestoreDefaultLayout so DSH top-6 revert to ActionKey,
+    // while RestoreDefaultLayout on Antigravity restores top-6 TaskKey session keys + logical_sectors joystick.
+    reopened.select_and_activate_profile(&dsh_pid).unwrap();
     reopened
         .dispatch_inspector_action(mi_core::InspectorAction::SelectSlot(0))
         .unwrap();
@@ -3256,5 +3383,24 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
     for slot in 2..6usize {
         assert_eq!(restored_cells[slot].slot_role, "ActionKey");
         assert_eq!(restored_cells[slot].keycap_id, "Blank");
+    }
+
+    reopened.select_and_activate_profile(&ag_pid).unwrap();
+    reopened
+        .dispatch_inspector_action(mi_core::InspectorAction::SelectSlot(0))
+        .unwrap();
+    reopened
+        .dispatch_inspector_action(mi_core::InspectorAction::SetSlotRole(
+            mi_core::KeycapRole::ActionKey,
+        ))
+        .unwrap();
+    reopened
+        .dispatch_session_strip_action(mi_core::SessionStripAction::RestoreDefaultLayout)
+        .unwrap();
+    let ag_restored = reopened.projection();
+    assert_eq!(ag_restored.canvas.joystick.mode, "logical_sectors");
+    for (slot, cell) in ag_restored.canvas.keycap_cells[..6].iter().enumerate() {
+        assert_eq!(cell.slot_role, "TaskKey");
+        assert_eq!(cell.is_session_slot, Some(slot));
     }
 }

@@ -123,8 +123,8 @@ async fn verified_input_subscription_merges_wide_key_and_resolves_host_actions()
         .unwrap();
     let resolved: serde_json::Value = serde_json::from_str(&resolved_json).unwrap();
     assert_eq!(resolved["action_type"], "agent_command");
-    assert_eq!(resolved["adapter"], "antigravity");
-    assert_eq!(resolved["command"], "subagent");
+    assert_eq!(resolved["adapter"], "four-app");
+    assert_eq!(resolved["command"], "slot-open:0");
 
     core.emit_synthetic_binding_event("AG10".into(), true)
         .await

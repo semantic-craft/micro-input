@@ -3267,8 +3267,8 @@ impl WorkbenchStore {
                     {
                         self.selected_joystick_direction = match slot {
                             16 => JoystickDirection8::North,
-                            17 => JoystickDirection8::South,
-                            18 => JoystickDirection8::West,
+                            17 => JoystickDirection8::West,
+                            18 => JoystickDirection8::South,
                             _ => JoystickDirection8::East,
                         };
                     }
@@ -3406,8 +3406,8 @@ impl WorkbenchStore {
                         (14, "agent-model-picker-next"),
                         (15, "agent-search"),
                         (16, "agent-model-picker-prev"),
-                        (17, "agent-model-picker-next"),
-                        (18, "agent-model-picker-effort-left"),
+                        (17, "agent-model-picker-effort-left"),
+                        (18, "agent-model-picker-next"),
                         (19, "agent-model-picker-effort-right"),
                     ],
                     KnobJoystickPreset::CycleWorkingAndBlueDot => &[
@@ -3415,8 +3415,8 @@ impl WorkbenchStore {
                         (14, "ag-cycle-attention-next"),
                         (15, "four-app-attention"),
                         (16, "ag-cycle-working-prev"),
-                        (17, "ag-cycle-working-next"),
-                        (18, "ag-cycle-completed-prev"),
+                        (17, "ag-cycle-completed-prev"),
+                        (18, "ag-cycle-working-next"),
                         (19, "ag-cycle-completed-next"),
                     ],
                     KnobJoystickPreset::DualScrollProjectsAndChat => &[
@@ -3424,8 +3424,8 @@ impl WorkbenchStore {
                         (14, "ag-sidebar-scroll-down"),
                         (15, "agent-submit"),
                         (16, "ag-prev-conversation"),
-                        (17, "ag-next-conversation"),
-                        (18, "ag-prev-project"),
+                        (17, "ag-prev-project"),
+                        (18, "ag-next-conversation"),
                         (19, "ag-next-project"),
                     ],
                     KnobJoystickPreset::CodexScrollChatAndBottom => &[
@@ -3443,8 +3443,8 @@ impl WorkbenchStore {
                         (14, "host-mouse-scroll-down"),
                         (15, "host-mouse-speed-cycle"),
                         (16, "host-mouse-move-up"),
-                        (17, "host-mouse-move-down"),
-                        (18, "host-mouse-move-left"),
+                        (17, "host-mouse-move-left"),
+                        (18, "host-mouse-move-down"),
                         (19, "host-mouse-move-right"),
                     ],
                 };
@@ -8100,6 +8100,9 @@ fn resolve_silkscreen_icon(slot: u32, action: Option<&Action>) -> String {
     }
     if a.id.contains("submit") {
         return "⏎".to_string();
+    }
+    if a.id.contains("side-panel") || matches!(cmd, Some("open-side-panel" | "close-side-panel")) {
+        return "◫".to_string();
     }
     if a.id.contains("slot-open") || a.id.contains("cockpit-slot") {
         return "💬".to_string();

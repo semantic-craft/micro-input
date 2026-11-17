@@ -1751,8 +1751,145 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
             replace_top_six_with_subagent_and_left_click(assignments);
         }
     }
+    legacy_specs.extend(
+        specs
+            .iter()
+            .filter(|(name, _)| *name == "Antigravity")
+            .cloned(),
+    );
+    if let Some((_, ag_assignments)) = specs.iter_mut().find(|(name, _)| *name == "Antigravity") {
+        replace_antigravity_top_six_with_session_keys(ag_assignments);
+        ag_assignments.extend(canonical_antigravity_joystick_assignments());
+        ag_assignments.sort_by_key(|(slot, ..)| *slot);
+    }
 
     (specs, legacy_specs)
+}
+
+fn canonical_antigravity_session_top_six_assignments() -> [AgentAssignment; 6] {
+    [
+        (
+            0,
+            "slot-open-0",
+            "会话 1",
+            "Antigravity 会话",
+            "切换并回读对应状态的 Antigravity 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:0".into(),
+            },
+        ),
+        (
+            1,
+            "slot-open-1",
+            "会话 2",
+            "Antigravity 会话",
+            "切换并回读对应状态的 Antigravity 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:1".into(),
+            },
+        ),
+        (
+            2,
+            "slot-open-2",
+            "会话 3",
+            "Antigravity 会话",
+            "切换并回读对应状态的 Antigravity 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:2".into(),
+            },
+        ),
+        (
+            3,
+            "slot-open-3",
+            "会话 4",
+            "Antigravity 会话",
+            "切换并回读对应状态的 Antigravity 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:3".into(),
+            },
+        ),
+        (
+            4,
+            "slot-open-4",
+            "会话 5",
+            "Antigravity 会话",
+            "切换并回读对应状态的 Antigravity 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:4".into(),
+            },
+        ),
+        (
+            5,
+            "slot-open-5",
+            "会话 6",
+            "Antigravity 会话",
+            "切换并回读对应状态的 Antigravity 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:5".into(),
+            },
+        ),
+    ]
+}
+
+fn canonical_antigravity_joystick_assignments() -> [AgentAssignment; 4] {
+    [
+        (
+            16,
+            "desktop-scroll-up",
+            "向上滚动对话",
+            "Agent",
+            "目标应用的原生对话滚动与输入框定位；不抢占非目标窗口焦点",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "scroll-up".into(),
+            },
+        ),
+        (
+            17,
+            "ag-open-side-panel",
+            "打开右边栏",
+            "Agent",
+            "展开 Antigravity 右侧边栏（若已展开则保持不变）",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "open-side-panel".into(),
+            },
+        ),
+        (
+            18,
+            "desktop-scroll-down",
+            "向下滚动对话",
+            "Agent",
+            "目标应用的原生对话滚动与输入框定位；不抢占非目标窗口焦点",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "scroll-down".into(),
+            },
+        ),
+        (
+            19,
+            "ag-close-side-panel",
+            "关闭右边栏",
+            "Agent",
+            "收起 Antigravity 右侧边栏（若已收起则保持不变）",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "close-side-panel".into(),
+            },
+        ),
+    ]
+}
+
+fn replace_antigravity_top_six_with_session_keys(assignments: &mut Vec<AgentAssignment>) {
+    assignments.retain(|(slot, ..)| !(0..=5).contains(slot));
+    assignments.extend(canonical_antigravity_session_top_six_assignments());
+    assignments.sort_by_key(|(slot, ..)| *slot);
 }
 
 fn is_coding_agent_model_picker_starter_profile(profile_name: &str) -> bool {
@@ -1968,10 +2105,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             }
             let already_current = p.layer_order.len() == 1 && {
                 let layer = &work.document.editable.graph.layers[&p.layer_order[0]];
-                layer
-                    .control_settings
-                    .as_ref()
-                    .is_some_and(|cs| cs.joystick_mode == "mouse" && cs.active_sectors == 0)
+                layer_has_expected_starter_joystick(profile_name, layer)
                     && layer_matches_starter_assignments(&work.document, layer, &assignments)
             };
             let can_upgrade = !already_current
@@ -2199,6 +2333,69 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                     }
                 }
                 if let Some(lid) = first_lid {
+                    if profile_name == "Antigravity"
+                        && antigravity_layer_needs_session_top_six_migration(&work.document, &lid)
+                    {
+                        for slot in 0..=5u32 {
+                            work.unassign(&json!(pid), &json!(lid), slot)?;
+                        }
+                        for (slot, id, name, category, detail, kind) in
+                            canonical_antigravity_session_top_six_assignments()
+                        {
+                            let action = crate::draft::Action {
+                                id: id.into(),
+                                name: name.into(),
+                                category: category.into(),
+                                detail: detail.into(),
+                                payload: serde_json::to_value(kind).map_err(|e| e.to_string())?,
+                            };
+                            work.assign(&json!(pid), &json!(lid), slot, action)?;
+                        }
+                    }
+                    if profile_name == "Antigravity"
+                        && antigravity_layer_needs_side_panel_joystick_migration(
+                            &work.document,
+                            &lid,
+                        )
+                    {
+                        for slot in 16..=19u32 {
+                            work.unassign(&json!(pid), &json!(lid), slot)?;
+                        }
+                        let existing_hold = work
+                            .document
+                            .editable
+                            .graph
+                            .layers
+                            .get(&lid)
+                            .and_then(|l| l.control_settings.as_ref())
+                            .and_then(|cs| cs.encoder_hold_action_id.as_ref())
+                            .and_then(|aid| work.document.editable.graph.actions.get(aid))
+                            .cloned();
+                        work.set_control_settings(
+                            &pid,
+                            &lid,
+                            crate::control_settings::ControlSettings {
+                                joystick_mode: "logical_sectors".into(),
+                                active_sectors: 4,
+                                encoder_hold_action_id: None,
+                            },
+                        )?;
+                        if let Some(hold_action) = existing_hold {
+                            work.assign_encoder_hold(&json!(pid), &json!(lid), hold_action)?;
+                        }
+                        for (slot, id, name, category, detail, kind) in
+                            canonical_antigravity_joystick_assignments()
+                        {
+                            let action = crate::draft::Action {
+                                id: id.into(),
+                                name: name.into(),
+                                category: category.into(),
+                                detail: detail.into(),
+                                payload: serde_json::to_value(kind).map_err(|e| e.to_string())?,
+                            };
+                            work.assign(&json!(pid), &json!(lid), slot, action)?;
+                        }
+                    }
                     if coding_agent_layer_needs_cockpit_top_six_migration(
                         &work.document,
                         profile_name,
@@ -2371,12 +2568,17 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             created_ids.push(pid);
             continue;
         }
+        let (joystick_mode, active_sectors) = if profile_name == "Antigravity" {
+            ("logical_sectors", 4)
+        } else {
+            ("mouse", 0)
+        };
         work.set_control_settings(
             &pid,
             &lid,
             crate::control_settings::ControlSettings {
-                joystick_mode: "mouse".into(),
-                active_sectors: 0,
+                joystick_mode: joystick_mode.into(),
+                active_sectors,
                 encoder_hold_action_id: None,
             },
         )?;
@@ -2527,6 +2729,19 @@ pub fn local_codex_profile_needs_starter_slot_migration(
             .any(|(_, assignments)| layer_matches_starter_assignments(doc, layer, assignments))
 }
 
+fn layer_has_expected_starter_joystick(
+    profile_name: &str,
+    layer: &crate::document::LayerNode,
+) -> bool {
+    layer.control_settings.as_ref().is_some_and(|cs| {
+        if profile_name == "Antigravity" {
+            cs.joystick_mode == "logical_sectors" && cs.active_sectors == 4
+        } else {
+            cs.joystick_mode == "mouse" && cs.active_sectors == 0
+        }
+    })
+}
+
 pub fn starter_profile_needs_hardware_mouse_migration(
     doc: &LocalDocumentV2,
     profile_id: &str,
@@ -2534,7 +2749,7 @@ pub fn starter_profile_needs_hardware_mouse_migration(
     let Some(profile) = doc.editable.graph.profiles.get(profile_id) else {
         return false;
     };
-    if profile.name == "Codex" || profile.layer_order.len() != 1 {
+    if profile.name == "Codex" || profile.name == "Antigravity" || profile.layer_order.len() != 1 {
         return false;
     }
     let Some(layer) = doc.editable.graph.layers.get(&profile.layer_order[0]) else {
@@ -2575,11 +2790,14 @@ pub fn starter_profile_needs_legacy_spec_migration(
     if coding_agent_layer_needs_cockpit_top_six_migration(doc, &profile.name, lid) {
         return true;
     }
+    if profile.name == "Antigravity"
+        && (antigravity_layer_needs_session_top_six_migration(doc, lid)
+            || antigravity_layer_needs_side_panel_joystick_migration(doc, lid))
+    {
+        return true;
+    }
     let (specs, legacy_specs) = agent_starter_specs();
-    let already_current = layer
-        .control_settings
-        .as_ref()
-        .is_some_and(|cs| cs.joystick_mode == "mouse" && cs.active_sectors == 0)
+    let already_current = layer_has_expected_starter_joystick(&profile.name, layer)
         && specs
             .iter()
             .filter(|(name, _)| *name == profile.name)
@@ -2682,6 +2900,107 @@ pub fn antigravity_layer_needs_starter_slot_migration(
     legacy_2u_dictation || previous_starter_slots
 }
 
+pub fn antigravity_layer_needs_session_top_six_migration(
+    doc: &LocalDocumentV2,
+    layer_id: &str,
+) -> bool {
+    if doc.is_protected_oai_layer(layer_id) {
+        return false;
+    }
+    let Some(layer) = doc.editable.graph.layers.get(layer_id) else {
+        return false;
+    };
+    if layer.name != "基础层" || layer.lighting.is_some() {
+        return false;
+    }
+    let slot_action = |slot: &str| {
+        layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == slot)
+            .and_then(|b| b.action_id.as_ref())
+            .and_then(|id| doc.editable.graph.actions.get(id))
+    };
+    let is_cmd = |action: Option<&crate::draft::Action>, expected_id: &str, cmd: &str| -> bool {
+        action.is_some_and(|a| {
+            a.id == expected_id && a.payload.get("command").and_then(Value::as_str) == Some(cmd)
+        })
+    };
+    is_cmd(slot_action("logical-0"), "agent-subagent", "subagent")
+        && is_cmd(
+            slot_action("logical-1"),
+            "host-mouse-click-left",
+            "mouse-click:left",
+        )
+        && (2..=5u32).all(|slot| slot_action(&format!("logical-{slot}")).is_none())
+}
+
+pub fn antigravity_layer_needs_side_panel_joystick_migration(
+    doc: &LocalDocumentV2,
+    layer_id: &str,
+) -> bool {
+    if doc.is_protected_oai_layer(layer_id) {
+        return false;
+    }
+    let Some(layer) = doc.editable.graph.layers.get(layer_id) else {
+        return false;
+    };
+    if layer.name != "基础层" || layer.lighting.is_some() {
+        return false;
+    }
+    let Some(cs) = layer.control_settings.as_ref() else {
+        return false;
+    };
+    let slot_action = |slot: &str| {
+        layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == slot)
+            .and_then(|b| b.action_id.as_ref())
+            .and_then(|id| doc.editable.graph.actions.get(id))
+    };
+    if cs.joystick_mode == "mouse" && cs.active_sectors == 0 {
+        return (16..=19u32).all(|slot| slot_action(&format!("logical-{slot}")).is_none());
+    }
+    if cs.joystick_mode == "logical_sectors" && cs.active_sectors == 4 {
+        let is_cmd =
+            |action: Option<&crate::draft::Action>, expected_id: &str, cmd: &str| -> bool {
+                action.is_some_and(|a| {
+                    a.id == expected_id
+                        && a.payload.get("command").and_then(Value::as_str) == Some(cmd)
+                })
+            };
+        let is_legacy_nav =
+            |action: Option<&crate::draft::Action>, expected_id: &str, cmd: &str, key: &str| {
+                action.is_some_and(|a| {
+                    a.id == expected_id
+                        && (a.payload.get("command").and_then(Value::as_str) == Some(cmd)
+                            || (a.payload.get("type").and_then(Value::as_str) == Some("shortcut")
+                                && a.payload.get("key").and_then(Value::as_str) == Some(key)))
+                })
+            };
+        return is_cmd(slot_action("logical-16"), "desktop-scroll-up", "scroll-up")
+            && is_legacy_nav(
+                slot_action("logical-17"),
+                "desktop-nav-back",
+                "nav-back",
+                "[",
+            )
+            && is_cmd(
+                slot_action("logical-18"),
+                "desktop-scroll-down",
+                "scroll-down",
+            )
+            && is_legacy_nav(
+                slot_action("logical-19"),
+                "desktop-nav-forward",
+                "nav-forward",
+                "]",
+            );
+    }
+    false
+}
+
 pub fn coding_agent_layer_needs_encoder_migration(
     doc: &LocalDocumentV2,
     profile_name: &str,
@@ -2743,8 +3062,10 @@ pub fn coding_agent_layer_needs_cockpit_top_six_migration(
     profile_name: &str,
     layer_id: &str,
 ) -> bool {
-    if !is_coding_agent_model_picker_starter_profile(profile_name)
-        || doc.is_protected_oai_layer(layer_id)
+    if !matches!(
+        profile_name.trim(),
+        "DeepSeek Coder (DSH)" | LOCAL_CODEX_PROFILE_NAME
+    ) || doc.is_protected_oai_layer(layer_id)
     {
         return false;
     }
@@ -3106,7 +3427,7 @@ mod agent_migration_tests {
                 if customized {
                     legacy_agent_specs()[0].1.len()
                 } else {
-                    12
+                    20
                 }
             );
             if customized {

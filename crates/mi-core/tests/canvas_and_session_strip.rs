@@ -647,6 +647,17 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
         Some(FourAppAgentPhase::AwaitingInput)
     );
 
+    // Antigravity starter defaults already bind top-6 as SessionKeys.
+    assert!(
+        store
+            .projection()
+            .session_strip
+            .top_six_bound_as_session_keys
+    );
+    let dsh_pid = store
+        .find_canonical_profile_id(mi_core::CanonicalAgent::DeepseekHarness)
+        .unwrap();
+    store.select_and_activate_profile(&dsh_pid).unwrap();
     assert!(
         !store
             .projection()
@@ -865,8 +876,8 @@ fn codex_dial_preset_switching_and_slot_preservation() {
         assert_eq!(mouse_proj.canvas.joystick.sectors.len(), 8);
         for (slot, expected_label) in [
             (16, "指针上移"),
-            (17, "指针下移"),
-            (18, "指针左移"),
+            (17, "指针左移"),
+            (18, "指针下移"),
             (19, "指针右移"),
         ] {
             assert!(mouse_proj

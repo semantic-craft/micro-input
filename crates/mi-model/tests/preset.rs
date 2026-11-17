@@ -1364,3 +1364,278 @@ fn coding_agent_v090_encoder_defaults_upgrade_to_v0100_and_preserve_custom_slots
         })
     );
 }
+
+#[test]
+fn antigravity_v160_migrates_back_to_session_top_six_and_side_panel_joystick_while_preserving_custom(
+) {
+    let mut d = Draft::default();
+    let ids = preset::install_agent_starter_profiles(&mut d).unwrap();
+    let ag_pid = ids
+        .iter()
+        .find(|pid| d.document.editable.graph.profiles[*pid].name == "Antigravity")
+        .unwrap()
+        .clone();
+    let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+
+    // Starter defaults use top-6 session keys + 4-sector left/right side panel joystick.
+    for slot in 0..6u32 {
+        assert_eq!(
+            mi_model::host_router::resolve_host_action(
+                &d.document,
+                Some(&ag_pid),
+                &format!("AG{slot:02}"),
+                true
+            ),
+            Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
+    }
+    for (binding, cmd) in [
+        ("AG15", "scroll-up"),
+        ("AG16", "open-side-panel"),
+        ("AG17", "scroll-down"),
+        ("AG18", "close-side-panel"),
+    ] {
+        assert_eq!(
+            mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), binding, true),
+            Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: cmd.into(),
+            })
+        );
+    }
+    let cs = d.document.editable.graph.layers[&ag_lid]
+        .control_settings
+        .as_ref()
+        .unwrap();
+    assert_eq!(cs.joystick_mode, "logical_sectors");
+    assert_eq!(cs.active_sectors, 4);
+
+    // 1. Simulate unmodified PR #160 Antigravity layer (subagent + mouse-click:left + unbound 2..5 + mouse).
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        0,
+        mi_model::draft::Action {
+            id: "agent-subagent".into(),
+            name: "选择 Subagent".into(),
+            category: "Agent".into(),
+            detail: "legacy #160".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"subagent"}),
+        },
+    )
+    .unwrap();
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        1,
+        mi_model::draft::Action {
+            id: "host-mouse-click-left".into(),
+            name: "鼠标左键点击".into(),
+            category: "Agent".into(),
+            detail: "legacy #160".into(),
+            payload: json!({"type":"agent_command","adapter":"host","command":"mouse-click:left"}),
+        },
+    )
+    .unwrap();
+    for slot in 2..6u32 {
+        d.unassign(&json!(ag_pid), &json!(ag_lid), slot).unwrap();
+    }
+    for slot in 16..20u32 {
+        d.unassign(&json!(ag_pid), &json!(ag_lid), slot).unwrap();
+    }
+    d.set_control_settings(
+        &ag_pid,
+        &ag_lid,
+        mi_model::control_settings::ControlSettings {
+            joystick_mode: "mouse".into(),
+            active_sectors: 0,
+            encoder_hold_action_id: Some(
+                d.document.editable.graph.layers[&ag_lid]
+                    .control_settings
+                    .as_ref()
+                    .and_then(|c| c.encoder_hold_action_id.clone())
+                    .unwrap(),
+            ),
+        },
+    )
+    .unwrap();
+
+    preset::install_agent_starter_profiles(&mut d).unwrap();
+    // Re-running starter installer migrates #160 Antigravity back to session top-6 + side-panel joystick.
+    for slot in 0..6u32 {
+        assert_eq!(
+            mi_model::host_router::resolve_host_action(
+                &d.document,
+                Some(&ag_pid),
+                &format!("AG{slot:02}"),
+                true
+            ),
+            Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
+    }
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG16", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "open-side-panel".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG18", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "close-side-panel".into(),
+        })
+    );
+
+    // 2. User-customized Antigravity top-6 and custom joystick binding must NOT be overwritten.
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        0,
+        mi_model::draft::Action {
+            id: "user-custom-ag00".into(),
+            name: "我的槽位0".into(),
+            category: "Agent".into(),
+            detail: "保留".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"submit"}),
+        },
+    )
+    .unwrap();
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        17,
+        mi_model::draft::Action {
+            id: "user-custom-ag16".into(),
+            name: "我的左推".into(),
+            category: "Agent".into(),
+            detail: "保留".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"scroll-up"}),
+        },
+    )
+    .unwrap();
+
+    preset::install_agent_starter_profiles(&mut d).unwrap();
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG00", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "submit".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG16", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "scroll-up".into(),
+        })
+    );
+
+    // 3. Legacy Antigravity logical_sectors with Shortcut Cmd+[/] on nav-back/forward migrates joystick while keeping bottom-row edits.
+    let mut legacy_nav = Draft::default();
+    preset::install_agent_starter_profiles(&mut legacy_nav).unwrap();
+    let legacy_ag_pid = legacy_nav
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, p)| p.name == "Antigravity")
+        .unwrap()
+        .0
+        .clone();
+    let legacy_ag_lid =
+        legacy_nav.document.editable.graph.profiles[&legacy_ag_pid].layer_order[0].clone();
+    legacy_nav
+        .assign(
+            &json!(legacy_ag_pid),
+            &json!(legacy_ag_lid),
+            12,
+            mi_model::draft::Action {
+                id: "user-custom-ag12".into(),
+                name: "我的提交".into(),
+                category: "Agent".into(),
+                detail: "保留".into(),
+                payload: json!({"type":"agent_command","adapter":"antigravity","command":"continue"}),
+            },
+        )
+        .unwrap();
+    legacy_nav
+        .assign(
+            &json!(legacy_ag_pid),
+            &json!(legacy_ag_lid),
+            17,
+            mi_model::draft::Action {
+                id: "desktop-nav-back".into(),
+                name: "历史后退".into(),
+                category: "快捷键".into(),
+                detail: "com.google.antigravity".into(),
+                payload: json!({"type":"shortcut","key":"[","modifiers":["command"],"target":"com.google.antigravity"}),
+            },
+        )
+        .unwrap();
+    legacy_nav
+        .assign(
+            &json!(legacy_ag_pid),
+            &json!(legacy_ag_lid),
+            19,
+            mi_model::draft::Action {
+                id: "desktop-nav-forward".into(),
+                name: "历史前进".into(),
+                category: "快捷键".into(),
+                detail: "com.google.antigravity".into(),
+                payload: json!({"type":"shortcut","key":"]","modifiers":["command"],"target":"com.google.antigravity"}),
+            },
+        )
+        .unwrap();
+    assert!(
+        preset::antigravity_layer_needs_side_panel_joystick_migration(
+            &legacy_nav.document,
+            &legacy_ag_lid
+        )
+    );
+    preset::install_agent_starter_profiles(&mut legacy_nav).unwrap();
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(
+            &legacy_nav.document,
+            Some(&legacy_ag_pid),
+            "AG16",
+            true
+        ),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "open-side-panel".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(
+            &legacy_nav.document,
+            Some(&legacy_ag_pid),
+            "AG18",
+            true
+        ),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "close-side-panel".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(
+            &legacy_nav.document,
+            Some(&legacy_ag_pid),
+            "AG12",
+            true
+        ),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "continue".into(),
+        })
+    );
+}

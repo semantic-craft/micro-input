@@ -524,3 +524,95 @@ fn applied_six_layer_plan_tracks_and_gates_v070_joystick_hardware_modes() {
             .is_ok()
     );
 }
+
+#[test]
+fn starter_plan_compiles_antigravity_layer_as_radial_and_codex_dsh_as_mouse_on_v070() {
+    use mi_model::apply::{
+        compile_six_layer_profile_for_firmware, compile_six_layer_profile_for_firmware_layers,
+        planned_keymap_matches_plan_joystick_modes,
+    };
+
+    let mut draft = mi_model::draft::Draft::default();
+    mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
+    let id = |name: &str| {
+        draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == name)
+            .unwrap()
+            .0
+            .clone()
+    };
+    let desired =
+        BoardLayerPlan::recommended(id("Codex"), id("Antigravity"), id("DeepSeek Coder (DSH)"));
+    let plan =
+        AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
+            .unwrap();
+    assert_eq!(
+        plan.board_layer_joystick_modes(),
+        [
+            Some("MOUSE"),
+            None,
+            Some("MOUSE"),
+            Some("MOUSE"),
+            Some("MOUSE"),
+            Some("MOUSE"),
+        ]
+    );
+
+    let compiled = compile_six_layer_profile_for_firmware_layers(
+        ORIGINAL,
+        None,
+        Some("0.7.0-rc.16"),
+        plan.board_layer_joystick_modes(),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_slice(&compiled.keymap).unwrap();
+    let layers = parsed["profiles"][compiled.profile_index as usize]["layers"]
+        .as_array()
+        .unwrap();
+    assert_eq!(layers[0]["layout"]["joystick"], json!({"type": "MOUSE"}));
+    assert_eq!(layers[1]["layout"]["joystick"]["type"], json!("RADIAL"));
+    let sectors: Vec<&str> = layers[1]["layout"]["joystick"]["sectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["k"].as_str().unwrap())
+        .collect();
+    assert_eq!(sectors, vec!["KC_F17", "KC_F18", "KC_F19", "KC_F20"]);
+    assert_eq!(layers[2]["layout"]["joystick"], json!({"type": "MOUSE"}));
+    assert!(planned_keymap_matches_plan_joystick_modes(
+        &compiled.keymap,
+        compiled.profile_index,
+        &plan,
+        Some("0.7.0-rc.16"),
+    ));
+
+    // Upgrading an existing all-MOUSE #159/#160 profile must detect mismatch and rewrite Layer 2 to RADIAL.
+    let all_mouse =
+        compile_six_layer_profile_for_firmware(ORIGINAL, None, Some("0.7.0-rc.16"), Some("mouse"))
+            .unwrap();
+    assert!(!planned_keymap_matches_plan_joystick_modes(
+        &all_mouse.keymap,
+        all_mouse.profile_index,
+        &plan,
+        Some("0.7.0-rc.16"),
+    ));
+    let upgraded = compile_six_layer_profile_for_firmware_layers(
+        &all_mouse.keymap,
+        None,
+        Some("0.7.0-rc.16"),
+        plan.board_layer_joystick_modes(),
+    )
+    .unwrap();
+    assert_eq!(upgraded.profile_index, all_mouse.profile_index);
+    assert!(planned_keymap_matches_plan_joystick_modes(
+        &upgraded.keymap,
+        upgraded.profile_index,
+        &plan,
+        Some("0.7.0-rc.16"),
+    ));
+}

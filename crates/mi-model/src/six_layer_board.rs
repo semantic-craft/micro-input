@@ -93,6 +93,25 @@ fn codex_profile_hardware_joystick_mode(
 }
 
 impl AppliedSixLayerPlan {
+    pub fn board_layer_joystick_modes(&self) -> [Option<&str>; 6] {
+        let codex = self
+            .codex_joystick_mode
+            .as_deref()
+            .filter(|m| matches!(*m, "MOUSE" | "SCROLL"));
+        let ag = self
+            .hosts
+            .first()
+            .and_then(|h| h.joystick_mode.as_deref())
+            .filter(|m| matches!(*m, "MOUSE" | "SCROLL"));
+        let dsh = self
+            .hosts
+            .get(1)
+            .and_then(|h| h.joystick_mode.as_deref())
+            .filter(|m| matches!(*m, "MOUSE" | "SCROLL"));
+        let unassigned = codex.or(ag).or(dsh);
+        [codex, ag, dsh, unassigned, unassigned, unassigned]
+    }
+
     pub fn uses_v070_joystick_hardware_mode(&self) -> bool {
         self.codex_joystick_mode
             .as_deref()
@@ -766,7 +785,81 @@ pub fn compile_six_layer_profile_for_firmware(
     firmware: Option<&str>,
     joystick_mode: Option<&str>,
 ) -> Result<CompiledSixLayerProfile, String> {
-    let requested_hw_mode = normalize_requested_six_layer_joystick_mode(joystick_mode, firmware)?;
+    compile_six_layer_profile_for_firmware_inner(
+        keymap,
+        smart,
+        firmware,
+        joystick_mode.map(|mode| [Some(mode); 6]),
+    )
+}
+
+pub fn compile_six_layer_profile_for_firmware_layers(
+    keymap: &[u8],
+    smart: Option<&[u8]>,
+    firmware: Option<&str>,
+    layer_joystick_modes: [Option<&str>; 6],
+) -> Result<CompiledSixLayerProfile, String> {
+    compile_six_layer_profile_for_firmware_inner(
+        keymap,
+        smart,
+        firmware,
+        Some(layer_joystick_modes),
+    )
+}
+
+pub fn planned_keymap_matches_plan_joystick_modes(
+    keymap: &[u8],
+    profile_index: u32,
+    plan: &AppliedSixLayerPlan,
+    firmware: Option<&str>,
+) -> bool {
+    if firmware.is_some_and(|fw| !crate::supports_v070_mouse_tokens(fw)) {
+        return true;
+    }
+    let Ok(config) = parse_device_files(keymap, None) else {
+        return false;
+    };
+    let Some(layers) = config
+        .raw
+        .get("profiles")
+        .and_then(Value::as_array)
+        .and_then(|profiles| profiles.get(profile_index as usize))
+        .and_then(|profile| profile.get("layers"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    if layers.len() != 6 {
+        return false;
+    }
+    let desired = plan.board_layer_joystick_modes();
+    (0..3).all(|idx| {
+        let expected_type = match desired[idx] {
+            Some(mode) => mode,
+            None if idx == 0 => "VENDOR",
+            None => "RADIAL",
+        };
+        layers[idx]["layout"]["joystick"]["type"].as_str() == Some(expected_type)
+    })
+}
+
+fn compile_six_layer_profile_for_firmware_inner(
+    keymap: &[u8],
+    smart: Option<&[u8]>,
+    firmware: Option<&str>,
+    layer_joystick_modes: Option<[Option<&str>; 6]>,
+) -> Result<CompiledSixLayerProfile, String> {
+    let requested_modes: Option<[Option<&'static str>; 6]> = match layer_joystick_modes {
+        Some(modes) => Some([
+            normalize_requested_six_layer_joystick_mode(modes[0], firmware)?,
+            normalize_requested_six_layer_joystick_mode(modes[1], firmware)?,
+            normalize_requested_six_layer_joystick_mode(modes[2], firmware)?,
+            normalize_requested_six_layer_joystick_mode(modes[3], firmware)?,
+            normalize_requested_six_layer_joystick_mode(modes[4], firmware)?,
+            normalize_requested_six_layer_joystick_mode(modes[5], firmware)?,
+        ]),
+        None => None,
+    };
     let allow_v070_joystick = firmware.is_none_or(crate::supports_v070_mouse_tokens);
     let mut config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
     config.firmware = firmware.map(str::to_owned);
@@ -811,14 +904,13 @@ pub fn compile_six_layer_profile_for_firmware(
             {
                 return Err("原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into());
             }
-            let needs_managed_update = match joystick_mode {
-                Some(_) => {
-                    !(1..6).all(|i| {
-                        layers[i] == managed_layer_with_joystick_mode(i, requested_hw_mode)
-                    }) || (requested_hw_mode.is_some()
-                        && layers[0]["layout"]["joystick"]
-                            != json!({"type": requested_hw_mode.unwrap()}))
-                        || (requested_hw_mode.is_none()
+            let needs_managed_update = match requested_modes {
+                Some(modes) => {
+                    !(1..6).all(|i| layers[i] == managed_layer_with_joystick_mode(i, modes[i]))
+                        || (modes[0].is_some()
+                            && layers[0]["layout"]["joystick"]
+                                != json!({"type": modes[0].unwrap()}))
+                        || (modes[0].is_none()
                             && layers[0]["layout"]["joystick"]["type"] != "VENDOR")
                 }
                 None => !(1..6)
@@ -833,10 +925,10 @@ pub fn compile_six_layer_profile_for_firmware(
                 let layers_raw = field(&profile_fields, "layers")?;
                 let raw_layers = array(layers_raw)?;
                 let codex_raw = raw_layers.first().copied().ok_or("第 1 层原字节缺失")?;
-                let codex_layer_str = if joystick_mode.is_some() {
+                let codex_layer_str = if let Some(modes) = requested_modes {
                     splice_raw_layer_joystick(
                         codex_raw,
-                        &requested_hw_mode.map_or_else(
+                        &modes[0].map_or_else(
                             || json!({"type": "VENDOR", "sectors": []}),
                             |m| json!({"type": m}),
                         ),
@@ -846,8 +938,8 @@ pub fn compile_six_layer_profile_for_firmware(
                 };
                 let mut upgraded_layers = vec![codex_layer_str];
                 for i in 1..6 {
-                    let preserved_mode = if joystick_mode.is_some() {
-                        requested_hw_mode
+                    let preserved_mode = if let Some(modes) = requested_modes {
+                        modes[i]
                     } else {
                         layers[i]["layout"]["joystick"]["type"]
                             .as_str()
@@ -888,17 +980,22 @@ pub fn compile_six_layer_profile_for_firmware(
             if profiles.iter().any(|profile| profile["id"] == index) {
                 return Err("新增 Profile ID 与原方案重复".into());
             }
-            let codex_layer_str = if let Some(mode) = requested_hw_mode {
-                splice_raw_layer_joystick(native[0], &json!({"type": mode}))?
-            } else if joystick_mode.is_some() {
-                splice_raw_layer_joystick(native[0], &json!({"type": "VENDOR", "sectors": []}))?
+            let codex_layer_str = if let Some(modes) = requested_modes {
+                splice_raw_layer_joystick(
+                    native[0],
+                    &modes[0].map_or_else(
+                        || json!({"type": "VENDOR", "sectors": []}),
+                        |m| json!({"type": m}),
+                    ),
+                )?
             } else {
                 native[0].get().to_owned()
             };
             let mut layers = vec![codex_layer_str];
-            layers.extend(
-                (1..6).map(|i| managed_layer_with_joystick_mode(i, requested_hw_mode).to_string()),
-            );
+            layers.extend((1..6).map(|i| {
+                let mode = requested_modes.and_then(|modes| modes[i]);
+                managed_layer_with_joystick_mode(i, mode).to_string()
+            }));
             let profile = format!(
                 "{{\"id\":{index},\"name\":\"{SIX_LAYER_PROFILE_NAME}\",\"layers\":[{}]}}",
                 layers.join(",")

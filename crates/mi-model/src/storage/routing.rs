@@ -166,6 +166,8 @@ impl DocumentStore {
                         "project" => "选项目 / 新建项目",
                         "split-right" => "快速向右分栏",
                         "side-question" => "打开 Side Question",
+                        "open-side-panel" => "打开右边栏",
+                        "close-side-panel" => "关闭右边栏",
                         "prev-conversation" => "上一会话（侧栏轮转）",
                         "next-conversation" => "下一会话（侧栏轮转）",
                         "voice-reply" | "toggle-voice-reply" => "切换语音回复",
@@ -468,12 +470,10 @@ mod tests {
                 assert_eq!(by_id("AG17")["label"], "不可用 / 未配置");
                 assert_eq!(by_id("AG18")["label"], "不可用 / 未配置");
             } else if profile_name == "Antigravity" {
-                assert_eq!(by_id("AG00")["label"], "选择 Subagent");
-                assert_eq!(by_id("AG01")["label"], "左键点击");
-                for slot in 2..6 {
+                for slot in 0..6 {
                     let binding = format!("AG{slot:02}");
-                    assert_eq!(by_id(&binding)["available"], false);
-                    assert_eq!(by_id(&binding)["label"], "不可用 / 未配置");
+                    assert_eq!(by_id(&binding)["available"], true);
+                    assert_eq!(by_id(&binding)["label"], format!("会话 {}", slot + 1));
                 }
                 assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
                 assert_eq!(by_id("AG07")["label"], "聚焦输入框");
@@ -486,10 +486,10 @@ mod tests {
                 assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
                 assert_eq!(by_id("ENC_CLK")["label"], "搜索会话");
                 assert_eq!(state["encoder_hold_label"], "搜索会话");
-                assert_eq!(by_id("AG15")["label"], "不可用 / 未配置");
-                assert_eq!(by_id("AG16")["label"], "不可用 / 未配置");
-                assert_eq!(by_id("AG17")["label"], "不可用 / 未配置");
-                assert_eq!(by_id("AG18")["label"], "不可用 / 未配置");
+                assert_eq!(by_id("AG15")["label"], "向上滚动对话");
+                assert_eq!(by_id("AG16")["label"], "打开右边栏");
+                assert_eq!(by_id("AG17")["label"], "向下滚动对话");
+                assert_eq!(by_id("AG18")["label"], "关闭右边栏");
             } else {
                 assert_eq!(by_id("AG00")["label"], "选择 Subagent");
                 assert_eq!(by_id("AG01")["label"], "左键点击");

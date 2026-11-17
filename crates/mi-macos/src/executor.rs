@@ -915,6 +915,12 @@ pub trait HostOsDriver: Send + Sync {
     fn open_side_question(&self, _adapter: &str) -> Result<(), String> {
         Err("blocked:unsupported_agent_command".into())
     }
+    fn open_side_panel(&self, _adapter: &str) -> Result<(), String> {
+        Err("blocked:unsupported_side_panel_adapter".into())
+    }
+    fn close_side_panel(&self, _adapter: &str) -> Result<(), String> {
+        Err("blocked:unsupported_side_panel_adapter".into())
+    }
     fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
         Err(format!(
             "blocked:model_picker_key_unavailable:{adapter}:{key_code:x}"
@@ -2658,6 +2664,26 @@ impl HostOsDriver for MacOsSystemDriver {
         self.managed_controls.open_side_question(adapter)
     }
 
+    fn open_side_panel(&self, adapter: &str) -> Result<(), String> {
+        if adapter != "antigravity" {
+            return Err("blocked:unsupported_side_panel_adapter".into());
+        }
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        self.managed_controls.set_side_panel_open(adapter, true)
+    }
+
+    fn close_side_panel(&self, adapter: &str) -> Result<(), String> {
+        if adapter != "antigravity" {
+            return Err("blocked:unsupported_side_panel_adapter".into());
+        }
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        self.managed_controls.set_side_panel_open(adapter, false)
+    }
+
     fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
         if !self.is_accessibility_trusted() {
             return Err("accessibility_untrusted".to_string());
@@ -2821,6 +2847,8 @@ pub enum RecordedOsEvent {
     OpenModelPicker(String),
     OpenSubagentPicker(String),
     OpenSideQuestion(String),
+    OpenSidePanel(String),
+    CloseSidePanel(String),
     SendModelPickerKey {
         adapter: String,
         key_code: u16,
@@ -3153,6 +3181,24 @@ impl HostOsDriver for RecordingOsDriver {
         }
         st.events
             .push(RecordedOsEvent::OpenSideQuestion(adapter.to_string()));
+        Ok(())
+    }
+    fn open_side_panel(&self, adapter: &str) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events
+            .push(RecordedOsEvent::OpenSidePanel(adapter.to_string()));
+        Ok(())
+    }
+    fn close_side_panel(&self, adapter: &str) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events
+            .push(RecordedOsEvent::CloseSidePanel(adapter.to_string()));
         Ok(())
     }
     fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
@@ -4066,6 +4112,22 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
                     match self.driver.open_side_question(adapter) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    }
+                } else if command == "open-side-panel" && effective_adapter == "antigravity" {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    match self.driver.open_side_panel(effective_adapter) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    }
+                } else if command == "close-side-panel" && effective_adapter == "antigravity" {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    match self.driver.close_side_panel(effective_adapter) {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }

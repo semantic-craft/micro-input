@@ -182,8 +182,8 @@ impl JoystickDirection8 {
     pub const fn logical_sector_slot(self) -> u32 {
         match self {
             Self::North | Self::NorthEast => 16,
-            Self::South | Self::SouthWest => 17,
-            Self::West | Self::NorthWest => 18,
+            Self::West | Self::NorthWest => 17,
+            Self::South | Self::SouthWest => 18,
             Self::East | Self::SouthEast => 19,
         }
     }
@@ -563,6 +563,8 @@ pub(crate) fn concise_dial_caption_alias(label: &str) -> Option<&'static str> {
         "搜索会话" => Some("搜索会话"),
         "选择 Subagent" => Some("Subagent"),
         "打开 Side Question" => Some("Side Q"),
+        "打开右边栏" => Some("开右边栏"),
+        "关闭右边栏" => Some("关右边栏"),
         _ => None,
     }
 }
