@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(any(test, feature = "test-util"))]
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -281,11 +282,33 @@ pub trait PassivePanelHost: Send + Sync {
     fn events(&self) -> Vec<PassivePanelEvent>;
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopPassivePanelHost;
+
+impl NoopPassivePanelHost {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PassivePanelHost for NoopPassivePanelHost {
+    fn present_panel(&self, _spec: PassivePanelFrameSpec) {}
+    fn hide_panel(&self, _role: PassivePanelRole) {}
+    fn visible_panel(&self, _role: PassivePanelRole) -> Option<PassivePanelFrameSpec> {
+        None
+    }
+    fn events(&self) -> Vec<PassivePanelEvent> {
+        Vec::new()
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
 #[derive(Debug, Default, Clone)]
 pub struct RecordingPassivePanelHost {
     state: Arc<Mutex<RecordingPassivePanelState>>,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 #[derive(Debug, Default, Clone)]
 pub struct RecordingPassivePanelState {
     pub active_radial: Option<PassivePanelFrameSpec>,
@@ -293,12 +316,14 @@ pub struct RecordingPassivePanelState {
     pub history: Vec<PassivePanelEvent>,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl RecordingPassivePanelHost {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl PassivePanelHost for RecordingPassivePanelHost {
     fn present_panel(&self, spec: PassivePanelFrameSpec) {
         if let Ok(mut guard) = self.state.lock() {

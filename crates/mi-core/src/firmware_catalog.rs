@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
 };
 
@@ -42,13 +42,7 @@ pub struct FirmwareRelease {
     pub asset: FirmwareAsset,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DownloadedFirmware {
-    pub path: PathBuf,
-    pub sha256: String,
-    pub digest_verified: bool,
-    pub size: u64,
-}
+pub use mi_session::firmware_flash::DownloadedFirmware;
 
 #[derive(Deserialize)]
 struct ReleaseResponse {

@@ -8,16 +8,19 @@ description.workspace = true
 [features]
 synthetic-backend = ["mi-transport/synthetic-backend"]
 [dependencies]
+espflash = { version = "=4.7.0", default-features = false, features = ["serialport"] }
+serialport = { version = "=4.10.1", default-features = false }
 mi-model = { path = "../mi-model" }
 mi-proto = { path = "../mi-proto" }
 mi-transport = { path = "../mi-transport" }
+serde.workspace = true
 serde_json.workspace = true
+sha2 = "=0.10.9"
 tokio.workspace = true
 thiserror.workspace = true
 base64 = "0.22.1"
 sha1 = "0.10.6"
 
 [dev-dependencies]
-sha2 = "0.10"
 async-trait = "0.1"
 tempfile = "3"

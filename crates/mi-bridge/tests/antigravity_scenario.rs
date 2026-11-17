@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
+#[cfg(feature = "qa-runner")]
 #[test]
 fn antigravity_status_scenario_satisfies_all_offline_gate_checks_and_audit_counts() {
     let dir = tempfile::Builder::new()

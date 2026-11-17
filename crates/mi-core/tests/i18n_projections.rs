@@ -1114,7 +1114,9 @@ fn canonical_duplicate_and_macro_multi_modals_comparison_apply_and_v070_errors_l
             language: UiLanguagePreference::En,
         }))
         .unwrap();
-    let _ = comp_store.current_or_synthetic_device_snapshot();
+    comp_store
+        .dispatch_command(WorkbenchCommand::Device(DeviceWorkflowAction::ReadSnapshot))
+        .unwrap();
     comp_store
         .dispatch_command(WorkbenchCommand::Device(
             DeviceWorkflowAction::OpenApplyPreparation,

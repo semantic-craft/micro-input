@@ -7,7 +7,9 @@ use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+#[cfg(feature = "qa-runner")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn valid_antigravity_id(value: &str, limit: usize) -> bool {
     !value.is_empty() && value.len() <= limit
@@ -4795,6 +4797,7 @@ pub struct AntigravityStatusScenarioReport {
     pub receipts: Vec<AntigravityAuditReceipt>,
 }
 
+#[cfg(feature = "qa-runner")]
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4802,6 +4805,7 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(feature = "qa-runner")]
 pub fn run_antigravity_status_scenario(
     audit_log_path: Option<&Path>,
 ) -> Result<AntigravityStatusScenarioReport, String> {

@@ -80,7 +80,7 @@ fn sync_six_layer_backup_after_joystick_write(
                 if let Some(obj) = manifest.as_object_mut() {
                     obj.insert(
                         "planned_keymap_sha256".into(),
-                        serde_json::Value::String(mi_bridge::lighting_arbiter::sha256_hex(
+                        serde_json::Value::String(crate::lighting_arbiter::sha256_hex(
                             post_write_keymap,
                         )),
                     );
@@ -2434,8 +2434,8 @@ mod tests {
                 "previous_profile_index": 0,
                 "previous_layer_index": 1,
                 "planned_profile_index": 1,
-                "keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(SIX_SOURCE),
-                "planned_keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(&initial_planned_bytes),
+                "keymap_sha256": crate::lighting_arbiter::sha256_hex(SIX_SOURCE),
+                "planned_keymap_sha256": crate::lighting_arbiter::sha256_hex(&initial_planned_bytes),
             }))
             .unwrap(),
         )

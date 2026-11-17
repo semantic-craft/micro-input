@@ -1,3 +1,5 @@
+#![cfg(feature = "qa-runner")]
+
 use mi_core::qa_runner::{run_synthetic_scenario, QaLaunchEnv, SyntheticScenario9};
 use mi_macos::DocumentInstanceLock;
 use serde_json::Value;

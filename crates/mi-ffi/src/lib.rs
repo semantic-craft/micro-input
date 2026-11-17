@@ -1,7 +1,6 @@
-use mi_core::{
-    qa_runner::{run_synthetic_scenario, QaLaunchEnv},
-    WorkbenchCommand, WorkbenchStore, WorkbenchStoreConfig,
-};
+#[cfg(feature = "qa-runner")]
+use mi_core::qa_runner::{run_synthetic_scenario, QaLaunchEnv};
+use mi_core::{WorkbenchCommand, WorkbenchStore, WorkbenchStoreConfig};
 use mi_macos::DocumentInstanceLock;
 use std::{
     ffi::{c_char, CStr, CString},
@@ -43,39 +42,68 @@ fn string_to_c_char(s: String) -> *mut c_char {
     }
 }
 
+fn resolve_default_document_dir() -> PathBuf {
+    if let Ok(raw) = std::env::var("MI_DOCUMENT_DIR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    WorkbenchStoreConfig::production().document_dir
+}
+
+#[cfg(not(feature = "qa-runner"))]
+fn dispatch_qa_from_scenario_env(scenario_raw: Option<&str>) -> i32 {
+    if let Some(raw) = scenario_raw.map(str::trim).filter(|s| !s.is_empty()) {
+        ffi_safe_log(
+            "MI_SYNTHETIC_SCENARIO is unavailable in production builds: ",
+            raw,
+        );
+        return 1;
+    }
+    -1
+}
+
 #[no_mangle]
 pub extern "C" fn mi_core_run_qa_from_env() -> i32 {
     ffi_guard(-1, "mi_core_run_qa_from_env", || {
-        let launch_env = match QaLaunchEnv::from_env() {
-            Ok(env) => env,
-            Err(err) => {
-                eprintln!("Micro Input launch env error: {err}");
-                return 1;
+        #[cfg(feature = "qa-runner")]
+        {
+            let launch_env = match QaLaunchEnv::from_env() {
+                Ok(env) => env,
+                Err(err) => {
+                    eprintln!("Micro Input launch env error: {err}");
+                    return 1;
+                }
+            };
+            let Some(scenario) = launch_env.scenario else {
+                return -1;
+            };
+            let _instance_lock = match DocumentInstanceLock::acquire(&launch_env.document_dir) {
+                Ok(Some(lock)) => lock,
+                Ok(None) => {
+                    eprintln!(
+                        "Micro Input already running for {}",
+                        launch_env.document_dir.display()
+                    );
+                    return 1;
+                }
+                Err(err) => {
+                    eprintln!("Micro Input instance lock failed: {err}");
+                    return 1;
+                }
+            };
+            match run_synthetic_scenario(&launch_env, scenario) {
+                Ok(()) => 0,
+                Err(err) => {
+                    eprintln!("synthetic scenario {} failed: {err}", scenario.as_str());
+                    1
+                }
             }
-        };
-        let Some(scenario) = launch_env.scenario else {
-            return -1;
-        };
-        let _instance_lock = match DocumentInstanceLock::acquire(&launch_env.document_dir) {
-            Ok(Some(lock)) => lock,
-            Ok(None) => {
-                eprintln!(
-                    "Micro Input already running for {}",
-                    launch_env.document_dir.display()
-                );
-                return 1;
-            }
-            Err(err) => {
-                eprintln!("Micro Input instance lock failed: {err}");
-                return 1;
-            }
-        };
-        match run_synthetic_scenario(&launch_env, scenario) {
-            Ok(()) => 0,
-            Err(err) => {
-                eprintln!("synthetic scenario {} failed: {err}", scenario.as_str());
-                1
-            }
+        }
+        #[cfg(not(feature = "qa-runner"))]
+        {
+            dispatch_qa_from_scenario_env(std::env::var("MI_SYNTHETIC_SCENARIO").ok().as_deref())
         }
     })
 }
@@ -92,13 +120,7 @@ pub unsafe extern "C" fn mi_core_acquire_instance_lock(
                 return ptr::null_mut();
             }
         };
-        let doc_dir = match explicit_dir {
-            Some(dir) => dir,
-            None => match QaLaunchEnv::from_env() {
-                Ok(env) => env.document_dir,
-                Err(_) => return ptr::null_mut(),
-            },
-        };
+        let doc_dir = explicit_dir.unwrap_or_else(resolve_default_document_dir);
 
         match DocumentInstanceLock::acquire(&doc_dir) {
             Ok(Some(lock)) => Box::into_raw(Box::new(lock)),
@@ -537,5 +559,13 @@ mod tests {
 
             mi_core_free(store);
         }
+    }
+
+    #[cfg(not(feature = "qa-runner"))]
+    #[test]
+    fn production_qa_runner_entry_refuses_synthetic_scenario_env() {
+        assert_eq!(dispatch_qa_from_scenario_env(None), -1);
+        assert_eq!(dispatch_qa_from_scenario_env(Some("   ")), -1);
+        assert_eq!(dispatch_qa_from_scenario_env(Some("host-execution")), 1);
     }
 }

@@ -3201,10 +3201,10 @@ pub(crate) fn merge_previous_original_into_backup(
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&raw_manifest).map_err(|e| e.to_string())?;
         manifest["keymap_sha256"] =
-            serde_json::Value::String(mi_bridge::lighting_arbiter::sha256_hex(&original_keymap));
+            serde_json::Value::String(crate::lighting_arbiter::sha256_hex(&original_keymap));
         if let Some(pre_write) = &pre_write_bytes {
             manifest["pre_write_keymap_sha256"] =
-                serde_json::Value::String(mi_bridge::lighting_arbiter::sha256_hex(pre_write));
+                serde_json::Value::String(crate::lighting_arbiter::sha256_hex(pre_write));
         }
         if let Some(prev_manifest) = &prev_manifest {
             if let Some(prev_profile) = prev_manifest.get("previous_profile_index") {
@@ -3216,7 +3216,7 @@ pub(crate) fn merge_previous_original_into_backup(
         }
         if let Some(prev_planned) = &prev_planned {
             manifest["previous_planned_keymap_sha256"] =
-                serde_json::Value::String(mi_bridge::lighting_arbiter::sha256_hex(prev_planned));
+                serde_json::Value::String(crate::lighting_arbiter::sha256_hex(prev_planned));
         }
         let updated = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
         write_private_backup_file(&manifest_path, &updated)?;
@@ -4983,8 +4983,8 @@ mod tests {
                 "previous_profile_index": 0,
                 "previous_layer_index": 1,
                 "planned_profile_index": 1,
-                "keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(SIX_SOURCE),
-                "planned_keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(&outdated_bytes),
+                "keymap_sha256": crate::lighting_arbiter::sha256_hex(SIX_SOURCE),
+                "planned_keymap_sha256": crate::lighting_arbiter::sha256_hex(&outdated_bytes),
             }))
             .unwrap(),
         )
@@ -5226,8 +5226,8 @@ mod tests {
                 "previous_profile_index": 0,
                 "previous_layer_index": 1,
                 "planned_profile_index": 1,
-                "keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(SIX_SOURCE),
-                "planned_keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(&canonical.keymap),
+                "keymap_sha256": crate::lighting_arbiter::sha256_hex(SIX_SOURCE),
+                "planned_keymap_sha256": crate::lighting_arbiter::sha256_hex(&canonical.keymap),
             }))
             .unwrap(),
         )
@@ -5349,7 +5349,7 @@ mod tests {
                     .unwrap();
             assert_eq!(
                 manifest["pre_write_keymap_sha256"].as_str(),
-                Some(mi_bridge::lighting_arbiter::sha256_hex(&external_edit_bytes).as_str())
+                Some(crate::lighting_arbiter::sha256_hex(&external_edit_bytes).as_str())
             );
             assert_eq!(device_state.lock().unwrap().1, external_edit_bytes);
 

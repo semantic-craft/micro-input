@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(any(test, feature = "test-util"))]
+use std::sync::Mutex;
 
 pub const MAX_PRESET_FILE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -214,21 +216,43 @@ pub trait StatusItemHost: Send + Sync {
 
 impl dyn StatusItemHost {
     pub fn new_default() -> Arc<dyn StatusItemHost> {
-        Arc::new(RecordingStatusItemHost::new())
+        Arc::new(NoopStatusItemHost::new())
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopStatusItemHost;
+
+impl NoopStatusItemHost {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl StatusItemHost for NoopStatusItemHost {
+    fn sync_status_item(&self, _snapshot: StatusItemSnapshot) {}
+    fn latest_snapshot(&self) -> Option<StatusItemSnapshot> {
+        None
+    }
+    fn snapshots(&self) -> Vec<StatusItemSnapshot> {
+        Vec::new()
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
 #[derive(Debug, Default, Clone)]
 pub struct RecordingStatusItemHost {
     snapshots: Arc<Mutex<Vec<StatusItemSnapshot>>>,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl RecordingStatusItemHost {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl StatusItemHost for RecordingStatusItemHost {
     fn sync_status_item(&self, snapshot: StatusItemSnapshot) {
         if let Ok(mut guard) = self.snapshots.lock() {

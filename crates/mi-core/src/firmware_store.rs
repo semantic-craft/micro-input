@@ -1,5 +1,6 @@
 use super::*;
 use crate::firmware_update::{FirmwareAction, UpdateEvent};
+use mi_session::firmware_flash;
 
 impl WorkbenchStore {
     pub(super) fn dispatch_firmware(
@@ -17,8 +18,7 @@ impl WorkbenchStore {
     fn prepare_device_with_discovery(
         &mut self,
         enumerate_usb: impl FnOnce() -> Result<Vec<mi_transport::HidCandidate>, String>,
-        enumerate_bootloaders: impl FnOnce()
-            -> Result<Vec<crate::firmware_flash::BootloaderPort>, String>,
+        enumerate_bootloaders: impl FnOnce() -> Result<Vec<firmware_flash::BootloaderPort>, String>,
     ) -> Result<(), String> {
         if !self.firmware_update.projection.downloaded {
             return Err("请先下载并校验固件".into());
@@ -35,7 +35,7 @@ impl WorkbenchStore {
 
         enum TargetSource {
             Usb(mi_transport::HidCandidate),
-            ExistingBootloader(Vec<crate::firmware_flash::BootloaderPort>),
+            ExistingBootloader(Vec<firmware_flash::BootloaderPort>),
         }
 
         let source = if let Some(candidate) = self
@@ -95,7 +95,7 @@ impl WorkbenchStore {
                 let expected_serial = target
                     .serial_number
                     .as_deref()
-                    .and_then(crate::firmware_flash::normalize_serial_identifier);
+                    .and_then(firmware_flash::normalize_serial_identifier);
                 self.firmware_update.expected_serial = expected_serial.clone();
                 let transport = match self.mac_watcher_transport.take() {
                     Some(existing) if existing.is_exclusive_vendor() => existing,
@@ -144,8 +144,8 @@ impl WorkbenchStore {
                             let mut detected = Ok(Vec::new());
                             for _ in 0..10 {
                                 std::thread::sleep(std::time::Duration::from_millis(350));
-                                match crate::firmware_flash::enumerate_bootloaders().map(|ports| {
-                                    crate::firmware_flash::filter_ports_for_expected_serial(
+                                match firmware_flash::enumerate_bootloaders().map(|ports| {
+                                    firmware_flash::filter_ports_for_expected_serial(
                                         ports,
                                         expected_serial.as_deref(),
                                     )
@@ -161,9 +161,9 @@ impl WorkbenchStore {
                                 }
                             }
                             if detected.as_ref().is_ok_and(|ports| ports.is_empty()) {
-                                detected = crate::firmware_flash::enumerate_bootloaders()
+                                detected = firmware_flash::enumerate_bootloaders()
                                     .map(|ports| {
-                                        crate::firmware_flash::filter_ports_for_expected_serial(
+                                        firmware_flash::filter_ports_for_expected_serial(
                                             ports,
                                             expected_serial.as_deref(),
                                         )
@@ -210,7 +210,7 @@ impl WorkbenchStore {
                             .enumerate()
                             .map_err(|e| e.to_string())
                     },
-                    || crate::firmware_flash::enumerate_bootloaders().map_err(|e| e.to_string()),
+                    || firmware_flash::enumerate_bootloaders().map_err(|e| e.to_string()),
                 )?;
             }
             FirmwareAction::ScanPorts => {
@@ -346,7 +346,7 @@ mod tests {
         assert!(multi_err.contains("多台"));
         assert!(!store.firmware_update.reserved());
 
-        let port = crate::firmware_flash::BootloaderPort {
+        let port = firmware_flash::BootloaderPort {
             path: "/dev/cu.usbmodem-test-201".into(),
             vid: 0x303a,
             pid: 0x1001,

@@ -1,3 +1,4 @@
+use crate::lighting_arbiter::{FourAppAgentPhase, FourAppLightingArbiter, LightingUpdateResult};
 use crate::{
     canvas::{
         format_concise_keycap_caption, CanvasAction, CanvasLayerTab, CanvasProjection, CanvasRect,
@@ -50,12 +51,11 @@ use crate::{
         FAVORITE_SLOT_COUNT,
     },
 };
-use mi_bridge::{FourAppAgentPhase, FourAppLightingArbiter, PushToTalkController};
 use mi_macos::{
     executor::APPLE_FN_KEY_CODE, AppBundleCache, AppBundleInfo, HeldInputId, HostActionReceipt,
-    LiveHostActionExecutor, MacOsSystemDriver, PassivePanelFrameSpec, PassivePanelHost,
-    PassivePanelRole, PresetFileEnvelope, RecordingPassivePanelHost, RecordingStatusItemHost,
-    ScreenGeometry, ScreenPoint, StatusItemHost, StatusItemIconSpec, StatusItemSnapshot,
+    LiveHostActionExecutor, MacOsSystemDriver, NoopPassivePanelHost, NoopStatusItemHost,
+    PassivePanelFrameSpec, PassivePanelHost, PassivePanelRole, PresetFileEnvelope, ScreenGeometry,
+    ScreenPoint, StatusItemHost, StatusItemIconSpec, StatusItemSnapshot,
 };
 use mi_model::{
     action_library,
@@ -238,7 +238,10 @@ pub struct WorkbenchStoreConfig {
 
 impl WorkbenchStoreConfig {
     pub fn production() -> Self {
-        let document_dir = env::var_os("MI_DOCUMENT_DIR")
+        let document_dir = env::var("MI_DOCUMENT_DIR")
+            .ok()
+            .map(|raw| raw.trim().to_string())
+            .filter(|trimmed| !trimmed.is_empty())
             .map(PathBuf::from)
             .or_else(|| {
                 env::var_os("HOME")
@@ -251,8 +254,8 @@ impl WorkbenchStoreConfig {
             isolated: false,
             system_locale: mi_model::ResolvedLocale::ZhHans,
             app_cache: Arc::new(AppBundleCache::new()),
-            panel_host: Arc::new(RecordingPassivePanelHost::new()),
-            status_item_host: Arc::new(RecordingStatusItemHost::new()),
+            panel_host: Arc::new(NoopPassivePanelHost::new()),
+            status_item_host: Arc::new(NoopStatusItemHost::new()),
         }
     }
 
@@ -275,8 +278,8 @@ impl WorkbenchStoreConfig {
             isolated: true,
             system_locale: mi_model::ResolvedLocale::ZhHans,
             app_cache,
-            panel_host: Arc::new(RecordingPassivePanelHost::new()),
-            status_item_host: Arc::new(RecordingStatusItemHost::new()),
+            panel_host: Arc::new(NoopPassivePanelHost::new()),
+            status_item_host: Arc::new(NoopStatusItemHost::new()),
         }
     }
 
@@ -397,6 +400,45 @@ impl Default for WorkbenchProjection {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DictationControllerState {
+    pub is_active: bool,
+    pub cleanup_confirmed: bool,
+    #[cfg(test)]
+    next_verify_stopped: bool,
+}
+
+impl Default for DictationControllerState {
+    fn default() -> Self {
+        Self {
+            is_active: false,
+            cleanup_confirmed: true,
+            #[cfg(test)]
+            next_verify_stopped: true,
+        }
+    }
+}
+
+impl DictationControllerState {
+    pub fn cancel(&mut self) {
+        self.is_active = false;
+    }
+
+    pub fn verify_stopped(&mut self) -> bool {
+        #[cfg(test)]
+        let stopped = self.next_verify_stopped;
+        #[cfg(not(test))]
+        let stopped = true;
+        self.cleanup_confirmed = stopped;
+        stopped
+    }
+
+    #[cfg(test)]
+    pub fn set_next_verify_stopped(&mut self, stopped: bool) {
+        self.next_verify_stopped = stopped;
+    }
+}
+
 #[derive(Clone)]
 struct HeldDictation {
     input: HeldInputId,
@@ -408,7 +450,7 @@ pub struct WorkbenchStore {
     pub(crate) firmware_update: crate::firmware_update::FirmwareUpdater,
     pub config: WorkbenchStoreConfig,
     pub document_store: DocumentStore,
-    pub ptt_controller: PushToTalkController,
+    pub ptt_controller: DictationControllerState,
     pub lighting_arbiter: FourAppLightingArbiter,
     pub slot_table: FourAppSlotTable,
     pub app_cache: Arc<AppBundleCache>,
@@ -625,7 +667,7 @@ impl WorkbenchStore {
             firmware_update: Default::default(),
             config,
             document_store,
-            ptt_controller: PushToTalkController::new_simulated(),
+            ptt_controller: DictationControllerState::default(),
             lighting_arbiter: FourAppLightingArbiter::new(),
             slot_table: FourAppSlotTable::new(),
             app_cache,
@@ -1129,7 +1171,24 @@ impl WorkbenchStore {
         }
     }
 
-    pub fn current_or_synthetic_device_snapshot(&mut self) -> Value {
+    pub fn current_device_snapshot(&self) -> Result<Value, WorkbenchError> {
+        if let Some(snap) = &self.document_store.draft.document.baseline {
+            return Ok(snap.clone());
+        }
+        Err(WorkbenchError::Routing(
+            self.effective_locale()
+                .select(
+                    "尚未读取到真实设备基线快照；请先连接设备读取快照",
+                    "No real device baseline snapshot has been read yet; connect a device first.",
+                )
+                .to_string(),
+        ))
+    }
+
+    fn device_snapshot_for_workflow(&mut self) -> Result<Value, WorkbenchError> {
+        if !self.config.isolated {
+            return self.current_device_snapshot();
+        }
         let wb_path = self.config.workbench_json_path();
         if !wb_path.exists() {
             let prev_lang = self.document_store.ui_language();
@@ -1139,8 +1198,13 @@ impl WorkbenchStore {
             let _ = self.document_store.set_silent_at_login(prev_silent);
         }
         if let Some(snap) = &self.document_store.draft.document.baseline {
-            return snap.clone();
+            return Ok(snap.clone());
         }
+        Ok(self.synthesize_isolated_device_snapshot())
+    }
+
+    fn synthesize_isolated_device_snapshot(&mut self) -> Value {
+        debug_assert!(self.config.isolated);
         let mut raw_demo = mi_model::demo()
             .map(|d| d.raw)
             .unwrap_or_else(|_| self.document_store.draft.config.raw.clone());
@@ -1208,7 +1272,7 @@ impl WorkbenchStore {
                 Ok(())
             }
             DeviceWorkflowAction::ReadSnapshot => {
-                let snap = self.current_or_synthetic_device_snapshot();
+                let snap = self.device_snapshot_for_workflow()?;
                 let sha1 = snap["keymap"]["sha1"].as_str().unwrap_or("-");
                 self.status_message = format!("设备快照已核验 · keymap sha1={sha1}");
                 self.commit_runtime_update();
@@ -1241,7 +1305,7 @@ impl WorkbenchStore {
                 Ok(())
             }
             DeviceWorkflowAction::OpenReconnectComparison => {
-                let snap = self.current_or_synthetic_device_snapshot();
+                let snap = self.device_snapshot_for_workflow()?;
                 let device_cfg = self.document_store.draft.config.clone();
                 self.dispatch_editor_action(EditorAction::OpenReconnectComparison {
                     device_config: Box::new(device_cfg),
@@ -1249,32 +1313,32 @@ impl WorkbenchStore {
                 })
             }
             DeviceWorkflowAction::ConfirmComparisonIdentity => {
-                let snap = self.current_or_synthetic_device_snapshot();
+                let snap = self.device_snapshot_for_workflow()?;
                 self.dispatch_editor_action(EditorAction::ComparisonConfirmIdentity {
                     current_snapshot: snap,
                 })
             }
             DeviceWorkflowAction::ResolveComparison(choice) => {
-                let snap = self.current_or_synthetic_device_snapshot();
+                let snap = self.device_snapshot_for_workflow()?;
                 self.dispatch_editor_action(EditorAction::ComparisonResolve {
                     choice,
                     current_snapshot: snap,
                 })
             }
             DeviceWorkflowAction::OpenApplyPreparation => {
-                let snap = self.current_or_synthetic_device_snapshot();
+                let snap = self.device_snapshot_for_workflow()?;
                 self.dispatch_editor_action(EditorAction::OpenApplyPreparation {
                     current_snapshot: snap,
                 })
             }
             DeviceWorkflowAction::PrepareApplyBackup => {
-                let snap = self.current_or_synthetic_device_snapshot();
+                let snap = self.device_snapshot_for_workflow()?;
                 self.dispatch_editor_action(EditorAction::ApplyPrepareBackup {
                     current_snapshot: snap,
                 })
             }
             DeviceWorkflowAction::TakePreparedCandidate => {
-                let snap = self.current_or_synthetic_device_snapshot();
+                let snap = self.device_snapshot_for_workflow()?;
                 self.dispatch_editor_action(EditorAction::ApplyTakePreparedCandidate {
                     current_snapshot: snap,
                 })
@@ -1283,6 +1347,16 @@ impl WorkbenchStore {
                 self.dispatch_editor_action(EditorAction::ApplyCancelPreview)
             }
             DeviceWorkflowAction::SimulateKeyPress { binding_id } => {
+                if !self.config.isolated {
+                    return Err(WorkbenchError::Routing(
+                        self.effective_locale()
+                            .select(
+                                "生产模式下不允许合成按键注入",
+                                "Synthetic key press injection is unavailable in production mode.",
+                            )
+                            .to_string(),
+                    ));
+                }
                 let ev = InputEvent {
                     session_id: 1,
                     board_layer: None,
@@ -3853,7 +3927,7 @@ impl WorkbenchStore {
                 false,
                 is_split,
             );
-            if result != mi_bridge::LightingUpdateResult::DeviceBusy {
+            if result != LightingUpdateResult::DeviceBusy {
                 let running = &self.six_layer_running;
                 let _ = self
                     .lighting_arbiter
@@ -8412,7 +8486,7 @@ async fn run_automatic_hardware_acceptance(
     let snap = session.snapshot()?;
     let keymap_size = snap.files.keymap.meta.size;
     let keymap_sha1 = snap.files.keymap.meta.checksum_hex();
-    let keymap_sha256 = mi_bridge::sha256_hex(&snap.files.keymap.bytes);
+    let keymap_sha256 = crate::lighting_arbiter::sha256_hex(&snap.files.keymap.bytes);
     let smart_actions_present = snap.files.smart_actions.is_some();
     let smart_actions_size = snap.files.smart_actions.as_ref().map(|f| f.meta.size);
     let smart_actions_sha1 = snap

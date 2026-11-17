@@ -1,8 +1,10 @@
-use crate::firmware_catalog::DownloadedFirmware;
 use espflash::{
     connection::{Connection, ResetAfterOperation, ResetBeforeOperation},
     flasher::Flasher,
     target::{Chip, ProgressCallbacks},
+};
+use mi_model::private_fs::{
+    ensure_private_dir, open_private_file, open_verified_readonly_file, PrivateOpenMode,
 };
 use serde::{Deserialize, Serialize};
 use serialport::{SerialPort, SerialPortInfo, SerialPortType, UsbPortInfo};
@@ -16,6 +18,14 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadedFirmware {
+    pub path: PathBuf,
+    pub sha256: String,
+    pub digest_verified: bool,
+    pub size: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BootloaderPort {
@@ -139,7 +149,7 @@ fn persist(
     error: Option<&str>,
 ) -> Result<(), String> {
     let temp = receipt.backup_dir.join("operation.json.next");
-    let mut file = mi_macos::open_private_file(&temp, mi_macos::PrivateOpenMode::Truncate)?;
+    let mut file = open_private_file(&temp, PrivateOpenMode::Truncate)?;
     let bytes = serde_json::to_vec_pretty(&Operation {
         schema_version: 1,
         port,
@@ -165,7 +175,7 @@ fn image_bytes(firmware: &DownloadedFirmware) -> Result<Vec<u8>, String> {
     if firmware.size == 0 || firmware.size > MAX_FIRMWARE_IMAGE_BYTES {
         return Err("下载后的固件文件大小超出允许范围".into());
     }
-    let file = mi_macos::open_verified_readonly_file(&firmware.path)?;
+    let file = open_verified_readonly_file(&firmware.path)?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if meta.len() != firmware.size {
         return Err("下载后的固件文件已变化，请重新下载".into());
@@ -336,7 +346,7 @@ pub fn flash(
         return Err("所选引导端口已经断开或身份变化，请重新选择".into());
     }
     let _awake = Awake::acquire()?;
-    mi_macos::ensure_private_dir(backup_root)?;
+    ensure_private_dir(backup_root)?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -346,7 +356,7 @@ pub fn flash(
     #[cfg(unix)]
     builder.mode(0o700);
     builder.create(&backup_dir).map_err(|e| e.to_string())?;
-    mi_macos::ensure_private_dir(&backup_dir)?;
+    ensure_private_dir(&backup_dir)?;
     let mut receipt = FlashReceipt {
         backup_dir,
         backup_sha256: String::new(),

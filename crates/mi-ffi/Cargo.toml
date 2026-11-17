@@ -9,6 +9,9 @@ description.workspace = true
 [lib]
 crate-type = ["staticlib", "rlib"]
 
+[features]
+qa-runner = ["mi-core/qa-runner"]
+
 [dependencies]
 mi-core = { path = "../mi-core" }
 mi-macos = { path = "../mi-macos" }

@@ -1,5 +1,5 @@
 use crate::firmware_catalog::{self, DownloadedFirmware, FirmwareChannel, FirmwareRelease};
-use crate::firmware_flash::{self, BootloaderPort};
+use mi_session::firmware_flash::{self, BootloaderPort};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::mpsc};
 

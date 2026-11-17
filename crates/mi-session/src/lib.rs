@@ -1,5 +1,6 @@
 //! R-D07/R-C01/R-N01: one serialized queue per connection, cancellation and atomic snapshots.
 mod firmware;
+pub mod firmware_flash;
 mod input;
 pub use input::*;
 use mi_model::{DeviceConfig, Source};

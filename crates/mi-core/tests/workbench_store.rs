@@ -1464,7 +1464,7 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCas
     assert_eq!(receipt.layer_index, Some(initial_layer));
     assert_eq!(receipt.keymap_size, keymap_bytes.len() as u64);
     assert_eq!(receipt.keymap_sha1, keymap_sha1);
-    assert_eq!(receipt.keymap_sha256, mi_bridge::sha256_hex(&keymap_bytes));
+    assert_eq!(receipt.keymap_sha256, mi_core::sha256_hex(&keymap_bytes));
     assert!(receipt.lighting_rgbcfg_synced);
     assert!(receipt.lighting_preview_synced);
     assert!(receipt.lighting_thstatus_synced);
@@ -3403,4 +3403,39 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
         assert_eq!(cell.slot_role, "TaskKey");
         assert_eq!(cell.is_session_slot, Some(slot));
     }
+}
+
+#[test]
+fn non_isolated_store_refuses_synthetic_device_snapshot_when_baseline_is_absent() {
+    let temp = TempDir::new().unwrap();
+    let mut cfg = mi_core::WorkbenchStoreConfig::isolated(temp.path());
+    cfg.isolated = false;
+    cfg.auto_connect_usb = false;
+    let mut store = WorkbenchStore::open(cfg).unwrap();
+    assert!(store.document_store.draft.document.baseline.is_none());
+    let before_rev = store.document_store.draft.revision;
+
+    assert!(store.current_device_snapshot().is_err());
+    for action in [
+        mi_core::DeviceWorkflowAction::ReadSnapshot,
+        mi_core::DeviceWorkflowAction::OpenReconnectComparison,
+        mi_core::DeviceWorkflowAction::ConfirmComparisonIdentity,
+        mi_core::DeviceWorkflowAction::OpenApplyPreparation,
+        mi_core::DeviceWorkflowAction::PrepareApplyBackup,
+        mi_core::DeviceWorkflowAction::TakePreparedCandidate,
+        mi_core::DeviceWorkflowAction::SimulateKeyPress {
+            binding_id: "AG00".to_string(),
+        },
+    ] {
+        assert!(
+            store
+                .dispatch_device_workflow_action(action.clone())
+                .is_err(),
+            "production config must reject synthetic fallback for {action:?}"
+        );
+    }
+
+    assert!(store.document_store.draft.document.baseline.is_none());
+    assert_eq!(store.document_store.draft.revision, before_rev);
+    assert!(store.projection().active_modal.is_none());
 }

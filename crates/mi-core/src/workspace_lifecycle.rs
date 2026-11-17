@@ -85,10 +85,7 @@ impl WorkbenchStore {
             mi_transport::HidTransport::stop_discovery(transport.as_ref());
         }
         let stop_result = if self.config.isolated {
-            if self
-                .tokio_runtime
-                .block_on(self.ptt_controller.verify_stopped())
-            {
+            if self.ptt_controller.verify_stopped() {
                 Ok(())
             } else {
                 Err("原听写停止未确认".into())

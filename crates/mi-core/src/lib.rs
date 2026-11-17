@@ -2,13 +2,14 @@ pub mod canvas;
 pub mod editors;
 pub mod encoder_model_picker;
 pub mod firmware_catalog;
-pub mod firmware_flash;
 pub mod firmware_update;
 pub mod header;
 pub mod i18n;
 pub mod inspector;
 pub mod karabiner;
+pub mod lighting_arbiter;
 pub mod overlay;
+#[cfg(feature = "qa-runner")]
 pub mod qa_runner;
 pub mod radial;
 pub mod session_strip;
@@ -49,6 +50,10 @@ pub use inspector::{
     KeycapCatalogItemProjection, KeycapDescriptor, KeycapRole, MacroLibraryRowProjection,
     ShortcutModifier, ShortcutRecorderState, INSPECTOR_WIDTH,
 };
+pub use lighting_arbiter::{
+    sha256_hex, DualZoneLightingFeedback, FourAppAgentPhase, FourAppLightingArbiter,
+    FourAppSlotSnapshot, LightingUpdateResult, PerKeyLightingFeedback,
+};
 pub use mi_model::host_router::BottomRowLayout;
 pub use mi_model::{ResolvedLocale, UiLanguagePreference};
 pub use overlay::{
@@ -56,6 +61,7 @@ pub use overlay::{
     CheatSheetProjection, HostOverlayAction, HostOverlayProjection, HudVisibilityState,
     OverlayController, TargetAgentStatusCardProjection, PASSIVE_NOTICE_DURATION,
 };
+#[cfg(feature = "qa-runner")]
 pub use qa_runner::{run_synthetic_scenario, QaLaunchEnv, SyntheticScenario9};
 pub use radial::{
     octant_center_for_sector, resolve_radial_slots, strip_trailing_newlines, RadialConfirmMode,

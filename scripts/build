@@ -4,10 +4,14 @@ cd "$(dirname "$0")/.."
 export MACOSX_DEPLOYMENT_TARGET=14.0
 
 profile="debug"
+qa_build=0
 for arg in "$@"; do
   case "$arg" in
     --release)
       profile="release"
+      ;;
+    --qa)
+      qa_build=1
       ;;
     *)
       echo "Unknown argument: $arg" >&2
@@ -17,15 +21,19 @@ for arg in "$@"; do
 done
 
 cargo_flags=()
+ffi_flags=()
 swift_flags=()
 if [[ "$profile" == "release" ]]; then
   cargo_flags=(--release)
   swift_flags=(-c release)
 fi
+if [[ "$qa_build" -eq 1 ]]; then
+  ffi_flags=(--features qa-runner)
+fi
 
 export MI_RUST_PROFILE="$profile"
 cargo build --locked ${cargo_flags[@]+"${cargo_flags[@]}"} -p mi-model --bin mi
-cargo build --locked ${cargo_flags[@]+"${cargo_flags[@]}"} -p mi-ffi
+cargo build --locked ${cargo_flags[@]+"${cargo_flags[@]}"} ${ffi_flags[@]+"${ffi_flags[@]}"} -p mi-ffi
 swift_bin_dir="$(swift build --package-path app/MicroInput ${swift_flags[@]+"${swift_flags[@]}"} --show-bin-path)"
 rm -f "target/$profile/libmi_ffi.dylib" "$swift_bin_dir/MicroInput"
 swift build --package-path app/MicroInput ${swift_flags[@]+"${swift_flags[@]}"}

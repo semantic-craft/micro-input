@@ -30,6 +30,7 @@ trap cleanup_check EXIT
 export TMPDIR="$CHECK_TMPDIR"
 python3 -B -m unittest discover -s scripts/tests -p 'test_*launcher.py'
 cargo fmt --all -- --check
+cargo test --locked -p mi-ffi
 cargo test --locked --workspace --all-features
 scripts/build
 swift test --package-path app/MicroInput

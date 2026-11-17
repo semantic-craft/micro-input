@@ -518,6 +518,7 @@ pub mod slot_table;
 
 pub mod board_layers;
 pub mod direct_controls;
+pub mod private_fs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StrictSemver<'a> {

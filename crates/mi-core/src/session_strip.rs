@@ -1,5 +1,5 @@
+use crate::lighting_arbiter::{FourAppAgentPhase, FourAppSlotSnapshot};
 use crate::sidebar::CanonicalAgent;
-use mi_bridge::{FourAppAgentPhase, FourAppSlotSnapshot};
 use mi_model::{
     navigation_history::NavigationPlace,
     slot_table::{RecentCandidate, SlotMode, SlotStatus, SlotTable, SLOT_COUNT},

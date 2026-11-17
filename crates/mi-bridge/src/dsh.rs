@@ -1,13 +1,15 @@
 use crate::ipc::{UnixJsonTransport, UnixTransportError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+#[cfg(feature = "qa-runner")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::CString,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use uuid::Uuid;
 
@@ -1871,6 +1873,7 @@ struct DSHFixtureState {
     states: HashMap<String, SessionRuntimeState>,
     settled_replies: HashMap<String, DSHCommandReply>,
     pub metadata_reads: usize,
+    #[cfg_attr(not(feature = "qa-runner"), allow(dead_code))]
     pub body_reads: usize,
     pub opens: usize,
     pub creates: usize,
@@ -2379,6 +2382,7 @@ pub struct DSHNavigationScenarioReport {
     pub receipts: Vec<DSHAuditReceipt>,
 }
 
+#[cfg(feature = "qa-runner")]
 fn push_dsh_receipt(
     receipts: &mut Vec<DSHAuditReceipt>,
     action: &str,
@@ -2412,6 +2416,7 @@ fn push_dsh_receipt(
     outcome.into()
 }
 
+#[cfg(feature = "qa-runner")]
 pub fn run_dsh_navigation_scenario(
     audit_log_path: Option<&Path>,
 ) -> Result<DSHNavigationScenarioReport, String> {

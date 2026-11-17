@@ -736,11 +736,8 @@ name = "mi-bridge"
 version = "0.2.0"
 dependencies = [
  "libc",
- "mi-model",
- "mi-proto",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "uuid",
@@ -750,7 +747,6 @@ dependencies = [
 name = "mi-core"
 version = "0.2.0"
 dependencies = [
- "espflash",
  "mi-bridge",
  "mi-macos",
  "mi-model",
@@ -759,7 +755,6 @@ dependencies = [
  "mi-transport",
  "serde",
  "serde_json",
- "serialport",
  "sha2 0.10.9",
  "tempfile",
  "thiserror",
@@ -795,6 +790,7 @@ dependencies = [
 name = "mi-model"
 version = "0.2.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "sha1",
@@ -821,10 +817,13 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "espflash",
  "mi-model",
  "mi-proto",
  "mi-transport",
+ "serde",
  "serde_json",
+ "serialport",
  "sha1",
  "sha2 0.10.9",
  "tempfile",

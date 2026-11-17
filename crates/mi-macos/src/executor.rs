@@ -2008,36 +2008,7 @@ fn open_url_command_args(url: &str) -> Result<[&str; 2], String> {
     Ok(["--", url])
 }
 
-fn redact_home_path_with_home(raw: &str, home: Option<&str>) -> String {
-    if let Some(home_dir) = home
-        .map(|h| h.trim_end_matches('/'))
-        .filter(|h| !h.is_empty() && *h != "/")
-    {
-        if raw == home_dir {
-            return "~".to_string();
-        }
-        if let Some(rest) = raw.strip_prefix(home_dir).filter(|r| r.starts_with('/')) {
-            return format!("~{rest}");
-        }
-    }
-    if let Some(after_users) = raw.strip_prefix("/Users/") {
-        let (user, rest) = match after_users.split_once('/') {
-            Some((u, r)) => (u, Some(r)),
-            None => (after_users, None),
-        };
-        if !user.is_empty() && user != "Shared" {
-            return match rest {
-                Some(r) => format!("/Users/[redacted]/{r}"),
-                None => "/Users/[redacted]".to_string(),
-            };
-        }
-    }
-    raw.to_string()
-}
-
-pub fn redact_home_path(raw: &str) -> String {
-    redact_home_path_with_home(raw, std::env::var("HOME").ok().as_deref())
-}
+pub use mi_model::private_fs::redact_home_path;
 
 fn wait_child_with_timeout(
     child: &mut std::process::Child,
@@ -4587,35 +4558,6 @@ mod serialized_effect_tests {
         assert!(open_url_command_args("-open").is_err());
         assert!(open_url_command_args("file:///etc/passwd").is_err());
         assert!(open_url_command_args("javascript:alert(1)").is_err());
-    }
-
-    #[test]
-    fn redact_home_path_collapses_home_and_non_shared_users() {
-        assert_eq!(
-            redact_home_path_with_home("/Users/example", Some("/Users/example")),
-            "~"
-        );
-        assert_eq!(
-            redact_home_path_with_home("/Users/example/work/app", Some("/Users/example/")),
-            "~/work/app"
-        );
-        let sibling_home = ["/Users/example", "2/work"].concat();
-        assert_eq!(
-            redact_home_path_with_home(&sibling_home, Some("/Users/example")),
-            "/Users/[redacted]/work"
-        );
-        assert_eq!(
-            redact_home_path_with_home("/Users/test/work", Some("/Users/example")),
-            "/Users/[redacted]/work"
-        );
-        assert_eq!(
-            redact_home_path_with_home("/Users/Shared/repo", Some("/Users/example")),
-            "/Users/Shared/repo"
-        );
-        assert_eq!(
-            redact_home_path_with_home("/tmp/work", Some("/Users/example")),
-            "/tmp/work"
-        );
     }
 
     #[test]

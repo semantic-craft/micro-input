@@ -271,6 +271,36 @@ def _strip_rust_cfg_test(src: str) -> str:
     return ''.join(out)
 
 
+def find_production_qa_leaks(
+    store_src: str,
+    status_item_src: str,
+    passive_panel_src: str,
+    mi_core_cargo: str,
+    ffi_tree_output: str,
+) -> list[str]:
+    findings: list[str] = []
+    prod_store = _strip_rust_cfg_test(store_src)
+    for token in (
+        'current_or_synthetic_device_snapshot',
+        'RecordingPassivePanelHost',
+        'RecordingStatusItemHost',
+        'PushToTalkController::new_simulated',
+    ):
+        if token in prod_store:
+            findings.append(f'crates/mi-core/src/store.rs contains retired production token {token}')
+    if 'NoopStatusItemHost' not in _strip_rust_cfg_test(status_item_src):
+        findings.append('crates/mi-macos/src/status_item.rs must define and default to NoopStatusItemHost')
+    if 'NoopPassivePanelHost' not in _strip_rust_cfg_test(passive_panel_src):
+        findings.append('crates/mi-macos/src/passive_panel.rs must define NoopPassivePanelHost')
+    for crate_name in ('espflash', 'serialport'):
+        if re.search(rf'(?m)^\s*{crate_name}\s*=', mi_core_cargo):
+            findings.append(f'crates/mi-core/Cargo.toml must not depend directly on {crate_name}')
+    for forbidden in ('mi-bridge', 'qa-runner', 'synthetic-backend', 'test-util'):
+        if forbidden in ffi_tree_output:
+            findings.append(f'default mi-ffi dependency tree must not include {forbidden}')
+    return findings
+
+
 def _salted_clean_room_digest(token: str) -> str:
     return hashlib.sha256(_CLEAN_ROOM_HASH_SALT + token.lower().encode('ascii')).hexdigest()
 
@@ -918,6 +948,23 @@ def run_boundary_checks(root: Path = ROOT) -> None:
     assert not ffi_guard_violations, (
         'R-C14 violation: every extern "C" entrypoint in crates/mi-ffi/src must wrap its body with ffi_guard(:\n  '
         + '\n  '.join(ffi_guard_violations)
+    )
+
+    ffi_tree_output = subprocess.check_output(
+        ['cargo', 'tree', '-p', 'mi-ffi', '--edges', 'normal', '-e', 'features', '--locked', '--offline'],
+        cwd=root,
+        text=True,
+    )
+    prod_qa_leaks = find_production_qa_leaks(
+        (root / 'crates/mi-core/src/store.rs').read_text(encoding='utf-8'),
+        (root / 'crates/mi-macos/src/status_item.rs').read_text(encoding='utf-8'),
+        (root / 'crates/mi-macos/src/passive_panel.rs').read_text(encoding='utf-8'),
+        (root / 'crates/mi-core/Cargo.toml').read_text(encoding='utf-8'),
+        ffi_tree_output,
+    )
+    assert not prod_qa_leaks, (
+        'Production isolation violation (synthetic/QA/flash/recording host leak):\n  '
+        + '\n  '.join(prod_qa_leaks)
     )
 
     print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

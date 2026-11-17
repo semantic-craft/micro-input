@@ -3,15 +3,22 @@ use mi_macos::executor::{
     ClipboardItemSnapshot, HeldInputId, LiveHostActionExecutor, RecordedOsEvent, RecordingOsDriver,
     APPLE_FN_KEY_CODE, CG_EVENT_FLAG_MASK_SECONDARY_FN, CG_EVENT_TYPE_FLAGS_CHANGED,
 };
+#[cfg(feature = "qa-runner")]
 use mi_macos::{
     run_config_write_scenario, run_diagnostic_export_scenario, run_host_execution_scenario,
-    run_lighting_control_scenario, AppBundleCache, AppBundleInfo, DocumentInstanceLock,
-    OTHER_APPS_WILDCARD_BUNDLE_ID,
+    run_lighting_control_scenario,
+};
+use mi_macos::{
+    AppBundleCache, AppBundleInfo, DocumentInstanceLock, OTHER_APPS_WILDCARD_BUNDLE_ID,
 };
 use mi_model::host_router::{ResolvedHostAction, ResolvedMacroEvent};
+#[cfg(feature = "qa-runner")]
 use serde_json::Value;
+#[cfg(feature = "qa-runner")]
 use std::collections::BTreeSet;
+#[cfg(feature = "qa-runner")]
 use std::fs;
+#[cfg(feature = "qa-runner")]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -407,6 +414,7 @@ fn test_live_host_action_executor_apple_fn_paste_submit_and_macro_trust() {
     assert_eq!(macro_receipt.detail, "accessibility_untrusted");
 }
 
+#[cfg(feature = "qa-runner")]
 #[test]
 fn test_four_synthetic_scenarios_match_verify_offline_contracts() {
     let temp = TempDir::new().expect("temp dir");

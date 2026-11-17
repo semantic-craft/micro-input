@@ -1,4 +1,4 @@
-use mi_bridge::FourAppAgentPhase;
+use mi_core::FourAppAgentPhase;
 use mi_core::{
     format_concise_keycap_caption, format_concise_keycap_caption_localized, AmbientColorPreset,
     BottomRowLayout, CanonicalAgent, CanvasAction, ControlSurfaceId, FourAppLiveCandidate,

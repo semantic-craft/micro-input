@@ -1577,8 +1577,8 @@ mod tests {
                 "previous_profile_index": 0,
                 "previous_layer_index": 1,
                 "planned_profile_index": 1,
-                "keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(SIX_SOURCE),
-                "planned_keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(&v1_bytes),
+                "keymap_sha256": crate::lighting_arbiter::sha256_hex(SIX_SOURCE),
+                "planned_keymap_sha256": crate::lighting_arbiter::sha256_hex(&v1_bytes),
             }))
             .unwrap(),
         )
@@ -1692,7 +1692,7 @@ mod tests {
                     .unwrap();
             assert_eq!(
                 manifest["keymap_sha256"].as_str(),
-                Some(mi_bridge::lighting_arbiter::sha256_hex(SIX_SOURCE).as_str())
+                Some(crate::lighting_arbiter::sha256_hex(SIX_SOURCE).as_str())
             );
             assert_eq!(manifest["previous_profile_index"].as_u64(), Some(0));
             assert_eq!(manifest["previous_layer_index"].as_u64(), Some(1));

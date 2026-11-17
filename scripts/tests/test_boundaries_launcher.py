@@ -255,3 +255,32 @@ pub unsafe extern "C" fn guarded_ok<'a>(_x: &'a u8) -> i32 {
             module.find_unguarded_ffi_entrypoints("crates/mi-ffi/src/lib.rs", ffi_edge_cases),
             ["spoofed_str", "multi_attr_unguarded"],
         )
+
+    def test_find_production_qa_leaks_detects_retired_wiring_and_accepts_clean_tree(self):
+        clean = module.find_production_qa_leaks(
+            "fn f() { NoopPassivePanelHost::new(); }\n#[cfg(test)] mod tests { fn x() { current_or_synthetic_device_snapshot(); } }",
+            "pub struct NoopStatusItemHost;",
+            "pub struct NoopPassivePanelHost;",
+            "[dependencies]\nmi-session = { path = \"../mi-session\" }\n",
+            "mi-ffi v0.2.0\n└── mi-core feature \"default\"\n",
+        )
+        self.assertEqual(clean, [])
+
+        dirty = module.find_production_qa_leaks(
+            "fn f() { current_or_synthetic_device_snapshot(); RecordingPassivePanelHost::new(); PushToTalkController::new_simulated(); }",
+            "pub struct RecordingStatusItemHost;",
+            "pub struct RecordingPassivePanelHost;",
+            "[dependencies]\nespflash = \"=4.7.0\"\nserialport = \"=4.10.1\"\n",
+            "mi-ffi v0.2.0\n├── mi-core feature \"qa-runner\"\n├── mi-macos feature \"test-util\"\n└── mi-bridge v0.2.0\n└── mi-transport feature \"synthetic-backend\"\n",
+        )
+        self.assertTrue(any("current_or_synthetic_device_snapshot" in d for d in dirty))
+        self.assertTrue(any("RecordingPassivePanelHost" in d for d in dirty))
+        self.assertTrue(any("PushToTalkController::new_simulated" in d for d in dirty))
+        self.assertTrue(any("NoopStatusItemHost" in d for d in dirty))
+        self.assertTrue(any("NoopPassivePanelHost" in d for d in dirty))
+        self.assertTrue(any("espflash" in d for d in dirty))
+        self.assertTrue(any("serialport" in d for d in dirty))
+        self.assertTrue(any("mi-bridge" in d for d in dirty))
+        self.assertTrue(any("qa-runner" in d for d in dirty))
+        self.assertTrue(any("synthetic-backend" in d for d in dirty))
+        self.assertTrue(any("test-util" in d for d in dirty))
