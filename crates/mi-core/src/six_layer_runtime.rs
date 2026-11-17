@@ -225,7 +225,15 @@ impl SavedSixLayerState {
                         && is_action_cmd(d19, "ag-close-side-panel", "close-side-panel");
                 if doc_has_side_panel_joystick && host.actions.len() >= 20 {
                     let baked_mouse_joystick = host.joystick_mode.as_deref() == Some("MOUSE")
-                        && host.actions[16..20].iter().all(Option::is_none);
+                        && host.actions[16..20].iter().all(|action| {
+                            action.as_ref().is_none_or(|a| {
+                                matches!(
+                                    a,
+                                    ResolvedHostAction::AgentCommand { command, .. }
+                                        if command.starts_with("model-picker-")
+                                )
+                            })
+                        });
                     let baked_legacy_nav_joystick = matches!(
                         host.actions[16].as_ref(),
                         Some(ResolvedHostAction::AgentCommand { command, .. })

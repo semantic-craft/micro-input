@@ -1638,4 +1638,124 @@ fn antigravity_v160_migrates_back_to_session_top_six_and_side_panel_joystick_whi
             command: "continue".into(),
         })
     );
+
+    // 4. Live-observed `mouse` + leftover `agent-model-picker-*` in 16..=19 migrates to
+    // logical_sectors side-panel bindings, while explicit `host-mouse-move-*` stays untouched.
+    let mut mouse_leftover = Draft::default();
+    let ml_ids = preset::install_agent_starter_profiles(&mut mouse_leftover).unwrap();
+    let ml_pid = ml_ids
+        .iter()
+        .find(|pid| mouse_leftover.document.editable.graph.profiles[*pid].name == "Antigravity")
+        .unwrap()
+        .clone();
+    let ml_lid = mouse_leftover.document.editable.graph.profiles[&ml_pid].layer_order[0].clone();
+    mouse_leftover
+        .set_control_settings(
+            &ml_pid,
+            &ml_lid,
+            mi_model::control_settings::ControlSettings {
+                joystick_mode: "mouse".into(),
+                active_sectors: 0,
+                encoder_hold_action_id: None,
+            },
+        )
+        .unwrap();
+    for (slot, id, cmd) in [
+        (16, "agent-model-picker-prev", "model-picker-prev"),
+        (17, "agent-model-picker-next", "model-picker-next"),
+        (
+            18,
+            "agent-model-picker-effort-left",
+            "model-picker-effort-left",
+        ),
+        (
+            19,
+            "agent-model-picker-effort-right",
+            "model-picker-effort-right",
+        ),
+    ] {
+        mouse_leftover
+            .assign(
+                &json!(ml_pid),
+                &json!(ml_lid),
+                slot,
+                mi_model::draft::Action {
+                    id: id.into(),
+                    name: id.into(),
+                    category: "Agent".into(),
+                    detail: id.into(),
+                    payload: json!({"type":"agent_command","adapter":"host","command":cmd}),
+                },
+            )
+            .unwrap();
+    }
+    assert!(
+        preset::antigravity_layer_needs_side_panel_joystick_migration(
+            &mouse_leftover.document,
+            &ml_lid
+        )
+    );
+    preset::install_agent_starter_profiles(&mut mouse_leftover).unwrap();
+    let ml_cs = mouse_leftover.document.editable.graph.layers[&ml_lid]
+        .control_settings
+        .as_ref()
+        .unwrap();
+    assert_eq!(ml_cs.joystick_mode, "logical_sectors");
+    assert_eq!(ml_cs.active_sectors, 4);
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(
+            &mouse_leftover.document,
+            Some(&ml_pid),
+            "AG16",
+            true
+        ),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "open-side-panel".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(
+            &mouse_leftover.document,
+            Some(&ml_pid),
+            "AG18",
+            true
+        ),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "close-side-panel".into(),
+        })
+    );
+
+    mouse_leftover
+        .set_control_settings(
+            &ml_pid,
+            &ml_lid,
+            mi_model::control_settings::ControlSettings {
+                joystick_mode: "mouse".into(),
+                active_sectors: 0,
+                encoder_hold_action_id: None,
+            },
+        )
+        .unwrap();
+    mouse_leftover
+        .assign(
+            &json!(ml_pid),
+            &json!(ml_lid),
+            17,
+            mi_model::draft::Action {
+                id: "host-mouse-move-left".into(),
+                name: "鼠标左移".into(),
+                category: "鼠标".into(),
+                detail: "左移".into(),
+                payload: json!({"type":"agent_command","adapter":"host","command":"mouse-move:left"}),
+            },
+        )
+        .unwrap();
+    assert!(
+        !preset::antigravity_layer_needs_side_panel_joystick_migration(
+            &mouse_leftover.document,
+            &ml_lid
+        )
+    );
 }
