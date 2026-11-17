@@ -747,7 +747,8 @@ mod tests {
         };
         assert!(max_valid.validate().is_ok());
 
-        let out_of_bounds: [(&str, fn(&mut MouseConfig)); 13] = [
+        type MouseMutator = (&'static str, fn(&mut MouseConfig));
+        let out_of_bounds: [MouseMutator; 13] = [
             ("delay_ms", |c| c.delay_ms = 1001),
             ("interval_ms", |c| c.interval_ms = 201),
             ("move_delta", |c| c.move_delta = 128),
@@ -823,8 +824,10 @@ mod tests {
 
     #[test]
     fn pm_config_pm_state_and_device_name_round_trip_and_validate() {
-        let mut pm = PmConfig::default();
-        pm.sleep_after_min = 0;
+        let mut pm = PmConfig {
+            sleep_after_min: 0,
+            ..Default::default()
+        };
         assert!(encode_write_pm_config(&pm, 1).is_err());
         pm.sleep_after_min = 1441;
         assert!(encode_write_pm_config(&pm, 1).is_err());

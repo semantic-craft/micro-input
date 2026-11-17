@@ -245,8 +245,8 @@ pub struct WorkbenchStoreConfig {
 }
 
 impl WorkbenchStoreConfig {
-    pub fn production() -> Self {
-        let document_dir = env::var("MI_DOCUMENT_DIR")
+    pub fn production_document_dir() -> PathBuf {
+        env::var("MI_DOCUMENT_DIR")
             .ok()
             .map(|raw| raw.trim().to_string())
             .filter(|trimmed| !trimmed.is_empty())
@@ -255,7 +255,11 @@ impl WorkbenchStoreConfig {
                 env::var_os("HOME")
                     .map(|home| PathBuf::from(home).join("Library/Application Support/MicroInput"))
             })
-            .unwrap_or_else(|| PathBuf::from(".micro-input"));
+            .unwrap_or_else(|| PathBuf::from(".micro-input"))
+    }
+
+    pub fn production() -> Self {
+        let document_dir = Self::production_document_dir();
         Self {
             document_dir,
             auto_connect_usb: true,

@@ -40,6 +40,7 @@ public final class CoreStore {
     @ObservationIgnored private var lastObservedBundleId: String?
 
     @ObservationIgnored private let projectionDecoder = CoreStore.makeProjectionDecoder()
+    @ObservationIgnored private let commandEncoder = JSONEncoder()
 
     @ObservationIgnored public private(set) var model: ProjectionModel = ProjectionModel()
 
@@ -75,7 +76,7 @@ public final class CoreStore {
             syncSystemLocale(Locale.preferredLanguages)
         }
         workspaceLifecycle = WorkspaceLifecycle(center: workspaceNotificationCenter) { [weak self] event in
-            self?.dispatchRaw(["domain": event.rawValue])
+            self?.dispatchCommandDomain(event.rawValue)
         }
         if isolatedDirectory == nil || pollInIsolation {
             startEventLoops(observeWorkspace: isolatedDirectory == nil)
@@ -130,10 +131,7 @@ public final class CoreStore {
         guard bundleId != Bundle.main.bundleIdentifier else { return }
         guard bundleId != lastObservedBundleId else { return }
         lastObservedBundleId = bundleId
-        dispatchRaw([
-            "domain": "foreground_app_changed",
-            "action": ["bundle_id": (bundleId as Any?) ?? NSNull()]
-        ])
+        dispatchCommand("foreground_app_changed", ForegroundBundleAction(bundle_id: bundleId))
     }
 
     public func refreshProjection() {
@@ -152,16 +150,15 @@ public final class CoreStore {
 
     public func stagePresetImport(data: Data) {
         let maxBytes = 4 * 1024 * 1024 + 1
-        let capped = Array(data.prefix(maxBytes)).map { Int($0) }
-        dispatch("status_menu", ["StagePresetImportBytes": capped])
+        dispatchCommand("status_menu", ["StagePresetImportBytes": [UInt8](data.prefix(maxBytes))])
     }
 
     public func selectHeaderCandidateDevice(_ selector: String) {
-        dispatch("header", ["SelectCandidateDevice": ["selector": selector]])
+        dispatchCommand("header", SelectCandidateDeviceCommand(SelectCandidateDevice: SelectorPayload(selector: selector)))
     }
 
     public func selectStatusMenuCandidateDevice(_ selector: String) {
-        dispatch("status_menu", ["SelectCandidateDevice": ["selector": selector]])
+        dispatchCommand("status_menu", SelectCandidateDeviceCommand(SelectCandidateDevice: SelectorPayload(selector: selector)))
     }
 
     public func dispatchV070Hardware(_ action: Any) {
@@ -169,11 +166,11 @@ public final class CoreStore {
     }
 
     public func setV070AutoLayerSync(_ enabled: Bool) {
-        dispatchV070Hardware(V070HardwareCommand.setAutoLayerSync(enabled))
+        dispatchCommand("v070_hardware", SetAutoLayerSyncCommand(SetAutoLayerSync: EnabledPayload(enabled: enabled)))
     }
 
     public func setV070SessionSaRgbSync(_ enabled: Bool) {
-        dispatchV070Hardware(V070HardwareCommand.setSessionSaRgbSync(enabled))
+        dispatchCommand("v070_hardware", SetSessionSaRgbSyncCommand(SetSessionSaRgbSync: EnabledPayload(enabled: enabled)))
     }
 
     public func tr(_ zh: String) -> String {
@@ -181,31 +178,45 @@ public final class CoreStore {
     }
 
     public func setUiLanguage(_ language: UiLanguagePreference) {
-        dispatch("header", ["SetUiLanguage": ["language": language.rawValue]])
+        dispatchCommand("header", SetUiLanguageCommand(SetUiLanguage: LanguagePayload(language: language.rawValue)))
     }
 
     public func syncSystemLocale(_ preferredLanguages: [String]) {
-        dispatch("header", ["SyncSystemLocale": ["preferred_languages": preferredLanguages]])
+        dispatchCommand("header", SyncSystemLocaleCommand(SyncSystemLocale: PreferredLanguagesPayload(preferred_languages: preferredLanguages)))
     }
 
     public func setSilentAtLogin(_ silent: Bool) {
-        dispatch("header", ["SetSilentAtLogin": ["silent": silent]])
+        dispatchCommand("header", SetSilentAtLoginCommand(SetSilentAtLogin: SilentPayload(silent: silent)))
     }
 
     public func prepareForTermination() {
-        dispatchRaw(["domain": "system_will_terminate"])
+        dispatchCommandDomain("system_will_terminate")
+    }
+
+    public func dispatchCommand<Action: Encodable>(_ domain: String, _ action: Action) {
+        guard let data = try? commandEncoder.encode(DomainCommandEnvelope(domain: domain, action: action)) else { return }
+        dispatchCommandData(data)
+    }
+
+    private func dispatchCommandDomain(_ domain: String) {
+        guard let data = try? commandEncoder.encode(DomainOnlyEnvelope(domain: domain)) else { return }
+        dispatchCommandData(data)
     }
 
     public func dispatchRaw(_ payload: [String: Any]) {
-        guard let h = lifecycle.handle else { return }
         guard JSONSerialization.isValidJSONObject(payload),
-              let data = try? JSONSerialization.data(withJSONObject: payload),
-              let cmdString = String(data: data, encoding: .utf8)
-        else {
-            return
-        }
-        let updatedPtr = cmdString.withCString { ptr in
-            mi_core_dispatch_json(h, ptr)
+              let data = try? JSONSerialization.data(withJSONObject: payload)
+        else { return }
+        dispatchCommandData(data)
+    }
+
+    private func dispatchCommandData(_ data: Data) {
+        guard let h = lifecycle.handle else { return }
+        var terminated = data
+        terminated.append(0)
+        let updatedPtr = terminated.withUnsafeBytes { rawBuf -> UnsafeMutablePointer<CChar>? in
+            guard let base = rawBuf.bindMemory(to: CChar.self).baseAddress else { return nil }
+            return mi_core_dispatch_json(h, base)
         }
         guard let cStr = updatedPtr else { return }
         applyProjectionCStr(cStr)
@@ -276,6 +287,25 @@ public final class CoreStore {
         decodeJSONSlice(WorkbenchProjectionDTO.self, from: root)?.toModel() ?? ProjectionModel()
     }
 }
+
+private struct DomainOnlyEnvelope: Encodable { let domain: String }
+private struct DomainCommandEnvelope<Action: Encodable>: Encodable { let domain: String; let action: Action }
+private struct ForegroundBundleAction: Encodable {
+    let bundle_id: String?
+    private enum CodingKeys: String, CodingKey { case bundle_id }
+    func encode(to encoder: Encoder) throws { var c = encoder.container(keyedBy: CodingKeys.self); try c.encode(bundle_id, forKey: .bundle_id) }
+}
+private struct SelectorPayload: Encodable { let selector: String }
+private struct SelectCandidateDeviceCommand: Encodable { let SelectCandidateDevice: SelectorPayload }
+private struct EnabledPayload: Encodable { let enabled: Bool }
+private struct SetAutoLayerSyncCommand: Encodable { let SetAutoLayerSync: EnabledPayload }
+private struct SetSessionSaRgbSyncCommand: Encodable { let SetSessionSaRgbSync: EnabledPayload }
+private struct LanguagePayload: Encodable { let language: String }
+private struct SetUiLanguageCommand: Encodable { let SetUiLanguage: LanguagePayload }
+private struct PreferredLanguagesPayload: Encodable { let preferred_languages: [String] }
+private struct SyncSystemLocaleCommand: Encodable { let SyncSystemLocale: PreferredLanguagesPayload }
+private struct SilentPayload: Encodable { let silent: Bool }
+private struct SetSilentAtLoginCommand: Encodable { let SetSilentAtLogin: SilentPayload }
 
 private struct JSONPresence: Decodable {
     init(from decoder: Decoder) throws {}

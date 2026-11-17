@@ -3455,23 +3455,22 @@ mod agent_migration_tests {
         let ids = install_agent_starter_profiles(&mut draft).unwrap();
         assert_eq!(ids.len(), 6);
 
-        for native_name in ["Codex"] {
-            let pid = draft
-                .document
-                .editable
-                .graph
-                .profiles
-                .iter()
-                .find(|(_, p)| p.name == native_name)
-                .unwrap()
-                .0
-                .clone();
-            let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
-            assert!(
-                draft.document.is_protected_oai_layer(&lid),
-                "{native_name} default layer must be a protected KV_OAI_* layer"
-            );
-        }
+        let native_name = "Codex";
+        let pid = draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == native_name)
+            .unwrap()
+            .0
+            .clone();
+        let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+        assert!(
+            draft.document.is_protected_oai_layer(&lid),
+            "{native_name} default layer must be a protected KV_OAI_* layer"
+        );
 
         // Downgrade DeepSeek Coder (DSH) to pre-Slice-B 9-slot push-to-talk state (slots 0..=8, no dial),
         // and customize Herdr by adding a joystick prompt slot (slot 16 -> prompt-continue).

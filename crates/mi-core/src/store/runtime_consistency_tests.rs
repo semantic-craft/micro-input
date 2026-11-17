@@ -614,8 +614,8 @@ fn native_codex_all_controls_keep_existing_actions_in_locked_and_manual_routes()
                 command: "mouse-click:left".into(),
             })
         );
-        for slot in 2..6 {
-            assert_eq!(plan.actions[slot], None);
+        for action in &plan.actions[2..6] {
+            assert_eq!(*action, None);
         }
         assert_eq!(
             store.desired_live_session_source(),
@@ -862,8 +862,8 @@ fn host_mouse_commands_preserve_host_adapter_in_compile_profile_twenty_slots() {
             .unwrap();
 
         let compiled = store.compile_profile_twenty_slots(&target_pid).unwrap();
-        for slot in 13..=19 {
-            match &compiled.actions[slot] {
+        for (slot, action) in compiled.actions.iter().enumerate().skip(13) {
+            match action {
                 Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
                     adapter,
                     command,

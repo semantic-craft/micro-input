@@ -373,7 +373,7 @@ mod tests {
         let command = request(&store, json!({"kind":"command_execution","enabled":true}));
         store.update_routing(command).unwrap();
         assert_eq!(store.routing_state()["command_execution_enabled"], true);
-        assert_eq!(store.command_execution_enabled(), true);
+        assert!(store.command_execution_enabled());
     }
     #[test]
     fn legacy_defaults_and_failed_save_do_not_change_profile() {

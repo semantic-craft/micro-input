@@ -707,12 +707,10 @@ def run_boundary_checks(root: Path = ROOT) -> None:
         'R-C08 violation: Workbench hardware ingress must remain bounded with independent loss/control delivery'
     )
 
-    six_layer_runtime_prod_paths = [
-        root / 'crates/mi-core/src/six_layer_runtime.rs',
-        root / 'crates/mi-core/src/six_layer_runtime/state.rs',
-        root / 'crates/mi-core/src/six_layer_runtime/vendor_bridge.rs',
-        root / 'crates/mi-core/src/six_layer_runtime/encoder_dispatch.rs',
-        root / 'crates/mi-core/src/six_layer_runtime/lifecycle.rs',
+    six_layer_runtime_prod_paths = [root / 'crates/mi-core/src/six_layer_runtime.rs'] + [
+        p
+        for p in sorted((root / 'crates/mi-core/src/six_layer_runtime').rglob('*.rs'))
+        if not p.name.endswith('tests.rs')
     ]
     six_layer_runtime_src = '\n'.join(
         _strip_rust_cfg_test(p.read_text(encoding='utf-8')) for p in six_layer_runtime_prod_paths

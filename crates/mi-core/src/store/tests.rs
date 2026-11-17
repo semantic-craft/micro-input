@@ -53,7 +53,7 @@ mod startup_tests {
     }
 }
 
-mod tests {
+mod store_unit_tests {
     use super::super::antigravity_daemon::{
         build_antigravity_trajectories_request, find_freshest_antigravity_hub_in,
         parse_antigravity_http_200_body, CsrfToken, ANTIGRAVITY_HUB_MAX_BYTES,

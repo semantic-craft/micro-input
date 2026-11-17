@@ -287,66 +287,65 @@ fn mg1_protected_oai_layer_enforces_all_four_hard_isolation_invariants_and_one_c
     let temp = TempDir::new().unwrap();
     let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
 
-    for agent in [CanonicalAgent::Codex] {
-        let pid = store.find_canonical_profile_id(agent).unwrap();
-        store.select_and_activate_profile(&pid).unwrap();
-        assert!(store.is_selected_layer_protected());
-        assert_eq!(
-            store.ensure_layer_editable(),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
+    let agent = CanonicalAgent::Codex;
+    let pid = store.find_canonical_profile_id(agent).unwrap();
+    store.select_and_activate_profile(&pid).unwrap();
+    assert!(store.is_selected_layer_protected());
+    assert_eq!(
+        store.ensure_layer_editable(),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
 
-        let lock = store
+    let lock = store
+        .projection()
+        .canvas
+        .protected_lock
+        .as_ref()
+        .expect("protected layer must project ProtectedLayerLockProjection");
+    assert!(lock.is_locked);
+    assert!(!lock.lock_badge_text.is_empty());
+    assert!(!lock.explanation_text.is_empty());
+
+    assert!(!store.projection().canvas.can_edit_bindings);
+    assert!(!store.projection().canvas.inspector_expanded);
+    assert!(!store.projection().session_strip.can_mutate_layout);
+    assert_eq!(
+        store.dispatch_session_strip_action(SessionStripAction::BindTopSixAsSessionKeys),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
+    assert_eq!(
+        store.dispatch_session_strip_action(SessionStripAction::RestoreDefaultLayout),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
+    assert_eq!(
+        store.dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+            KnobJoystickPreset::CycleWorkingAndBlueDot
+        )),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
+    assert_eq!(
+        store.dispatch_canvas_action(CanvasAction::AssignSlotAction {
+            slot: 0,
+            action_id: "search".to_string(),
+        }),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
+
+    assert!(!store.projection().canvas.can_add_lighting);
+    assert!(!store.projection().canvas.can_export_or_copy_layer);
+    assert!(
+        store
             .projection()
-            .canvas
-            .protected_lock
-            .as_ref()
-            .expect("protected layer must project ProtectedLayerLockProjection");
-        assert!(lock.is_locked);
-        assert!(!lock.lock_badge_text.is_empty());
-        assert!(!lock.explanation_text.is_empty());
-
-        assert!(!store.projection().canvas.can_edit_bindings);
-        assert!(!store.projection().canvas.inspector_expanded);
-        assert!(!store.projection().session_strip.can_mutate_layout);
-        assert_eq!(
-            store.dispatch_session_strip_action(SessionStripAction::BindTopSixAsSessionKeys),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-        assert_eq!(
-            store.dispatch_session_strip_action(SessionStripAction::RestoreDefaultLayout),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-        assert_eq!(
-            store.dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
-                KnobJoystickPreset::CycleWorkingAndBlueDot
-            )),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-        assert_eq!(
-            store.dispatch_canvas_action(CanvasAction::AssignSlotAction {
-                slot: 0,
-                action_id: "search".to_string(),
-            }),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-
-        assert!(!store.projection().canvas.can_add_lighting);
-        assert!(!store.projection().canvas.can_export_or_copy_layer);
-        assert!(
-            store
-                .projection()
-                .session_strip
-                .lighting_popover
-                .suspended_by_protected_layer
-        );
-        assert_eq!(
-            store.dispatch_session_strip_action(SessionStripAction::TriggerTestLighting(Some(
-                FourAppAgentPhase::Completed
-            ))),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-    }
+            .session_strip
+            .lighting_popover
+            .suspended_by_protected_layer
+    );
+    assert_eq!(
+        store.dispatch_session_strip_action(SessionStripAction::TriggerTestLighting(Some(
+            FourAppAgentPhase::Completed
+        ))),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
 
     let codex_pid = store
         .find_canonical_profile_id(CanonicalAgent::Codex)

@@ -35,8 +35,26 @@ public struct FirmwareSliceModel: Equatable, Decodable {
     public init() {}
 
     public init(from decoder: Decoder) throws {
-        let dto = try FirmwareProjectionDTO(from: decoder)
-        self = dto.toModel()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        channel = c.lossy(.channel, "stable"); currentVersion = c.lossyOpt(.currentVersion)
+        versionStatus = c.lossy(.versionStatus, ""); phase = c.lossy(.phase, "idle")
+        message = c.lossy(.message, message); busy = c.lossy(.busy, false)
+        downloaded = c.lossy(.downloaded, false); digestVerified = c.lossy(.digestVerified, false)
+        deviceReserved = c.lossy(.deviceReserved, false); selectedPort = c.lossyOpt(.selectedPort)
+        backupPath = c.lossyOpt(.backupPath)
+        progress = (c.lossyOpt(.progress) as Double?).flatMap { $0.isFinite ? $0 : nil }
+        if let rel: FirmwareReleaseDTO = c.lossyOpt(.release) {
+            releaseTag = rel.tag; releaseNotes = rel.notes ?? ""; prerelease = rel.prerelease ?? false
+        }
+        ports = (c.lossy(.ports, [FirmwarePortDTO]())).compactMap {
+            guard let path = $0.path else { return nil }
+            let product = $0.product ?? $0.manufacturer ?? "USB 设备"
+            return FirmwarePortModel(path: path, product: product, label: "\(product) · \(path)")
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case channel, currentVersion, versionStatus, phase, message, selectedPort, backupPath, busy, downloaded, digestVerified, deviceReserved, release, ports, progress
     }
 
     public init(json: [String: Any]) {
@@ -265,38 +283,21 @@ private extension KeyedDecodingContainer {
     }
 }
 
-private struct FirmwareProjectionDTO: Decodable {
-    struct ReleaseDTO: Decodable { let tag, notes: String?; let prerelease: Bool? }
-    struct PortDTO: Decodable { let path, product, manufacturer: String? }
-    let channel, currentVersion, versionStatus, phase, message, selectedPort, backupPath: String?
-    let busy, downloaded, digestVerified, deviceReserved: Bool?
-    let release: ReleaseDTO?; let ports: [PortDTO]?; let progress: Double?
+private struct FirmwareReleaseDTO: Decodable {
+    let tag, notes: String?; let prerelease: Bool?
+    private enum CodingKeys: String, CodingKey { case tag, notes, prerelease }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        tag = c.lossyOpt(.tag); notes = c.lossyOpt(.notes); prerelease = c.lossyOpt(.prerelease)
+    }
+}
 
-    func toModel() -> FirmwareSliceModel {
-        var m = FirmwareSliceModel()
-        m.channel = channel ?? "stable"
-        m.currentVersion = currentVersion
-        if let release {
-            m.releaseTag = release.tag
-            m.releaseNotes = release.notes ?? ""
-            m.prerelease = release.prerelease ?? false
-        }
-        m.versionStatus = versionStatus ?? ""
-        m.phase = phase ?? "idle"
-        m.message = message ?? m.message
-        m.busy = busy ?? false
-        m.downloaded = downloaded ?? false
-        m.digestVerified = digestVerified ?? false
-        m.deviceReserved = deviceReserved ?? false
-        m.selectedPort = selectedPort
-        m.progress = progress
-        m.backupPath = backupPath
-        m.ports = (ports ?? []).compactMap {
-            guard let path = $0.path else { return nil }
-            let product = $0.product ?? $0.manufacturer ?? "USB 设备"
-            return FirmwarePortModel(path: path, product: product, label: "\(product) · \(path)")
-        }
-        return m
+private struct FirmwarePortDTO: Decodable {
+    let path, product, manufacturer: String?
+    private enum CodingKeys: String, CodingKey { case path, product, manufacturer }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        path = c.lossyOpt(.path); product = c.lossyOpt(.product); manufacturer = c.lossyOpt(.manufacturer)
     }
 }
 

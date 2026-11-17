@@ -545,4 +545,21 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertEqual(store.v070Hardware, v070BeforeFirmwareDispatch)
         XCTAssertEqual(v070Hits.count, 0)
     }
+
+    func testFirmwareSliceModelToleratesMismatchedAndPartialFieldsWithoutResettingValidOnes() {
+        let model = FirmwareSliceModel(json: [
+            "channel": "prerelease",
+            "progress": true,
+            "downloaded": true,
+            "release": ["tag": "v0.7.0-rc.16", "prerelease": "bad"],
+            "ports": [["path": "/dev/cu.usbmodem-1", "product": 42]],
+        ])
+        XCTAssertEqual(model.channel, "prerelease")
+        XCTAssertNil(model.progress)
+        XCTAssertTrue(model.downloaded)
+        XCTAssertEqual(model.releaseTag, "v0.7.0-rc.16")
+        XCTAssertFalse(model.prerelease)
+        XCTAssertEqual(model.ports.first?.path, "/dev/cu.usbmodem-1")
+        XCTAssertEqual(model.ports.first?.product, "USB 设备")
+    }
 }

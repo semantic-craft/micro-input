@@ -1854,46 +1854,46 @@ fn desired_board_edits_leave_held_ptt_for_the_original_release() {
 fn a_forged_host_route_does_not_grant_execution_to_unknown_protected_owners() {
     let temp = TempDir::new().unwrap();
     let mut store = legacy_store(&temp);
-    for agent in [CanonicalAgent::Codex] {
-        let id = store.find_canonical_profile_id(agent).unwrap();
-        store
-            .document_store
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles
-            .get_mut(&id)
-            .unwrap()
-            .name = "Unknown protected owner".into();
-        let mut plan = store.document_store.board_layer_plan().unwrap().clone();
-        plan.replace(
-            BoardLayer::ALL[0],
-            BoardLayerRoute::HostProfile {
-                profile_id: id.clone(),
-            },
-        );
-        store
-            .document_store
-            .save_board_configuration(plan, BoardPreviewSelection::Layer(BoardLayer::ALL[0]), None)
-            .unwrap();
-        store
-            .document_store
-            .set_host_active_profile(Some(id))
-            .unwrap();
-        store.preview_board_layer(BoardLayer::ALL[0]).unwrap();
-        assert!(store.projection().sidebar.board_layers.layers[0]
-            .assignment_issue
-            .is_some());
-        assert!(store
-            .consume_physical_input_event(
-                board_test_event("AG00", mi_session::InputEventKind::Pressed),
-                Instant::now()
-            )
-            .is_none());
-        assert!(!store.ptt_controller.is_active);
-        assert!(store.dispatched_receipts().is_empty());
-    }
+    let id = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
+        .unwrap();
+    store
+        .document_store
+        .draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .get_mut(&id)
+        .unwrap()
+        .name = "Unknown protected owner".into();
+    let mut plan = store.document_store.board_layer_plan().unwrap().clone();
+    plan.replace(
+        BoardLayer::ALL[0],
+        BoardLayerRoute::HostProfile {
+            profile_id: id.clone(),
+        },
+    );
+    store
+        .document_store
+        .save_board_configuration(plan, BoardPreviewSelection::Layer(BoardLayer::ALL[0]), None)
+        .unwrap();
+    store
+        .document_store
+        .set_host_active_profile(Some(id))
+        .unwrap();
+    store.preview_board_layer(BoardLayer::ALL[0]).unwrap();
+    assert!(store.projection().sidebar.board_layers.layers[0]
+        .assignment_issue
+        .is_some());
+    assert!(store
+        .consume_physical_input_event(
+            board_test_event("AG00", mi_session::InputEventKind::Pressed),
+            Instant::now()
+        )
+        .is_none());
+    assert!(!store.ptt_controller.is_active);
+    assert!(store.dispatched_receipts().is_empty());
 }
 
 #[test]
@@ -3380,9 +3380,9 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
     assert_eq!(restored_cells[0].full_action_title, "选择 Subagent");
     assert_eq!(restored_cells[1].slot_role, "ActionKey");
     assert_eq!(restored_cells[1].full_action_title, "鼠标左键点击");
-    for slot in 2..6usize {
-        assert_eq!(restored_cells[slot].slot_role, "ActionKey");
-        assert_eq!(restored_cells[slot].keycap_id, "Blank");
+    for cell in &restored_cells[2..6] {
+        assert_eq!(cell.slot_role, "ActionKey");
+        assert_eq!(cell.keycap_id, "Blank");
     }
 
     reopened.select_and_activate_profile(&ag_pid).unwrap();

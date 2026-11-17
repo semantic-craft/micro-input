@@ -34,7 +34,7 @@ fn corrupt_document_can_recover_verified_legacy_backup_as_separate_editable_copy
     assert_eq!(preview.source_kind, "legacy-local");
     store.recover_document(&preview.token).unwrap();
     store
-        .update(|d| d.create_profile("Recovered".into()).map(|_| ()))
+        .update(|d| d.create_profile("Recovered").map(|_| ()))
         .unwrap();
     let id = store.draft.document_id.clone();
     let mut reopened = DocumentStore::default();
@@ -107,12 +107,12 @@ fn save_as_preserves_concurrent_changes_and_reopens_in_memory_draft_copy() {
     let mut store = DocumentStore::default();
     store.open(path.clone()).unwrap();
     store
-        .update(|d| d.create_profile("Mine".into()).map(|_| ()))
+        .update(|d| d.create_profile("Mine").map(|_| ()))
         .unwrap();
     let before = store.draft.document_id.clone();
     fs::write(&path, b"external version").unwrap();
     assert!(store
-        .update(|d| d.create_profile("Lost".into()).map(|_| ()))
+        .update(|d| d.create_profile("Lost").map(|_| ()))
         .is_err());
     store.save_document_as().unwrap();
     assert!(matches!(
@@ -150,7 +150,7 @@ fn stale_preview_pending_and_pointer_conflicts_never_change_memory_or_selection(
         let mut store = DocumentStore::default();
         store.open(path.clone()).unwrap();
         store
-            .update(|d| d.create_profile("Original".into()).map(|_| ()))
+            .update(|d| d.create_profile("Original").map(|_| ()))
             .unwrap();
         let original = fs::read(&path).unwrap();
         let id = store.draft.document_id.clone();

@@ -89,7 +89,7 @@
 
 旧 `mi-ffi::device_operations`、UniFFI token 接口、Swift 执行 lease 与 `DeviceOperationsTests` 属于已退役历史实现。当前工作台与运行时继续遵守以下排空与恢复不变量：准备计划绑定文档身份、修订与原字节，重连使旧计划失效；检查、恢复准备、本地修复与写入互斥；取消输入订阅不等于在途动作完成，排空未确认时不得开始写入；旧代回执不能更新新会话，未知结果不得自动重放。
 
-当前软件准备落点是 [DocumentStore](../crates/mi-model/src/storage.rs) 与 [WorkbenchStore::dispatch_editor_action](../crates/mi-core/src/store.rs)。会话应用与恢复行为由 [config_write.rs 测试](../crates/mi-session/tests/config_write.rs) 与 [six_layer_runtime.rs](../crates/mi-core/src/six_layer_runtime.rs) 覆盖；候选和备份门禁由 [apply_preparation.rs](../crates/mi-model/tests/apply_preparation.rs) 与 [inspector_and_editors.rs](../crates/mi-core/tests/inspector_and_editors.rs) 覆盖。
+当前软件准备落点是 [DocumentStore](../crates/mi-model/src/storage.rs) 与 [WorkbenchStore::dispatch_editor_action](../crates/mi-core/src/store/inspector_editor_actions.rs)。会话应用与恢复行为由 [config_write.rs 测试](../crates/mi-session/tests/config_write.rs) 与 [six_layer_runtime.rs](../crates/mi-core/src/six_layer_runtime.rs) 覆盖；候选和备份门禁由 [apply_preparation.rs](../crates/mi-model/tests/apply_preparation.rs) 与 [inspector_and_editors.rs](../crates/mi-core/tests/inspector_and_editors.rs) 覆盖。
 
 
 ## RGB 编辑与合成预览

@@ -114,14 +114,17 @@ struct PendingNavigation {
     binding: String,
 }
 
+#[cfg(test)]
+type NavigationTestWorker =
+    Box<dyn FnOnce(NavigationPlace, mpsc::SyncSender<Result<NavigationPlace, String>>)>;
+
 pub(super) struct SessionNavigation {
     pub catalog: Option<NavigationCatalog>,
     pub dispatch: NavigationDispatch,
     intents: mpsc::Receiver<PhysicalNavigationIntent>,
     pending: Option<PendingNavigation>,
     #[cfg(test)]
-    pub(super) test_worker:
-        Option<Box<dyn FnOnce(NavigationPlace, mpsc::SyncSender<Result<NavigationPlace, String>>)>>,
+    pub(super) test_worker: Option<NavigationTestWorker>,
 }
 impl SessionNavigation {
     pub(super) fn is_pending(&self) -> bool {
@@ -1022,7 +1025,10 @@ mod tests {
         reply.send(Ok(requested.clone())).unwrap();
         store.poll_session_navigation();
         store.poll_session_navigation();
-        assert_eq!(store.navigation_history.entries(), &[requested.clone()]);
+        assert_eq!(
+            store.navigation_history.entries(),
+            std::slice::from_ref(&requested)
+        );
         assert_eq!(
             store.lighting_arbiter.acknowledged_watermarks[&requested.target_id()],
             "wm1"

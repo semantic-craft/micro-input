@@ -256,7 +256,8 @@ impl MicroInput {
     }
 
     pub async fn connect(&self, id: String) -> Result<(), String> {
-        if let Some(old) = self.session.lock().unwrap().take() {
+        let old = self.session.lock().unwrap().take();
+        if let Some(old) = old {
             old.shutdown().await;
         }
         let t = self.transport.clone();
@@ -283,7 +284,8 @@ impl MicroInput {
     }
 
     pub async fn disconnect(&self) {
-        if let Some(s) = self.session.lock().unwrap().take() {
+        let s = self.session.lock().unwrap().take();
+        if let Some(s) = s {
             s.shutdown().await;
         }
     }

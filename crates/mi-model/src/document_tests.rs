@@ -315,10 +315,8 @@ fn independent_document_selection_survives_restart_without_replacing_previous_fi
     let new_id = store.draft.document_id.clone();
     store
         .update(|d| {
-            d.rename_profile(
-                &d.config.profiles[0].id.as_str().unwrap().to_owned(),
-                "Selected draft",
-            )
+            let id = d.config.profiles[0].id.as_str().unwrap().to_owned();
+            d.rename_profile(&id, "Selected draft")
         })
         .unwrap();
     let mut re = DocumentStore::default();

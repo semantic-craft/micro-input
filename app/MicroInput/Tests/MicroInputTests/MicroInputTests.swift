@@ -108,6 +108,43 @@ final class MicroInputTests: XCTestCase {
         }
         store.dispatch("editor", "CloseModal")
         XCTAssertNil(store.model.activeModal)
+
+        store.dispatch("editor", ["OpenMultiEditor": ["multi_id": NSNull()]])
+        guard case .multiEditor(let multiDraft) = store.activeModal else {
+            return XCTFail("Expected multi editor modal to open via Rust FFI")
+        }
+        XCTAssertEqual(multiDraft.branches.count, 4)
+        if let firstAct = multiDraft.availableActions.first {
+            store.dispatch("editor", [
+                "MultiSetBranch": [
+                    "branch": "Tap",
+                    "target": ["Action": ["action_id": firstAct.id]],
+                ]
+            ])
+        }
+        if let firstMac = multiDraft.availableMacros.first {
+            store.dispatch("editor", [
+                "MultiSetBranch": [
+                    "branch": "Hold",
+                    "target": ["Macro": ["action_id": firstMac.id]],
+                ]
+            ])
+        }
+        guard case .multiEditor(let updatedMulti) = store.activeModal else {
+            return XCTFail("Expected multi editor modal to remain open")
+        }
+        XCTAssertEqual(updatedMulti.branches.first(where: { $0.branch == "Tap" })?.targetKind, "Action")
+        XCTAssertEqual(updatedMulti.branches.first(where: { $0.branch == "Hold" })?.targetKind, "Macro")
+        store.dispatch("editor", "CloseModal")
+        XCTAssertNil(store.activeModal)
+
+        store.dispatch("device", "OpenApplyPreparation")
+        guard case .applyPreparation(let applyPrep) = store.activeModal else {
+            return XCTFail("Expected apply preparation modal to open via Rust FFI")
+        }
+        XCTAssertFalse(applyPrep.documentId.isEmpty)
+        store.dispatch("editor", "CloseModal")
+        XCTAssertNil(store.activeModal)
     }
 
     func testInstanceLockRejectsDuplicateUntilReleased() throws {

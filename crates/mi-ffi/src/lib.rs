@@ -43,16 +43,6 @@ fn string_to_c_char(s: String) -> *mut c_char {
     }
 }
 
-fn resolve_default_document_dir() -> PathBuf {
-    if let Ok(raw) = std::env::var("MI_DOCUMENT_DIR") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    WorkbenchStoreConfig::production().document_dir
-}
-
 #[cfg(not(feature = "qa-runner"))]
 fn dispatch_qa_from_scenario_env(scenario_raw: Option<&str>) -> i32 {
     if let Some(raw) = scenario_raw.map(str::trim).filter(|s| !s.is_empty()) {
@@ -129,7 +119,7 @@ pub unsafe extern "C" fn mi_core_acquire_instance_lock(
                 return ptr::null_mut();
             }
         };
-        let doc_dir = explicit_dir.unwrap_or_else(resolve_default_document_dir);
+        let doc_dir = explicit_dir.unwrap_or_else(WorkbenchStoreConfig::production_document_dir);
 
         match DocumentInstanceLock::acquire(&doc_dir) {
             Ok(Some(lock)) => Box::into_raw(Box::new(lock)),
@@ -408,7 +398,7 @@ mod tests {
     fn ffi_board_intent_never_activates_a_host() {
         let temporary = tempfile::tempdir().unwrap();
         let directory = temporary.path();
-        let mut store = WorkbenchStore::open_isolated(&directory).unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory).unwrap();
         store.config.isolated = false;
         store.document_store.set_host_active_profile(None).unwrap();
         let board = &store.projection().sidebar.board_layers;

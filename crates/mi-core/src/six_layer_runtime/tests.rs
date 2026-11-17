@@ -849,8 +849,10 @@ fn saved_state_roundtrips_and_rejects_unsupported_versions() {
         .unwrap()
         .legacy_native_paused_confirmation
         .is_some());
-    let mut state = SavedSixLayerState::default();
-    state.legacy_native_paused_confirmation = Some(true);
+    let state = SavedSixLayerState {
+        legacy_native_paused_confirmation: Some(true),
+        ..Default::default()
+    };
     save(&path, &state).unwrap();
     assert!(load(&path)
         .unwrap()
@@ -923,13 +925,9 @@ fn saved_state_migrates_antigravity_v160_top_six_and_mouse_joystick_to_session_a
         adapter: "host".into(),
         command: "mouse-click:left".into(),
     });
-    for slot in 2..6 {
-        ag_host.actions[slot] = None;
-    }
+    ag_host.actions[2..6].fill(None);
     ag_host.joystick_mode = Some("MOUSE".into());
-    for slot in 16..20 {
-        ag_host.actions[slot] = None;
-    }
+    ag_host.actions[16..20].fill(None);
 
     let dir = tempfile::tempdir().unwrap();
     let mut saved = SavedSixLayerState {
@@ -971,9 +969,9 @@ fn saved_state_migrates_antigravity_v160_top_six_and_mouse_joystick_to_session_a
         .iter()
         .find(|h| h.profile_id == ag_pid)
         .unwrap();
-    for slot in 0..6 {
+    for (slot, action) in migrated_ag.actions.iter().enumerate().take(6) {
         assert_eq!(
-            migrated_ag.actions[slot],
+            *action,
             Some(ResolvedHostAction::AgentCommand {
                 adapter: "four-app".into(),
                 command: format!("slot-open:{slot}"),

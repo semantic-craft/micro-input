@@ -542,6 +542,7 @@ async fn original_files_unchanged(
     }
     Ok(())
 }
+#[allow(clippy::too_many_arguments)]
 async fn h1_steps(
     wire: &mut Wire,
     transport: &dyn HidTransport,

@@ -255,7 +255,7 @@ mod tests {
 
         history.visit(herdr.clone());
         history.visit(herdr.clone());
-        assert_eq!(history.entries(), &[herdr.clone()]);
+        assert_eq!(history.entries(), std::slice::from_ref(&herdr));
 
         history.visit(other_app.clone());
         history.visit(codex.clone());

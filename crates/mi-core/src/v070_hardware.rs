@@ -638,9 +638,11 @@ mod tests {
             ParsedV070Action::DeviceCommand(ValidatedV070DeviceCommand::ApplyMouseConfig { .. })
         ));
 
-        let mut legacy_fast_base = MouseConfig::default();
-        legacy_fast_base.stick_speed = 24;
-        legacy_fast_base.stick_regulator = 8;
+        let legacy_fast_base = MouseConfig {
+            stick_speed: 24,
+            stick_regulator: 8,
+            ..Default::default()
+        };
         let normalized_mouse = parse_v070_action(
             V070HardwareAction::ApplyMouseConfig {
                 move_delta: 14,

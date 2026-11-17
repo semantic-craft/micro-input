@@ -604,27 +604,26 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         .profiles
         .iter()
         .any(|p| p.name.contains("演示") || p.name.contains("示例")));
-    for name in ["Codex"] {
-        let pid = draft
-            .document
-            .editable
-            .graph
-            .profiles
-            .iter()
-            .find(|(_, p)| p.name == name)
-            .unwrap()
-            .0
-            .clone();
-        let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
-        assert!(
-            draft.document.is_protected_oai_layer(&lid),
-            "{name} default layer must be a protected KV_OAI_* layer"
-        );
-        assert!(
-            resolve_host_action(&draft.document, Some(&pid), "AG00", true).is_none(),
-            "{name} is controlled natively by its client app, not Micro Input host actions"
-        );
-    }
+    let name = "Codex";
+    let pid = draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, p)| p.name == name)
+        .unwrap()
+        .0
+        .clone();
+    let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+    assert!(
+        draft.document.is_protected_oai_layer(&lid),
+        "{name} default layer must be a protected KV_OAI_* layer"
+    );
+    assert!(
+        resolve_host_action(&draft.document, Some(&pid), "AG00", true).is_none(),
+        "{name} is controlled natively by its client app, not Micro Input host actions"
+    );
     for (name, adapter) in [("DeepSeek Coder (DSH)", "dsh-desktop")] {
         let pid = draft
             .document
