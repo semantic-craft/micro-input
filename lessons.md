@@ -1,5 +1,11 @@
 # 项目教训
 
+## 预设迁移须覆盖真实残留槽位并先核查 USB 传输与硬件死区
+
+- 起因与后果：将 Antigravity 从全层 `MOUSE` 改回 `RADIAL` 侧栏控制后，用户实机仍出现鼠标到处晃。排查真实环境发现三点叠加：其一，日常 `workbench.json` 中 Antigravity 的 `joystick_mode` 为 `"mouse"` 但 `logical-16..19` 仍残留 `agent-model-picker-*`，迁移谓词仅匹配全 `None` 导致迁移跳过；其二，键盘当时仅通过 `Bluetooth Low Energy` 连接（`0xFF00` 写 Flash 仅支持 `TransportHint::Usb`），硬件层仍停留在旧版全层 `MOUSE`；其三，设备 NVS 的 `joystick.deadzone` 为 `0.07`（低于出厂 `0.15`）配合 `stick_speed = 24` 放大静止微漂，且 Antigravity 新建对话页仅渲染左侧 `Toggle Sidebar`、进入会话页才渲染右侧 `Toggle Side Panel`。
+- 修复：`antigravity_layer_needs_side_panel_joystick_migration` 与 `SavedSixLayerState::migrate_saved_encoder_defaults` 同步兼容 `mouse` 模式下 `16..=19` 残留 `agent-model-picker-*`（同时保留显式 `host-mouse-move-*` 与用户自定义动作）；插线后执行 `six_layer_runtime::apply` 将第 2 层刷为 `RADIAL`（`KC_F17..KC_F20`）并将设备与源码兜底默认 `joystick.deadzone` 统一恢复为出厂 `0.15`。
+- 验证点：`crates/mi-model/tests/preset.rs` 覆盖 `mouse` + `agent-model-picker-*` 迁移及 `host-mouse-move-*` 保留；实机重启 `/Applications/Micro Input.app` 后核对真实 `workbench.json` / `six-layer-runtime.json` 就地迁移，并通过 USB `read_config_snapshot` 与 `read_joystick_deadzone` 读回确认第 2 层为 `RADIAL`、死区 `0.15`。Seen 1x（2026-11-17）。
+
 ## 时序门禁使用独立测试进程
 
 - 起因与后果：方案切换的 2 毫秒检查与合成硬件用例共用进程内的隔离运行时，整组执行时出现超限；未改动主线的同组对照也失败，单独执行则通过。

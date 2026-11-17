@@ -101,7 +101,14 @@ description: End-to-end acceptance and self-verification skill for Micro Input (
    - 确认 `$QA_RUN_DIR/Micro Input QA.app` 已删除，且 `$QA_RUN_DIR/evidence/launcher.json` 中 `app_bundle_removed == true`；
    - 确认 `$QA_RUN_DIR/evidence/audit.jsonl` 与 `result.json` 完整保留。
 
-## 6. Helpers
+## 6. 日常状态迁移与实机配置交付检查（涉及预设或六层模式改动时必做）
+
+1. **真实持久化迁移核验**：更新 `/Applications/Micro Input.app` 并启动后，检查 `~/Library/Application Support/MicroInput/workbench.json` 与 `six-layer-runtime.json`，确认历史残留槽位（如 `mouse` 模式下 `logical-16..19` 的 `agent-model-picker-*`）已真实就地迁移。
+2. **传输通道与硬件读回核验**：
+   - 先用 `ioreg -p IOUSB -l` 确认 `303A:8298` 是否走 USB（若仅出现在 `IOHIDDevice` 的 `Bluetooth Low Energy` 下，Vendor `0xFF00` 无法写 Flash，须先插 USB 线）。
+   - 写入六层配置后，通过 `read_config_snapshot` 与 `read_joystick_deadzone` 读回各层 `joystick` 类型（`MOUSE` / `RADIAL`）及防漂移死区（默认参考 `0.15`），确认与预期一致后才重启 `/Applications/Micro Input.app`。
+
+## 7. Helpers
 
 - **一键全量门禁**：`scripts/check`（依次运行 Python 启动器测试、`cargo fmt`、Rust 全工作区测试、C-ABI + 原生 SwiftUI 应用包构建、SwiftPM 测试、协议只读与 `UNKNOWN` 边界检查）。
 - **启动器回归测试**：`python3 -B -m unittest discover -s scripts/tests -p 'test_*launcher.py'`。
