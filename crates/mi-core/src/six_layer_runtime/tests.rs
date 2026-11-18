@@ -3558,3 +3558,68 @@ pub(crate) fn test_b64_decode(raw: &str) -> Vec<u8> {
     }
     out
 }
+
+#[cfg(unix)]
+#[test]
+fn runtime_state_load_and_backup_path_containment_enforce_private_fs_boundaries() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let temp = tempfile::tempdir().unwrap();
+    let doc_dir = temp.path().join("doc");
+    let external_dir = temp.path().join("external");
+    fs::create_dir_all(&doc_dir).unwrap();
+    fs::create_dir_all(&external_dir).unwrap();
+    fs::set_permissions(&doc_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&external_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Missing file returns default state.
+    let state_path = doc_dir.join("six-layer-runtime.json");
+    assert_eq!(load(&state_path).unwrap().version, 1);
+
+    // Symlinked six-layer-runtime.json is rejected.
+    let target = doc_dir.join("real.json");
+    fs::write(&target, br#"{"version":1}"#).unwrap();
+    symlink(&target, &state_path).unwrap();
+    assert!(load(&state_path).is_err());
+    fs::remove_file(&state_path).unwrap();
+
+    // Oversized six-layer-runtime.json is rejected before reading into heap.
+    let big = fs::File::create(&state_path).unwrap();
+    big.set_len(2 * 1024 * 1024).unwrap();
+    drop(big);
+    assert!(load(&state_path).is_err());
+    fs::remove_file(&state_path).unwrap();
+
+    // World-writable parent dir is rejected by load.
+    fs::set_permissions(&doc_dir, fs::Permissions::from_mode(0o777)).unwrap();
+    fs::write(&state_path, br#"{"version":1}"#).unwrap();
+    assert!(load(&state_path).is_err());
+    fs::set_permissions(&doc_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(load(&state_path).unwrap().version, 1);
+
+    // Backup containment accepts private backup inside document_dir.
+    let valid_backup = doc_dir.join("six-layer-recovery/b1");
+    fs::create_dir_all(&valid_backup).unwrap();
+    fs::set_permissions(
+        doc_dir.join("six-layer-recovery"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::set_permissions(&valid_backup, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(lifecycle::validate_backup_within_document_dir(&doc_dir, &valid_backup).is_ok());
+
+    // Backup outside document_dir is rejected.
+    let ext_backup = external_dir.join("b2");
+    fs::create_dir_all(&ext_backup).unwrap();
+    fs::set_permissions(&ext_backup, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(lifecycle::validate_backup_within_document_dir(&doc_dir, &ext_backup).is_err());
+
+    // Traversal escaping document_dir is rejected.
+    let traversal = doc_dir.join("../external/b2");
+    assert!(lifecycle::validate_backup_within_document_dir(&doc_dir, &traversal).is_err());
+
+    // Symlinked backup inside document_dir pointing outside is rejected.
+    let sym_backup = doc_dir.join("six-layer-recovery/sym");
+    symlink(&ext_backup, &sym_backup).unwrap();
+    assert!(lifecycle::validate_backup_within_document_dir(&doc_dir, &sym_backup).is_err());
+}

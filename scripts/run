@@ -131,6 +131,27 @@ def _prune_stale_qa_runs(
     return removed
 
 
+def _path_is_within(candidate: str, base: str) -> bool:
+    if sys.platform == 'darwin':
+        candidate = candidate.lower()
+        base = base.lower()
+    base = base.rstrip('/')
+    return candidate == base or candidate.startswith(base + '/')
+
+
+def _is_inside_production_document_dir(path: pathlib.Path) -> bool:
+    prod = pathlib.Path.home() / 'Library/Application Support/MicroInput'
+    prod_bases = (
+        os.path.normpath(os.path.abspath(str(prod))),
+        str(prod.resolve()),
+    )
+    candidates = (
+        os.path.normpath(os.path.abspath(str(path))),
+        str(path.resolve()),
+    )
+    return any(_path_is_within(cand, base) for cand in candidates for base in prod_bases)
+
+
 def _validate_qa_dir(path: pathlib.Path) -> pathlib.Path:
     resolved = path.resolve()
     raw = str(path)
@@ -139,6 +160,9 @@ def _validate_qa_dir(path: pathlib.Path) -> pathlib.Path:
         if candidate == '/tmp' or candidate.startswith('/tmp/') or candidate == '/private/tmp' or candidate.startswith('/private/tmp/'):
             print('Refusing to run QA app in /tmp or /private/tmp; use a controlled directory.', file=sys.stderr)
             raise SystemExit(2)
+    if _is_inside_production_document_dir(path):
+        print('Refusing to target production document directory in QA mode.', file=sys.stderr)
+        raise SystemExit(2)
     return resolved
 
 
@@ -283,6 +307,10 @@ def main() -> int:
             lock_handle.truncate()
             lock_handle.write(f'{os.getpid()}\n')
             lock_handle.flush()
+
+        diag_override = run_env.get('MI_DIAGNOSTIC_EVIDENCE_PATH', '').strip()
+        if diag_override:
+            _validate_qa_dir(pathlib.Path(diag_override))
 
         override = os.environ.get('MI_QA_RUN_DIR')
         if override:

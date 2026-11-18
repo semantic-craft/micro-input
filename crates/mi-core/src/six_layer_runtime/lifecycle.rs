@@ -502,12 +502,27 @@ fn wait_ready(
     }
 }
 
+pub(crate) fn validate_backup_within_document_dir(
+    document_dir: &Path,
+    backup: &Path,
+) -> Result<std::path::PathBuf, String> {
+    let verified_doc = mi_model::private_fs::verify_existing_private_dir(document_dir)
+        .map_err(|err| format!("文档目录不安全或不可用：{err:?}"))?;
+    let verified_backup = mi_model::private_fs::verify_existing_private_dir(backup)
+        .map_err(|err| format!("六层备份目录不安全或不可用：{err:?}"))?;
+    if !verified_backup.starts_with(&verified_doc) || verified_backup == verified_doc {
+        return Err("六层备份路径超出当前文档目录，拒绝恢复".into());
+    }
+    Ok(verified_backup)
+}
+
 pub async fn restore(
     document_dir: &Path,
     mut saved: SavedSixLayerState,
     transport: Arc<MacTransport>,
 ) -> Result<(), String> {
     let installation = saved.installation.clone().ok_or("没有可恢复的六层记录")?;
+    let verified_backup = validate_backup_within_document_dir(document_dir, &installation.backup)?;
     let preferred_serial = read_preferred_serial(document_dir);
     let target = mi_transport::discover_target_keyboard_preferred(preferred_serial.as_deref())
         .map_err(|e| e.to_string())?;
@@ -517,7 +532,7 @@ pub async fn restore(
     let (session, _) = connect(transport.as_ref(), &target)?;
     with_verification_session(&session, async {
         session
-            .restore_six_layer_backup(&installation.backup)
+            .restore_six_layer_backup(&verified_backup)
             .await
             .map_err(|e| format!("{e}；保留吞键规则"))?;
         installation.config.restore_owned(&target)?;

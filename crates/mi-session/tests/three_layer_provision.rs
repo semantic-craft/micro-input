@@ -527,6 +527,24 @@ async fn six_layer_upgrade_mid_write_failure_recovers_original_via_previous_plan
 
     std::fs::write(backup.join("keymap.json"), SIX_SOURCE).unwrap();
     std::fs::write(backup.join("previous-planned-keymap.json"), &v1_bytes).unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(backup.join("manifest.json")).unwrap()).unwrap();
+    let sha256_hex = |bytes: &[u8]| -> String {
+        let digest = sha2::Sha256::digest(bytes);
+        let mut out = String::with_capacity(digest.len() * 2);
+        for b in digest {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "{b:02x}");
+        }
+        out
+    };
+    manifest["keymap_sha256"] = Value::String(sha256_hex(SIX_SOURCE));
+    manifest["previous_planned_keymap_sha256"] = Value::String(sha256_hex(&v1_bytes));
+    std::fs::write(
+        backup.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
 
     let (rec_link, mut rec_reqs) = MockLink::new();
     let rec_inject = rec_link.inject.clone();
@@ -849,4 +867,189 @@ async fn prepare_six_layer_write_with_layer_modes_compiles_mixed_radial_and_mous
     session_063.shutdown().await;
     drop(session_063);
     let _ = worker_063.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn restore_backup_rejects_symlinks_fifos_oversized_files_tampered_manifest_and_unsafe_dirs() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    const SIX_SOURCE: &[u8] =
+        include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+    let compiled_six = mi_model::apply::compile_six_layer_profile_for_firmware(
+        SIX_SOURCE,
+        Some(SMART),
+        Some("0.7.0-rc.16"),
+        Some("mouse"),
+    )
+    .unwrap();
+    let ThreeLayerProvision::Write {
+        keymap: compiled_three,
+        ..
+    } = compile_three_layer_profile(KEYMAP, Some(SMART)).unwrap()
+    else {
+        panic!("expected 3-layer write");
+    };
+
+    let (session, worker) = spawn_mock_device(compiled_six.keymap.clone(), true, 1);
+
+    // 1. Symlinked keymap.json is rejected.
+    let sym_dir = tempfile::tempdir().unwrap();
+    let alt = sym_dir.path().join("alt-keymap.json");
+    std::fs::write(&alt, SIX_SOURCE).unwrap();
+    symlink(&alt, sym_dir.path().join("keymap.json")).unwrap();
+    std::fs::write(
+        sym_dir.path().join("planned-keymap.json"),
+        &compiled_six.keymap,
+    )
+    .unwrap();
+    std::fs::write(sym_dir.path().join("smart_actions.json"), SMART).unwrap();
+    assert!(session
+        .restore_six_layer_backup(sym_dir.path())
+        .await
+        .is_err());
+
+    // 2. Named FIFO at keymap.json is rejected non-blockingly.
+    let fifo_dir = tempfile::tempdir().unwrap();
+    let fifo_keymap = fifo_dir.path().join("keymap.json");
+    let mkfifo_status = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&fifo_keymap)
+        .status()
+        .unwrap();
+    assert!(mkfifo_status.success());
+    std::fs::write(
+        fifo_dir.path().join("planned-keymap.json"),
+        &compiled_six.keymap,
+    )
+    .unwrap();
+    assert!(session
+        .restore_six_layer_backup(fifo_dir.path())
+        .await
+        .is_err());
+
+    // 3. Oversized (> 4 MiB) keymap.json is rejected before reading into heap.
+    let big_dir = tempfile::tempdir().unwrap();
+    let big_file = std::fs::File::create(big_dir.path().join("keymap.json")).unwrap();
+    big_file
+        .set_len((mi_proto::mutation::MAX_FILE_BYTES as u64) + 1)
+        .unwrap();
+    drop(big_file);
+    std::fs::write(
+        big_dir.path().join("planned-keymap.json"),
+        &compiled_six.keymap,
+    )
+    .unwrap();
+    let err = session
+        .restore_six_layer_backup(big_dir.path())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("超过大小上限"), "{err}");
+
+    // 4. Tampered manifest.json SHA-256 is rejected.
+    let manifest_dir = tempfile::tempdir().unwrap();
+    std::fs::write(manifest_dir.path().join("keymap.json"), SIX_SOURCE).unwrap();
+    std::fs::write(
+        manifest_dir.path().join("planned-keymap.json"),
+        &compiled_six.keymap,
+    )
+    .unwrap();
+    std::fs::write(manifest_dir.path().join("smart_actions.json"), SMART).unwrap();
+    std::fs::write(
+        manifest_dir.path().join("manifest.json"),
+        serde_json::to_vec(&json!({
+            "keymap_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "planned_keymap_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let err = session
+        .restore_six_layer_backup(manifest_dir.path())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("keymap_sha256"), "{err}");
+
+    // 4b. Tampered keymap.json cannot bypass keymap_sha256 even if previous-planned-keymap.json
+    // matches manifest.keymap_sha256 and previous_planned_keymap_sha256 is absent.
+    let sha256_hex = |bytes: &[u8]| -> String {
+        let digest = sha2::Sha256::digest(bytes);
+        let mut out = String::with_capacity(digest.len() * 2);
+        for b in digest {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "{b:02x}");
+        }
+        out
+    };
+    let prev_bypass_dir = tempfile::tempdir().unwrap();
+    std::fs::write(prev_bypass_dir.path().join("keymap.json"), KEYMAP).unwrap();
+    std::fs::write(
+        prev_bypass_dir.path().join("planned-keymap.json"),
+        &compiled_six.keymap,
+    )
+    .unwrap();
+    std::fs::write(
+        prev_bypass_dir.path().join("previous-planned-keymap.json"),
+        &compiled_six.keymap,
+    )
+    .unwrap();
+    std::fs::write(prev_bypass_dir.path().join("smart_actions.json"), SMART).unwrap();
+    std::fs::write(
+        prev_bypass_dir.path().join("manifest.json"),
+        serde_json::to_vec(&json!({
+            "keymap_sha256": sha256_hex(&compiled_six.keymap),
+            "planned_keymap_sha256": sha256_hex(&compiled_six.keymap),
+            "smart_actions_sha256": sha256_hex(SMART),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let err = session
+        .restore_six_layer_backup(prev_bypass_dir.path())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("keymap_sha256"), "{err}");
+
+    // 5. Malformed original keymap.json is rejected before staging.
+    let bad_schema_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        bad_schema_dir.path().join("keymap.json"),
+        b"{not valid json",
+    )
+    .unwrap();
+    std::fs::write(
+        bad_schema_dir.path().join("planned-keymap.json"),
+        &compiled_three,
+    )
+    .unwrap();
+    std::fs::write(bad_schema_dir.path().join("smart_actions.json"), SMART).unwrap();
+    let err = session
+        .restore_three_layer_backup(bad_schema_dir.path())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("原始恢复键位校验失败"), "{err}");
+
+    // 6. World-writable backup directory is rejected by verify_existing_private_dir.
+    let loose_dir = tempfile::tempdir().unwrap();
+    let loose_sub = loose_dir.path().join("loose");
+    std::fs::create_dir_all(&loose_sub).unwrap();
+    std::fs::write(loose_sub.join("keymap.json"), KEYMAP).unwrap();
+    std::fs::write(loose_sub.join("planned-keymap.json"), &compiled_three).unwrap();
+    std::fs::set_permissions(&loose_sub, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(session
+        .restore_three_layer_backup(&loose_sub)
+        .await
+        .is_err());
+    std::fs::set_permissions(&loose_sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    session.shutdown().await;
+    drop(session);
+    let (_keymap, commits) = worker.await.unwrap();
+    assert_eq!(
+        commits, 0,
+        "no rejected restore may ever write to the device"
+    );
 }

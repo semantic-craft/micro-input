@@ -1,11 +1,20 @@
 use std::collections::HashMap;
 use std::env;
-use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::ffi::CString;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+use std::thread;
 
 pub const OTHER_APPS_WILDCARD_BUNDLE_ID: &str = "*";
 const MAX_INFO_PLIST_BYTES: u64 = 1024 * 1024;
@@ -176,10 +185,153 @@ fn scan_applications_dir(dir: &Path, target_bundle_id: &str) -> Option<AppBundle
     None
 }
 
-fn read_plist_xml_bounded(plist_path: &Path) -> Option<String> {
-    let file = fs::File::open(plist_path).ok()?;
+#[cfg(unix)]
+fn is_trusted_bundle_owner(uid: u32) -> bool {
+    let current = unsafe { libc::getuid() };
+    uid == current || uid == 0
+}
+
+#[cfg(unix)]
+fn verify_trusted_dir_fd(fd: OwnedFd) -> Option<OwnedFd> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return None;
+    }
+    if (st.st_mode as u32 & libc::S_IFMT as u32) != libc::S_IFDIR as u32 {
+        return None;
+    }
+    if !is_trusted_bundle_owner(st.st_uid) || (st.st_mode as u32 & 0o002) != 0 {
+        return None;
+    }
+    Some(fd)
+}
+
+#[cfg(unix)]
+fn open_trusted_dir_fd(path: &Path) -> Option<OwnedFd> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let raw_fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw_fd < 0 {
+        return None;
+    }
+    verify_trusted_dir_fd(unsafe { OwnedFd::from_raw_fd(raw_fd) })
+}
+
+#[cfg(unix)]
+fn open_trusted_dir_fd_at(parent: &OwnedFd, name: &str) -> Option<OwnedFd> {
+    let c_name = CString::new(name.as_bytes()).ok()?;
+    let raw_fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            c_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw_fd < 0 {
+        return None;
+    }
+    verify_trusted_dir_fd(unsafe { OwnedFd::from_raw_fd(raw_fd) })
+}
+
+#[cfg(not(unix))]
+fn is_trusted_dir_entry(path: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    !meta.file_type().is_symlink() && meta.file_type().is_dir()
+}
+
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn path_is_under_users_shared(path: &Path) -> bool {
+    let mut comps = path.components();
+    let Some(Component::RootDir) = comps.next() else {
+        return false;
+    };
+    let Some(Component::Normal(first)) = comps.next() else {
+        return false;
+    };
+    let Some(Component::Normal(second)) = comps.next() else {
+        return false;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        first.to_string_lossy().eq_ignore_ascii_case("Users")
+            && second.to_string_lossy().eq_ignore_ascii_case("Shared")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        first == "Users" && second == "Shared"
+    }
+}
+
+fn is_disallowed_mdfind_root(path: &Path) -> bool {
+    let normalized = normalize_lexical(path);
+    if path_is_under_users_shared(&normalized) {
+        return true;
+    }
+    if let Ok(canonical) = fs::canonicalize(path) {
+        if path_is_under_users_shared(&canonical) {
+            return true;
+        }
+    }
+    false
+}
+
+fn convert_binary_plist_xml_bounded(bplist_bytes: Vec<u8>) -> Option<String> {
+    let mut child = Command::new("/usr/bin/plutil")
+        .args(["-convert", "xml1", "-o", "-", "--", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let writer = thread::spawn(move || {
+        let _ = stdin.write_all(&bplist_bytes);
+    });
+    let mut xml_bytes = Vec::new();
+    let read_res = stdout
+        .take(MAX_INFO_PLIST_BYTES + 1)
+        .read_to_end(&mut xml_bytes);
+    if read_res.is_err() || xml_bytes.len() as u64 > MAX_INFO_PLIST_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = writer.join();
+        return None;
+    }
+    let status = child.wait().ok()?;
+    let _ = writer.join();
+    if !status.success() {
+        return None;
+    }
+    String::from_utf8(xml_bytes).ok()
+}
+
+fn read_plist_xml_bounded_file(file: fs::File) -> Option<String> {
     let meta = file.metadata().ok()?;
     if !meta.file_type().is_file() || meta.len() > MAX_INFO_PLIST_BYTES {
+        return None;
+    }
+    #[cfg(unix)]
+    if !is_trusted_bundle_owner(meta.uid()) {
         return None;
     }
     let mut bytes = Vec::with_capacity(meta.len() as usize);
@@ -190,26 +342,60 @@ fn read_plist_xml_bounded(plist_path: &Path) -> Option<String> {
         return None;
     }
     if bytes.starts_with(b"bplist") {
-        let output = Command::new("/usr/bin/plutil")
-            .args(["-convert", "xml1", "-o", "-", "--"])
-            .arg(plist_path)
-            .stdin(Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() || output.stdout.len() as u64 > MAX_INFO_PLIST_BYTES {
-            return None;
-        }
-        return String::from_utf8(output.stdout).ok();
+        return convert_binary_plist_xml_bounded(bytes);
     }
     String::from_utf8(bytes).ok()
+}
+
+#[cfg(unix)]
+fn read_plist_xml_bounded_at(contents_fd: &OwnedFd) -> Option<String> {
+    let c_name = CString::new("Info.plist").ok()?;
+    let raw_fd = unsafe {
+        libc::openat(
+            contents_fd.as_raw_fd(),
+            c_name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if raw_fd < 0 {
+        return None;
+    }
+    let file = unsafe { fs::File::from_raw_fd(raw_fd) };
+    read_plist_xml_bounded_file(file)
+}
+
+#[cfg_attr(unix, allow(dead_code))]
+fn read_plist_xml_bounded(plist_path: &Path) -> Option<String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    let file = options.open(plist_path).ok()?;
+    read_plist_xml_bounded_file(file)
 }
 
 fn inspect_app_bundle(app_path: &Path, target_bundle_id: &str) -> Option<AppBundleInfo> {
     if app_path.extension().and_then(|s| s.to_str()) != Some("app") {
         return None;
     }
-    let plist_path = app_path.join("Contents/Info.plist");
-    let raw = read_plist_xml_bounded(&plist_path)?;
+    #[cfg(unix)]
+    let (raw, icon_cached) = {
+        let app_fd = open_trusted_dir_fd(app_path)?;
+        let contents_fd = open_trusted_dir_fd_at(&app_fd, "Contents")?;
+        let raw = read_plist_xml_bounded_at(&contents_fd)?;
+        let icon_cached = open_trusted_dir_fd_at(&contents_fd, "Resources").is_some();
+        (raw, icon_cached)
+    };
+    #[cfg(not(unix))]
+    let (raw, icon_cached) = {
+        if !is_trusted_dir_entry(app_path) || !is_trusted_dir_entry(&app_path.join("Contents")) {
+            return None;
+        }
+        let plist_path = app_path.join("Contents/Info.plist");
+        let raw = read_plist_xml_bounded(&plist_path)?;
+        let icon_cached = app_path.join("Contents/Resources").is_dir();
+        (raw, icon_cached)
+    };
     let id = extract_plist_string(&raw, "CFBundleIdentifier")?;
     if id != target_bundle_id {
         return None;
@@ -222,7 +408,6 @@ fn inspect_app_bundle(app_path: &Path, target_bundle_id: &str) -> Option<AppBund
                 .and_then(|s| s.to_str())
                 .map(str::to_string)
         });
-    let icon_cached = app_path.join("Contents/Resources").is_dir();
     Some(AppBundleInfo {
         bundle_id: target_bundle_id.to_string(),
         installed: true,
@@ -249,7 +434,13 @@ fn verify_mdfind_candidates(stdout: &str, bundle_id: &str) -> Option<AppBundleIn
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .take(16)
-        .find_map(|line| inspect_app_bundle(Path::new(line), bundle_id))
+        .find_map(|line| {
+            let path = Path::new(line);
+            if is_disallowed_mdfind_root(path) {
+                return None;
+            }
+            inspect_app_bundle(path, bundle_id)
+        })
 }
 
 fn resolve_via_mdfind(bundle_id: &str) -> Option<AppBundleInfo> {
@@ -430,5 +621,97 @@ mod tests {
 
         cache.clear();
         assert_eq!(cache.generation(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_app_bundle_rejects_fifo_symlinks_world_writable_and_bplist_expansion_bomb() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = TempDir::new().unwrap();
+
+        // 1. FIFO at Contents/Info.plist must return None non-blockingly (O_NONBLOCK).
+        let fifo_app = temp.path().join("Fifo.app");
+        let fifo_contents = fifo_app.join("Contents");
+        fs::create_dir_all(&fifo_contents).unwrap();
+        let fifo_plist = fifo_contents.join("Info.plist");
+        let c_fifo = CString::new(fifo_plist.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        assert!(read_plist_xml_bounded(&fifo_plist).is_none());
+        assert!(inspect_app_bundle(&fifo_app, "com.example.fifo").is_none());
+
+        // 2. Symlink at Contents/Info.plist (pointing to valid plist or FIFO) must be rejected.
+        let valid_app = write_test_bundle(temp.path(), "Valid.app", "com.example.valid", "Valid");
+        let sym_plist_app = temp.path().join("SymPlist.app");
+        fs::create_dir_all(sym_plist_app.join("Contents")).unwrap();
+        symlink(
+            valid_app.join("Contents/Info.plist"),
+            sym_plist_app.join("Contents/Info.plist"),
+        )
+        .unwrap();
+        assert!(inspect_app_bundle(&sym_plist_app, "com.example.valid").is_none());
+
+        // 3. Symlinked .app bundle must be rejected.
+        let sym_app = temp.path().join("SymBundle.app");
+        symlink(&valid_app, &sym_app).unwrap();
+        assert!(inspect_app_bundle(&sym_app, "com.example.valid").is_none());
+
+        // 4. World-writable .app bundle must be rejected.
+        let ww_app = write_test_bundle(temp.path(), "WorldWritable.app", "com.example.ww", "WW");
+        fs::set_permissions(&ww_app, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(inspect_app_bundle(&ww_app, "com.example.ww").is_none());
+        fs::set_permissions(&ww_app, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // 5. Small binary plist whose XML expansion exceeds MAX_INFO_PLIST_BYTES must be rejected
+        // via bounded plutil stdout reading without buffering unbounded output.
+        let bomb_app = temp.path().join("Bomb.app");
+        let bomb_contents = bomb_app.join("Contents");
+        fs::create_dir_all(&bomb_contents).unwrap();
+        let bomb_plist = bomb_contents.join("Info.plist");
+        // Build an XML plist with many repeated <string>x</string> entries (compact in bplist,
+        // > 1 MiB when expanded to XML).
+        let mut xml = String::from(
+            r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.bomb</string><key>Items</key><array>"#,
+        );
+        for _ in 0..80_000 {
+            xml.push_str("<string>x</string>");
+        }
+        xml.push_str("</array></dict></plist>");
+        fs::write(&bomb_plist, &xml).unwrap();
+        let status = Command::new("/usr/bin/plutil")
+            .args(["-convert", "binary1", "--"])
+            .arg(&bomb_plist)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let bplist_size = fs::metadata(&bomb_plist).unwrap().len();
+        assert!(
+            bplist_size < MAX_INFO_PLIST_BYTES,
+            "deduplicated bplist should be compact (< 1 MiB), got {bplist_size}"
+        );
+        assert!(read_plist_xml_bounded(&bomb_plist).is_none());
+        assert!(inspect_app_bundle(&bomb_app, "com.example.bomb").is_none());
+
+        // 6. Disallowed /Users/Shared root (including case variants and lexical traversal) is rejected.
+        assert!(is_disallowed_mdfind_root(Path::new(
+            "/Users/Shared/Decoy.app"
+        )));
+        assert!(is_disallowed_mdfind_root(Path::new(
+            "/Users/Shared/../Shared/Decoy.app"
+        )));
+        #[cfg(target_os = "macos")]
+        assert!(is_disallowed_mdfind_root(Path::new(
+            "/users/shared/Decoy.app"
+        )));
+        assert!(
+            verify_mdfind_candidates("/Users/Shared/Decoy.app\n", "com.example.decoy").is_none()
+        );
+        #[cfg(target_os = "macos")]
+        assert!(
+            verify_mdfind_candidates("/users/shared/Decoy.app\n", "com.example.decoy").is_none()
+        );
     }
 }

@@ -164,10 +164,13 @@ fn is_inside_production_document_dir(path: &Path) -> bool {
     let candidate_lex = normalize_lexical(&candidate_anchored);
     let prod_canon = canonicalize_with_tail(&prod_anchored);
     let candidate_canon = canonicalize_with_tail(&candidate_anchored);
+    let candidate_lex_canon = canonicalize_with_tail(&candidate_lex);
     path_starts_with_components(&candidate_lex, &prod_lex)
         || path_starts_with_components(&candidate_canon, &prod_canon)
         || path_starts_with_components(&candidate_canon, &prod_lex)
         || path_starts_with_components(&candidate_lex, &prod_canon)
+        || path_starts_with_components(&candidate_lex_canon, &prod_canon)
+        || path_starts_with_components(&candidate_lex_canon, &prod_lex)
 }
 
 impl QaLaunchEnv {
@@ -233,6 +236,35 @@ impl QaLaunchEnv {
                 .as_ref()
                 .map(|d| d.join("evidence/diagnostic-report.json"))
         });
+        if scenario.is_some() {
+            if audit_log_path
+                .as_deref()
+                .is_some_and(is_inside_production_document_dir)
+            {
+                return Err(
+                    "synthetic QA scenario cannot target production document directory via MI_HOST_AUDIT_LOG"
+                        .to_string(),
+                );
+            }
+            if run_dir
+                .as_deref()
+                .is_some_and(is_inside_production_document_dir)
+            {
+                return Err(
+                    "synthetic QA scenario cannot target production document directory via MI_QA_RUN_DIR"
+                        .to_string(),
+                );
+            }
+            if diagnostic_evidence_path
+                .as_deref()
+                .is_some_and(is_inside_production_document_dir)
+            {
+                return Err(
+                    "synthetic QA scenario cannot target production document directory via MI_DIAGNOSTIC_EVIDENCE_PATH"
+                        .to_string(),
+                );
+            }
+        }
         Ok(Self {
             document_dir,
             audit_log_path,
@@ -461,5 +493,70 @@ mod tests {
         fs::create_dir_all(&prod_dir).unwrap();
         #[cfg(unix)]
         run_probe(temp.path(), &link_to_prod.join("nonexistent-child"));
+        #[cfg(unix)]
+        run_probe(
+            temp.path(),
+            &temp
+                .path()
+                .join("nonexistent-dir/../alias_prod/report.json"),
+        );
+    }
+
+    #[test]
+    fn qa_launch_env_rejects_production_dir_in_run_dir_audit_log_and_diagnostic_path() {
+        let Some(home) = env::var_os("HOME").filter(|h| !h.is_empty()) else {
+            return;
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let isolated_doc = temp.path().join("isolated-doc");
+        let isolated_run = temp.path().join("isolated-run");
+        let prod_doc = PathBuf::from(home).join("Library/Application Support/MicroInput");
+
+        // 1. MI_QA_RUN_DIR inside production dir must be rejected even with isolated MI_DOCUMENT_DIR.
+        let err = QaLaunchEnv::from_pairs(
+            isolated_doc.to_str(),
+            None,
+            prod_doc.to_str(),
+            None,
+            Some("config-write"),
+        )
+        .unwrap_err();
+        assert!(err.contains("MI_QA_RUN_DIR"), "{err}");
+
+        // 2. MI_HOST_AUDIT_LOG inside production dir must be rejected (including derived run_dir).
+        let prod_audit = prod_doc.join("evidence/audit.jsonl");
+        let err = QaLaunchEnv::from_pairs(
+            isolated_doc.to_str(),
+            prod_audit.to_str(),
+            None,
+            None,
+            Some("host-execution"),
+        )
+        .unwrap_err();
+        assert!(err.contains("MI_HOST_AUDIT_LOG"), "{err}");
+
+        // 3. MI_DIAGNOSTIC_EVIDENCE_PATH inside production dir must be rejected.
+        let prod_report = prod_doc.join("workbench.json");
+        let err = QaLaunchEnv::from_pairs(
+            isolated_doc.to_str(),
+            None,
+            isolated_run.to_str(),
+            prod_report.to_str(),
+            Some("diagnostic-export"),
+        )
+        .unwrap_err();
+        assert!(err.contains("MI_DIAGNOSTIC_EVIDENCE_PATH"), "{err}");
+
+        // 4. All isolated paths remain accepted.
+        let ok = QaLaunchEnv::from_pairs(
+            isolated_doc.to_str(),
+            isolated_run.join("evidence/audit.jsonl").to_str(),
+            isolated_run.to_str(),
+            isolated_run
+                .join("evidence/diagnostic-report.json")
+                .to_str(),
+            Some("diagnostic-export"),
+        );
+        assert!(ok.is_ok(), "isolated QA paths should succeed: {ok:?}");
     }
 }

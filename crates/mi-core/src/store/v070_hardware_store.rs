@@ -84,6 +84,18 @@ fn sync_six_layer_backup_after_joystick_write(
                             post_write_keymap,
                         )),
                     );
+                    if !obj.contains_key("previous_planned_keymap_sha256")
+                        && prev_planned_path.is_file()
+                    {
+                        if let Ok(prev_bytes) = std::fs::read(&prev_planned_path) {
+                            obj.insert(
+                                "previous_planned_keymap_sha256".into(),
+                                serde_json::Value::String(crate::lighting_arbiter::sha256_hex(
+                                    &prev_bytes,
+                                )),
+                            );
+                        }
+                    }
                     if let Ok(encoded) = serde_json::to_vec_pretty(&manifest) {
                         let _ = write_private_backup_file(&manifest_path, &encoded);
                     }

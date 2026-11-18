@@ -348,21 +348,40 @@ impl Default for SavedSixLayerState {
     }
 }
 
+const MAX_RUNTIME_STATE_BYTES: u64 = 1024 * 1024;
+
 pub fn load(path: &Path) -> Result<SavedSixLayerState, String> {
-    match fs::read(path) {
-        Ok(bytes) => {
-            let saved: SavedSixLayerState =
-                serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-            if saved.version != 1 {
-                return Err("不支持此六层运行记录版本".into());
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        match mi_model::private_fs::verify_existing_private_dir(parent) {
+            Ok(_) => {}
+            Err(mi_model::private_fs::PrivateDirError::Missing) => {
+                return Ok(SavedSixLayerState::default());
             }
-            Ok(saved)
+            Err(err) => {
+                return Err(format!("六层运行记录目录不安全：{err:?}"));
+            }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(SavedSixLayerState::default())
-        }
-        Err(error) => Err(error.to_string()),
     }
+    let Some(file) = mi_model::private_fs::open_verified_readonly_file_optional(path)? else {
+        return Ok(SavedSixLayerState::default());
+    };
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if meta.len() > MAX_RUNTIME_STATE_BYTES {
+        return Err("六层运行记录文件超过大小上限".into());
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    use std::io::Read;
+    file.take(MAX_RUNTIME_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_RUNTIME_STATE_BYTES {
+        return Err("六层运行记录文件超过大小上限".into());
+    }
+    let saved: SavedSixLayerState = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if saved.version != 1 {
+        return Err("不支持此六层运行记录版本".into());
+    }
+    Ok(saved)
 }
 
 pub fn save(path: &Path, state: &SavedSixLayerState) -> Result<(), String> {

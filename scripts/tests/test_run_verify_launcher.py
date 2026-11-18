@@ -578,6 +578,35 @@ class RunVerifyLauncherTests(unittest.TestCase):
             popen.assert_not_called()
         self.assertEqual(stat.S_IMODE(real_target.stat().st_mode), 0o755)
 
+    def test_verify_rejects_production_document_dir_in_qa_run_dir_and_diagnostic_path(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+        fake_home = root / 'fake_home'
+        prod_dir = fake_home / 'Library/Application Support/MicroInput'
+        prod_dir.mkdir(parents=True)
+        sentinel = prod_dir / 'workbench.json'
+        sentinel.write_text('{"keep":true}\n', encoding='utf-8')
+
+        for env_overrides in (
+            {'MI_QA_RUN_DIR': str(prod_dir)},
+            {'MI_QA_RUN_DIR': str(prod_dir / 'nested-run')},
+            {'MI_DIAGNOSTIC_EVIDENCE_PATH': str(sentinel)},
+        ):
+            stderr = io.StringIO()
+            with patch.object(sys, 'argv', [str(script), '--verify']), \
+                    patch('pathlib.Path.home', return_value=fake_home), \
+                    patch.dict(os.environ, env_overrides, clear=False), \
+                    patch('subprocess.Popen') as popen, \
+                    patch('subprocess.run') as run_cmd, \
+                    contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as result:
+                    runpy.run_path(str(script), run_name='__main__')
+                self.assertEqual(result.exception.code, 2)
+                self.assertIn('production document directory', stderr.getvalue())
+                popen.assert_not_called()
+                run_cmd.assert_not_called()
+        self.assertEqual(sentinel.read_text(encoding='utf-8'), '{"keep":true}\n')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,10 +1,17 @@
 //! Verified `0.7.0-rc.16+` hardware capability RPC helpers gated behind exclusive vendor ownership.
 
-use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::fs;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+
+use mi_model::private_fs::{
+    ensure_private_dir, open_private_file, open_verified_readonly_file,
+    open_verified_readonly_file_optional, sync_private_dir, verify_existing_private_dir,
+    PrivateOpenMode,
+};
 
 use mi_proto::v070_capabilities::{
     decode_device_name_response, decode_joystick_deadzone_response, decode_mouse_config_response,
@@ -72,39 +79,67 @@ impl Drop for V070KeymapMutationGuard<'_> {
     }
 }
 
+fn read_verified_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let file = open_verified_readonly_file(path)?;
+    read_open_file_bounded(file, max_bytes)
+}
+
+fn read_open_file_bounded(file: fs::File, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if meta.len() > max_bytes {
+        return Err(format!(
+            "备份文件超过大小上限（{} > {} 字节）",
+            meta.len(),
+            max_bytes
+        ));
+    }
+    let mut buf = Vec::with_capacity(meta.len() as usize);
+    file.take(max_bytes + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.len() as u64 > max_bytes {
+        return Err(format!("备份文件超过大小上限（>{max_bytes} 字节）"));
+    }
+    Ok(buf)
+}
+
 fn write_verified_immutable_file(path: &Path, bytes: &[u8]) -> Result<bool, String> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) => {
-            if !meta.is_file() {
-                return Err(format!("备份文件不是普通文件：{}", path.display()));
-            }
-            if meta.permissions().mode() & 0o777 != 0o600 {
-                fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                    .map_err(|e| e.to_string())?;
-            }
-            let existing = fs::read(path).map_err(|e| e.to_string())?;
-            if existing != bytes {
-                return Err(format!("备份文件摘要内容不符：{}", path.display()));
-            }
-            Ok(false)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(path)
-                .map_err(|e| e.to_string())?;
+    let max_bytes = (bytes.len() as u64).max(mi_proto::mutation::MAX_FILE_BYTES as u64);
+    match open_private_file(path, PrivateOpenMode::CreateNew) {
+        Ok(mut file) => {
             file.write_all(bytes)
                 .and_then(|()| file.sync_all())
                 .map_err(|e| e.to_string())?;
-            let readback = fs::read(path).map_err(|e| e.to_string())?;
+            let readback = read_verified_file_bounded(path, max_bytes)?;
             if readback != bytes {
                 return Err(format!("备份文件写后读回不一致：{}", path.display()));
             }
             Ok(true)
         }
-        Err(e) => Err(e.to_string()),
+        Err(create_err) => {
+            let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+                return Err(create_err);
+            };
+            let Some(file_name) = path.file_name() else {
+                return Err(create_err);
+            };
+            let verified_parent = verify_existing_private_dir(parent).map_err(|_| create_err)?;
+            let verified_path = verified_parent.join(file_name);
+            let file = open_verified_readonly_file(&verified_path)?;
+            #[cfg(unix)]
+            {
+                let meta = file.metadata().map_err(|e| e.to_string())?;
+                if (meta.permissions().mode() & 0o777) != 0o600 {
+                    file.set_permissions(fs::Permissions::from_mode(0o600))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            let existing = read_open_file_bounded(file, max_bytes)?;
+            if existing != bytes {
+                return Err(format!("备份文件摘要内容不符：{}", path.display()));
+            }
+            Ok(false)
+        }
     }
 }
 
@@ -112,43 +147,32 @@ fn persist_immutable_v070_keymap_backup(
     document_dir: &Path,
     keymap_bytes: &[u8],
 ) -> Result<PathBuf, String> {
-    if !document_dir.exists() {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(document_dir)
-            .map_err(|e| e.to_string())?;
-    }
-    let parent_meta = fs::metadata(document_dir).map_err(|e| e.to_string())?;
+    ensure_private_dir(document_dir)?;
     let backup_dir = document_dir.join("v070-keymap-backups");
-    match DirBuilder::new().mode(0o700).create(&backup_dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e.to_string()),
-    }
-    let dir_meta = fs::symlink_metadata(&backup_dir).map_err(|e| e.to_string())?;
-    if !dir_meta.is_dir() || dir_meta.uid() != parent_meta.uid() {
-        return Err("v070-keymap-backups 不是当前用户所属的私有目录".into());
-    }
-    if dir_meta.permissions().mode() & 0o777 != 0o700 {
-        fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-    }
+    ensure_private_dir(&backup_dir)?;
 
     let original_anchor = backup_dir.join("original-keymap.json");
-    if !original_anchor.exists() {
-        let _ = write_verified_immutable_file(&original_anchor, keymap_bytes)?;
-    }
+    let original_created = match open_verified_readonly_file_optional(&original_anchor)? {
+        Some(file) => {
+            #[cfg(unix)]
+            {
+                let meta = file.metadata().map_err(|e| e.to_string())?;
+                if (meta.permissions().mode() & 0o777) != 0o600 {
+                    file.set_permissions(fs::Permissions::from_mode(0o600))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            false
+        }
+        None => write_verified_immutable_file(&original_anchor, keymap_bytes)?,
+    };
 
     let sha1_hex = format!("{:x}", Sha1::digest(keymap_bytes));
     let snapshot_path = backup_dir.join(format!("keymap-{sha1_hex}.json"));
-    let created = write_verified_immutable_file(&snapshot_path, keymap_bytes)?;
-    if created {
-        for dir in [&backup_dir, document_dir] {
-            fs::File::open(dir)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| e.to_string())?;
-        }
+    let snapshot_created = write_verified_immutable_file(&snapshot_path, keymap_bytes)?;
+    if original_created || snapshot_created {
+        sync_private_dir(&backup_dir)?;
+        sync_private_dir(document_dir)?;
     }
     Ok(snapshot_path)
 }
@@ -1205,5 +1229,88 @@ mod tests {
         assert_eq!(after_mc, standard_mc);
 
         session.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn v070_keymap_backup_rejects_symlinks_fifos_and_enforces_private_fs() {
+        use super::{persist_immutable_v070_keymap_backup, Digest, Sha1};
+        use std::fs;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_doc = temp.path().join("real-doc");
+        fs::create_dir_all(&real_doc).unwrap();
+        fs::set_permissions(&real_doc, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // (a) document_dir as a symlink must be rejected.
+        let sym_doc = temp.path().join("sym-doc");
+        symlink(&real_doc, &sym_doc).unwrap();
+        assert!(persist_immutable_v070_keymap_backup(&sym_doc, br#"{"v":1}"#).is_err());
+
+        // (b) pre-existing original-keymap.json as a symlink to an existing file must be rejected.
+        let doc_b = temp.path().join("doc-b");
+        let backup_b = doc_b.join("v070-keymap-backups");
+        fs::create_dir_all(&backup_b).unwrap();
+        let dummy = temp.path().join("dummy.json");
+        fs::write(&dummy, br#"{"dummy":true}"#).unwrap();
+        symlink(&dummy, backup_b.join("original-keymap.json")).unwrap();
+        assert!(persist_immutable_v070_keymap_backup(&doc_b, br#"{"v":1}"#).is_err());
+
+        // (c) pre-existing keymap-<sha1>.json as a symlink or FIFO must be rejected non-blockingly.
+        let payload = br#"{"keymap":"sample"}"#;
+        let sha1_hex = format!("{:x}", Sha1::digest(payload));
+
+        let doc_c_sym = temp.path().join("doc-c-sym");
+        let backup_c_sym = doc_c_sym.join("v070-keymap-backups");
+        fs::create_dir_all(&backup_c_sym).unwrap();
+        symlink(&dummy, backup_c_sym.join(format!("keymap-{sha1_hex}.json"))).unwrap();
+        assert!(persist_immutable_v070_keymap_backup(&doc_c_sym, payload).is_err());
+
+        let doc_c_fifo = temp.path().join("doc-c-fifo");
+        let backup_c_fifo = doc_c_fifo.join("v070-keymap-backups");
+        fs::create_dir_all(&backup_c_fifo).unwrap();
+        let fifo_path = backup_c_fifo.join(format!("keymap-{sha1_hex}.json"));
+        let status = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(persist_immutable_v070_keymap_backup(&doc_c_fifo, payload).is_err());
+
+        // (d) normal immutable backup writes 0o600 files in 0o700 dir and preserves original anchor.
+        let doc_ok = temp.path().join("doc-ok");
+        let first = persist_immutable_v070_keymap_backup(&doc_ok, br#"{"first":1}"#).unwrap();
+        assert_eq!(
+            fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(doc_ok.join("v070-keymap-backups"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let second = persist_immutable_v070_keymap_backup(&doc_ok, br#"{"second":2}"#).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            fs::read(doc_ok.join("v070-keymap-backups/original-keymap.json")).unwrap(),
+            br#"{"first":1}"#
+        );
+
+        // (e) write_verified_immutable_file must not bypass unsafe ancestor checks when file already exists.
+        let unsafe_ancestor = temp.path().join("unsafe-ancestor");
+        let child_dir = unsafe_ancestor.join("child");
+        fs::create_dir_all(&child_dir).unwrap();
+        let existing_file = child_dir.join("existing.json");
+        fs::write(&existing_file, br#"{"match":true}"#).unwrap();
+        fs::set_permissions(&child_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&unsafe_ancestor, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            super::write_verified_immutable_file(&existing_file, br#"{"match":true}"#).is_err()
+        );
+        fs::set_permissions(&unsafe_ancestor, fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

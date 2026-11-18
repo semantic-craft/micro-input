@@ -63,7 +63,7 @@ fn open_verified_dir_fd(path: &Path, uid: u32) -> Result<(OwnedFd, libc::stat), 
 }
 
 #[cfg(unix)]
-fn harden_private_dir(path: &Path) -> Result<(), String> {
+fn harden_private_dir_fd(path: &Path) -> Result<OwnedFd, String> {
     let (fd, st) = open_verified_dir_fd(path, current_uid()).map_err(|err| match err {
         OpenDirFailure::NulByte => "private directory path contains NUL byte".to_string(),
         OpenDirFailure::Io(io_err) => io_err.to_string(),
@@ -73,7 +73,7 @@ fn harden_private_dir(path: &Path) -> Result<(), String> {
     if (st.st_mode as u32 & 0o777) != 0o700 && unsafe { libc::fchmod(fd.as_raw_fd(), 0o700) } != 0 {
         return Err(io::Error::last_os_error().to_string());
     }
-    Ok(())
+    Ok(fd)
 }
 
 #[cfg(not(unix))]
@@ -85,9 +85,34 @@ fn harden_private_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
+pub fn sync_private_dir(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let (fd, _st) = open_verified_dir_fd(dir, current_uid()).map_err(|err| match err {
+            OpenDirFailure::NulByte => "private directory path contains NUL byte".to_string(),
+            OpenDirFailure::Io(io_err) => io_err.to_string(),
+            OpenDirFailure::NotDir => format!("{} is not a directory", dir.display()),
+            OpenDirFailure::OwnerMismatch => {
+                format!("{} is not owned by current user", dir.display())
+            }
+        })?;
+        if unsafe { libc::fsync(fd.as_raw_fd()) } != 0 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::File::open(dir)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(unix)]
+fn ensure_private_dir_fd(dir: &Path) -> Result<Option<OwnedFd>, String> {
     if dir.as_os_str().is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let anchored: PathBuf = if dir.is_absolute() {
         dir.to_path_buf()
@@ -101,9 +126,8 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
         .filter(|c| !matches!(c, Component::CurDir))
         .collect();
     if components.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    #[cfg(unix)]
     let uid = current_uid();
 
     let mut cur = PathBuf::new();
@@ -113,11 +137,22 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
             Component::RootDir | Component::Prefix(_) => {
                 cur.push(component.as_os_str());
                 if is_last {
-                    harden_private_dir(&cur)?;
+                    return Ok(Some(harden_private_dir_fd(&cur)?));
                 }
             }
             Component::CurDir => {}
-            Component::ParentDir | Component::Normal(_) => {
+            Component::ParentDir => {
+                if cur.parent().is_none() || !cur.pop() {
+                    return Err(format!(
+                        "private directory contains unsafe parent traversal: {}",
+                        cur.display()
+                    ));
+                }
+                if is_last {
+                    return Ok(Some(harden_private_dir_fd(&cur)?));
+                }
+            }
+            Component::Normal(_) => {
                 cur.push(component.as_os_str());
                 loop {
                     match fs::symlink_metadata(&cur) {
@@ -129,8 +164,18 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
                                         cur.display()
                                     ));
                                 }
-                                #[cfg(unix)]
-                                if meta.uid() == 0 && uid != 0 {
+                                if meta.uid() == 0 {
+                                    let canonical =
+                                        fs::canonicalize(&cur).map_err(|e| e.to_string())?;
+                                    verify_canonical_dir_chain(&canonical, false, uid).map_err(
+                                        |err| {
+                                            format!(
+                                                "private directory ancestor symlink target is unsafe ({err:?}): {}",
+                                                canonical.display()
+                                            )
+                                        },
+                                    )?;
+                                    cur = canonical;
                                     break;
                                 }
                                 return Err(format!(
@@ -140,12 +185,18 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
                             }
                             if meta.file_type().is_dir() {
                                 if is_last {
-                                    harden_private_dir(&cur)?;
+                                    return Ok(Some(harden_private_dir_fd(&cur)?));
                                 } else {
-                                    #[cfg(unix)]
                                     if meta.uid() != uid && meta.uid() != 0 {
                                         return Err(format!(
                                             "private directory ancestor has untrusted owner: {}",
+                                            cur.display()
+                                        ));
+                                    }
+                                    let mode = meta.mode();
+                                    if (mode & 0o022) != 0 && (mode & 0o1000) == 0 {
+                                        return Err(format!(
+                                            "private directory ancestor has unsafe writable mode: {}",
                                             cur.display()
                                         ));
                                     }
@@ -158,15 +209,14 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
                             ));
                         }
                         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                            if !matches!(component, Component::Normal(_)) {
-                                return Err(err.to_string());
-                            }
                             let mut builder = DirBuilder::new();
-                            #[cfg(unix)]
                             builder.mode(0o700);
                             match builder.create(&cur) {
                                 Ok(()) => {
-                                    harden_private_dir(&cur)?;
+                                    let fd = harden_private_dir_fd(&cur)?;
+                                    if is_last {
+                                        return Ok(Some(fd));
+                                    }
                                     break;
                                 }
                                 Err(create_err)
@@ -183,7 +233,100 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        ensure_private_dir_fd(dir).map(|_| ())
+    }
+    #[cfg(not(unix))]
+    {
+        if dir.as_os_str().is_empty() {
+            return Ok(());
+        }
+        let anchored: PathBuf = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| e.to_string())?
+                .join(dir)
+        };
+        let components: Vec<Component<'_>> = anchored
+            .components()
+            .filter(|c| !matches!(c, Component::CurDir))
+            .collect();
+        if components.is_empty() {
+            return Ok(());
+        }
+        let mut cur = PathBuf::new();
+        for (idx, component) in components.iter().enumerate() {
+            let is_last = idx + 1 == components.len();
+            match component {
+                Component::RootDir | Component::Prefix(_) => {
+                    cur.push(component.as_os_str());
+                    if is_last {
+                        harden_private_dir(&cur)?;
+                    }
+                }
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if cur.parent().is_none() || !cur.pop() {
+                        return Err(format!(
+                            "private directory contains unsafe parent traversal: {}",
+                            cur.display()
+                        ));
+                    }
+                    if is_last {
+                        harden_private_dir(&cur)?;
+                    }
+                }
+                Component::Normal(_) => {
+                    cur.push(component.as_os_str());
+                    loop {
+                        match fs::symlink_metadata(&cur) {
+                            Ok(meta) => {
+                                if meta.file_type().is_symlink() {
+                                    return Err(format!(
+                                        "private directory must not be a symlink: {}",
+                                        cur.display()
+                                    ));
+                                }
+                                if meta.file_type().is_dir() {
+                                    if is_last {
+                                        harden_private_dir(&cur)?;
+                                    }
+                                    break;
+                                }
+                                return Err(format!(
+                                    "private directory component is not a directory: {}",
+                                    cur.display()
+                                ));
+                            }
+                            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                                let builder = DirBuilder::new();
+                                match builder.create(&cur) {
+                                    Ok(()) => {
+                                        harden_private_dir(&cur)?;
+                                        break;
+                                    }
+                                    Err(create_err)
+                                        if create_err.kind() == io::ErrorKind::AlreadyExists =>
+                                    {
+                                        continue;
+                                    }
+                                    Err(create_err) => return Err(create_err.to_string()),
+                                }
+                            }
+                            Err(err) => return Err(err.to_string()),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn verify_dir_component_meta(
@@ -229,6 +372,35 @@ fn verify_dir_component_meta(
     Ok(None)
 }
 
+fn verify_canonical_dir_chain(
+    canonical: &Path,
+    is_last: bool,
+    uid: u32,
+) -> Result<(), PrivateDirError> {
+    let components: Vec<Component<'_>> = canonical
+        .components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .collect();
+    let mut prefix = PathBuf::new();
+    for (idx, component) in components.iter().enumerate() {
+        let comp_is_last = is_last && idx + 1 == components.len();
+        match component {
+            Component::RootDir | Component::Prefix(_) => {
+                prefix.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => return Err(PrivateDirError::Unsafe),
+            Component::Normal(_) => {
+                prefix.push(component.as_os_str());
+                if verify_dir_component_meta(&prefix, comp_is_last, uid)?.is_some() {
+                    return Err(PrivateDirError::Unsafe);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn verify_existing_private_dir(dir: &Path) -> Result<PathBuf, PrivateDirError> {
     if dir.as_os_str().is_empty() {
         return Err(PrivateDirError::Missing);
@@ -270,7 +442,7 @@ pub fn verify_existing_private_dir(dir: &Path) -> Result<PathBuf, PrivateDirErro
             Component::Normal(_) => {
                 cur.push(component.as_os_str());
                 if let Some(canonical) = verify_dir_component_meta(&cur, is_last, uid)? {
-                    let _ = verify_dir_component_meta(&canonical, is_last, uid)?;
+                    verify_canonical_dir_chain(&canonical, is_last, uid)?;
                     cur = canonical;
                 }
             }
@@ -295,30 +467,51 @@ pub fn verify_existing_private_dir(dir: &Path) -> Result<PathBuf, PrivateDirErro
 }
 
 pub fn open_private_file(path: &Path, mode: PrivateOpenMode) -> Result<fs::File, String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            ensure_private_dir(parent)?;
-        }
-    }
-    let mut options = OpenOptions::new();
-    options.write(true);
-    match mode {
-        PrivateOpenMode::Truncate => {
-            options.create(true).truncate(true);
-        }
-        PrivateOpenMode::Append => {
-            options.create(true).append(true);
-        }
-        PrivateOpenMode::CreateNew => {
-            options.create_new(true);
-        }
-    }
     #[cfg(unix)]
     {
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-        let file = options.open(path).map_err(|e| e.to_string())?;
+        let file_name = path
+            .file_name()
+            .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+            .ok_or_else(|| {
+                format!(
+                    "private file path has no valid file name: {}",
+                    path.display()
+                )
+            })?;
+        let c_name = CString::new(file_name.as_bytes())
+            .map_err(|_| "private file name contains NUL byte".to_string())?;
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let dir_fd = ensure_private_dir_fd(parent)?
+            .ok_or_else(|| format!("missing private parent directory: {}", parent.display()))?;
+
+        let mut flags = libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+        match mode {
+            PrivateOpenMode::Truncate => {
+                // Omit O_TRUNC until fstat verifies regular file type and current UID ownership.
+                flags |= libc::O_CREAT;
+            }
+            PrivateOpenMode::Append => {
+                flags |= libc::O_CREAT | libc::O_APPEND;
+            }
+            PrivateOpenMode::CreateNew => {
+                flags |= libc::O_CREAT | libc::O_EXCL;
+            }
+        }
+        let raw_fd = unsafe {
+            libc::openat(
+                dir_fd.as_raw_fd(),
+                c_name.as_ptr(),
+                flags,
+                0o600 as libc::c_uint,
+            )
+        };
+        if raw_fd < 0 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        let file = unsafe { fs::File::from_raw_fd(raw_fd) };
         let meta = file.metadata().map_err(|e| e.to_string())?;
         if !meta.file_type().is_file() {
             return Err(format!(
@@ -336,10 +529,31 @@ pub fn open_private_file(path: &Path, mode: PrivateOpenMode) -> Result<fs::File,
             file.set_permissions(fs::Permissions::from_mode(0o600))
                 .map_err(|e| e.to_string())?;
         }
+        if mode == PrivateOpenMode::Truncate {
+            file.set_len(0).map_err(|e| e.to_string())?;
+        }
         Ok(file)
     }
     #[cfg(not(unix))]
     {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                ensure_private_dir(parent)?;
+            }
+        }
+        let mut options = OpenOptions::new();
+        options.write(true);
+        match mode {
+            PrivateOpenMode::Truncate => {
+                options.create(true).truncate(true);
+            }
+            PrivateOpenMode::Append => {
+                options.create(true).append(true);
+            }
+            PrivateOpenMode::CreateNew => {
+                options.create_new(true);
+            }
+        }
         let file = options.open(path).map_err(|e| e.to_string())?;
         let meta = file.metadata().map_err(|e| e.to_string())?;
         if !meta.file_type().is_file() {
@@ -383,13 +597,20 @@ pub fn redact_home_path(raw: &str) -> String {
     redact_home_path_with_home(raw, std::env::var("HOME").ok().as_deref())
 }
 
-pub fn open_verified_readonly_file(path: &Path) -> Result<fs::File, String> {
+fn open_verified_readonly_file_inner(
+    path: &Path,
+    allow_missing: bool,
+) -> Result<Option<fs::File>, String> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-        let file = options.open(path).map_err(|e| e.to_string())?;
+        let file = match options.open(path) {
+            Ok(file) => file,
+            Err(err) if allow_missing && err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.to_string()),
+        };
         let meta = file.metadata().map_err(|e| e.to_string())?;
         if !meta.file_type().is_file() {
             return Err(format!(
@@ -403,18 +624,26 @@ pub fn open_verified_readonly_file(path: &Path) -> Result<fs::File, String> {
                 redact_home_path(&path.display().to_string())
             ));
         }
-        Ok(file)
+        Ok(Some(file))
     }
     #[cfg(not(unix))]
     {
-        let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        let meta = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(err) if allow_missing && err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.to_string()),
+        };
         if meta.file_type().is_symlink() || !meta.file_type().is_file() {
             return Err(format!(
                 "verified file target is not a regular file: {}",
                 redact_home_path(&path.display().to_string())
             ));
         }
-        let file = options.open(path).map_err(|e| e.to_string())?;
+        let file = match options.open(path) {
+            Ok(file) => file,
+            Err(err) if allow_missing && err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.to_string()),
+        };
         let fmeta = file.metadata().map_err(|e| e.to_string())?;
         if !fmeta.file_type().is_file() {
             return Err(format!(
@@ -422,8 +651,17 @@ pub fn open_verified_readonly_file(path: &Path) -> Result<fs::File, String> {
                 redact_home_path(&path.display().to_string())
             ));
         }
-        Ok(file)
+        Ok(Some(file))
     }
+}
+
+pub fn open_verified_readonly_file(path: &Path) -> Result<fs::File, String> {
+    open_verified_readonly_file_inner(path, false)?
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound).to_string())
+}
+
+pub fn open_verified_readonly_file_optional(path: &Path) -> Result<Option<fs::File>, String> {
+    open_verified_readonly_file_inner(path, true)
 }
 
 #[cfg(test)]
@@ -567,5 +805,106 @@ mod tests {
                 Err(PrivateDirError::Unsafe)
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_dir_and_open_private_file_reject_writable_non_sticky_ancestors_and_symlinks()
+    {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let ancestor = temp.path().join("ancestor");
+        let child = ancestor.join("child");
+        fs::create_dir_all(&child).unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // World-writable non-sticky ancestor must be rejected by both ensure_private_dir and open_private_file.
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o777)).unwrap();
+        let err = ensure_private_dir(&child).unwrap_err();
+        assert!(
+            err.contains("unsafe writable mode"),
+            "unexpected error for 0o777 ancestor: {err}"
+        );
+        let file_under_unsafe = child.join("secret.json");
+        assert!(open_private_file(&file_under_unsafe, PrivateOpenMode::Truncate).is_err());
+
+        // Group-writable non-sticky ancestor must also be rejected.
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(ensure_private_dir(&child).is_err());
+        assert!(open_private_file(&file_under_unsafe, PrivateOpenMode::CreateNew).is_err());
+
+        // Sticky bit on writable ancestor (like /tmp) is permitted.
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o1777)).unwrap();
+        ensure_private_dir(&child).unwrap();
+        let mut f = open_private_file(&file_under_unsafe, PrivateOpenMode::CreateNew).unwrap();
+        f.write_all(b"initial-data").unwrap();
+        drop(f);
+        assert_eq!(
+            fs::metadata(&file_under_unsafe)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        // Truncate mode truncates verified user-owned file after openat + fstat.
+        let mut f = open_private_file(&file_under_unsafe, PrivateOpenMode::Truncate).unwrap();
+        f.write_all(b"short").unwrap();
+        drop(f);
+        assert_eq!(fs::read(&file_under_unsafe).unwrap(), b"short");
+
+        // Append mode appends without truncating.
+        let mut f = open_private_file(&file_under_unsafe, PrivateOpenMode::Append).unwrap();
+        f.write_all(b"+tail").unwrap();
+        drop(f);
+        assert_eq!(fs::read(&file_under_unsafe).unwrap(), b"short+tail");
+
+        // Leaf symlink is rejected by openat(O_NOFOLLOW) and open_verified_readonly_file_optional.
+        let link_file = child.join("link.json");
+        symlink(&file_under_unsafe, &link_file).unwrap();
+        assert!(open_private_file(&link_file, PrivateOpenMode::Truncate).is_err());
+        assert!(open_verified_readonly_file_optional(&link_file).is_err());
+
+        // Missing file returns Ok(None) for open_verified_readonly_file_optional.
+        assert!(
+            open_verified_readonly_file_optional(&child.join("missing.json"))
+                .unwrap()
+                .is_none()
+        );
+
+        // FIFO is rejected non-blockingly by both open_private_file and open_verified_readonly_file_optional.
+        let fifo_path = child.join("pipe.fifo");
+        let c_fifo = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        assert!(open_private_file(&fifo_path, PrivateOpenMode::Truncate).is_err());
+        assert!(open_verified_readonly_file_optional(&fifo_path).is_err());
+
+        // sync_private_dir succeeds on verified dir and rejects symlinks.
+        sync_private_dir(&child).unwrap();
+        let dir_link = ancestor.join("dir-link");
+        symlink(&child, &dir_link).unwrap();
+        assert!(sync_private_dir(&dir_link).is_err());
+
+        // verify_canonical_dir_chain rejects a canonical target whose intermediate ancestor is 0o777 non-sticky.
+        let deep_target = child.join("leaf-0755");
+        fs::create_dir_all(&deep_target).unwrap();
+        let deep_canonical = fs::canonicalize(&deep_target).unwrap();
+        fs::set_permissions(&deep_target, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            verify_canonical_dir_chain(&deep_canonical, false, current_uid()),
+            Err(PrivateDirError::Unsafe)
+        );
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            verify_canonical_dir_chain(&deep_canonical, false, current_uid()),
+            Ok(())
+        );
+
+        // Restore ancestor permissions so TempDir cleanup always succeeds.
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

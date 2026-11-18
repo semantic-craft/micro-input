@@ -665,25 +665,36 @@ impl DeviceSession {
     }
 
     pub async fn restore_six_layer_backup(&self, backup: &Path) -> Result<(), SessionError> {
-        let original = std::fs::read(backup.join("keymap.json"))
-            .map_err(|e| SessionError::Config(e.to_string()))?;
-        let candidate = std::fs::read(backup.join("planned-keymap.json"))
-            .map_err(|e| SessionError::Config(e.to_string()))?;
-        let previous_candidate = match std::fs::read(backup.join("previous-planned-keymap.json")) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(SessionError::Config(e.to_string())),
-        };
-        let pre_write_candidate = match std::fs::read(backup.join("pre-write-keymap.json")) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(SessionError::Config(e.to_string())),
-        };
-        let smart = match std::fs::read(backup.join("smart_actions.json")) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(SessionError::Config(e.to_string())),
-        };
+        let verified_backup = mi_model::private_fs::verify_existing_private_dir(backup)
+            .map_err(|err| SessionError::Config(format!("六层备份目录不安全或不可用：{err:?}")))?;
+        let original =
+            read_verified_backup_file(&verified_backup.join("keymap.json"), MAX_BACKUP_FILE_BYTES)?;
+        let candidate = read_verified_backup_file(
+            &verified_backup.join("planned-keymap.json"),
+            MAX_BACKUP_FILE_BYTES,
+        )?;
+        let previous_candidate = read_verified_optional_backup_file(
+            &verified_backup.join("previous-planned-keymap.json"),
+            MAX_BACKUP_FILE_BYTES,
+        )?;
+        let pre_write_candidate = read_verified_optional_backup_file(
+            &verified_backup.join("pre-write-keymap.json"),
+            MAX_BACKUP_FILE_BYTES,
+        )?;
+        let smart = read_verified_optional_backup_file(
+            &verified_backup.join("smart_actions.json"),
+            MAX_BACKUP_FILE_BYTES,
+        )?;
+        verify_backup_manifest(
+            &verified_backup,
+            &original,
+            &candidate,
+            previous_candidate.as_deref(),
+            pre_write_candidate.as_deref(),
+            smart.as_deref(),
+        )?;
+        mi_model::parse_device_files(&original, smart.as_deref())
+            .map_err(|e| SessionError::Config(format!("原始恢复键位校验失败：{e}")))?;
         mi_model::apply::recognize_six_layer_recovery_candidate(&candidate, smart.as_deref())
             .map_err(SessionError::Config)?
             .ok_or_else(|| SessionError::Config("恢复副本不是六层方案".into()))?;
@@ -726,15 +737,28 @@ impl DeviceSession {
     }
 
     pub async fn restore_three_layer_backup(&self, backup: &Path) -> Result<(), SessionError> {
-        let original = std::fs::read(backup.join("keymap.json"))
-            .map_err(|e| SessionError::Config(e.to_string()))?;
-        let candidate = std::fs::read(backup.join("planned-keymap.json"))
-            .map_err(|e| SessionError::Config(e.to_string()))?;
-        let smart = match std::fs::read(backup.join("smart_actions.json")) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(SessionError::Config(e.to_string())),
-        };
+        let verified_backup = mi_model::private_fs::verify_existing_private_dir(backup)
+            .map_err(|err| SessionError::Config(format!("三层备份目录不安全或不可用：{err:?}")))?;
+        let original =
+            read_verified_backup_file(&verified_backup.join("keymap.json"), MAX_BACKUP_FILE_BYTES)?;
+        let candidate = read_verified_backup_file(
+            &verified_backup.join("planned-keymap.json"),
+            MAX_BACKUP_FILE_BYTES,
+        )?;
+        let smart = read_verified_optional_backup_file(
+            &verified_backup.join("smart_actions.json"),
+            MAX_BACKUP_FILE_BYTES,
+        )?;
+        verify_backup_manifest(
+            &verified_backup,
+            &original,
+            &candidate,
+            None,
+            None,
+            smart.as_deref(),
+        )?;
+        mi_model::parse_device_files(&original, smart.as_deref())
+            .map_err(|e| SessionError::Config(format!("原始恢复键位校验失败：{e}")))?;
         let parsed = mi_model::parse_device_files(&candidate, smart.as_deref())
             .map_err(|e| SessionError::Config(e.to_string()))?;
         recognize_three_layer_profile(&parsed)
@@ -757,4 +781,150 @@ impl DeviceSession {
         })
         .await
     }
+}
+
+const MAX_BACKUP_FILE_BYTES: u64 = mi_proto::mutation::MAX_FILE_BYTES as u64;
+const MAX_BACKUP_MANIFEST_BYTES: u64 = 64 * 1024;
+
+fn read_verified_backup_file_inner(
+    path: &Path,
+    max_bytes: u64,
+    allow_missing: bool,
+) -> Result<Option<Vec<u8>>, SessionError> {
+    use std::io::Read;
+    let file = if allow_missing {
+        match mi_model::private_fs::open_verified_readonly_file_optional(path)
+            .map_err(SessionError::Config)?
+        {
+            Some(file) => file,
+            None => return Ok(None),
+        }
+    } else {
+        mi_model::private_fs::open_verified_readonly_file(path).map_err(SessionError::Config)?
+    };
+    let meta = file
+        .metadata()
+        .map_err(|e| SessionError::Config(e.to_string()))?;
+    if meta.len() > max_bytes {
+        return Err(SessionError::Config(format!(
+            "备份文件超过大小上限（{} > {} 字节）",
+            meta.len(),
+            max_bytes
+        )));
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| SessionError::Config(e.to_string()))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(SessionError::Config(format!(
+            "备份文件超过大小上限（>{max_bytes} 字节）"
+        )));
+    }
+    Ok(Some(bytes))
+}
+
+fn read_verified_backup_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, SessionError> {
+    read_verified_backup_file_inner(path, max_bytes, false)?
+        .ok_or_else(|| SessionError::Config("备份文件不存在".into()))
+}
+
+fn read_verified_optional_backup_file(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, SessionError> {
+    read_verified_backup_file_inner(path, max_bytes, true)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
+}
+
+fn verify_backup_manifest(
+    backup_dir: &Path,
+    original: &[u8],
+    candidate: &[u8],
+    previous_candidate: Option<&[u8]>,
+    pre_write_candidate: Option<&[u8]>,
+    smart: Option<&[u8]>,
+) -> Result<(), SessionError> {
+    let Some(raw_manifest) = read_verified_optional_backup_file(
+        &backup_dir.join("manifest.json"),
+        MAX_BACKUP_MANIFEST_BYTES,
+    )?
+    else {
+        return Ok(());
+    };
+    let manifest: Value = serde_json::from_slice(&raw_manifest)
+        .map_err(|e| SessionError::Config(format!("备份清单格式无效：{e}")))?;
+    let expected_keymap = manifest
+        .get("keymap_sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| SessionError::Config("备份清单缺少 keymap_sha256".into()))?;
+    if expected_keymap != sha256_hex(original) {
+        return Err(SessionError::Config(
+            "备份清单 keymap_sha256 校验失败".into(),
+        ));
+    }
+    let expected_planned = manifest
+        .get("planned_keymap_sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| SessionError::Config("备份清单缺少 planned_keymap_sha256".into()))?;
+    if expected_planned != sha256_hex(candidate) {
+        return Err(SessionError::Config(
+            "备份清单 planned_keymap_sha256 校验失败".into(),
+        ));
+    }
+    match (smart, manifest.get("smart_actions_sha256")) {
+        (Some(smart_bytes), Some(Value::String(expected_smart))) => {
+            if expected_smart != &sha256_hex(smart_bytes) {
+                return Err(SessionError::Config(
+                    "备份清单 smart_actions_sha256 校验失败".into(),
+                ));
+            }
+        }
+        (Some(_), _) => {
+            return Err(SessionError::Config(
+                "备份清单缺少 smart_actions_sha256".into(),
+            ));
+        }
+        (None, Some(Value::String(_))) => {
+            return Err(SessionError::Config(
+                "备份清单声明了 smart_actions_sha256，但文件缺失".into(),
+            ));
+        }
+        (None, None | Some(Value::Null)) => {}
+        (None, Some(_)) => {
+            return Err(SessionError::Config(
+                "备份清单 smart_actions_sha256 字段格式无效".into(),
+            ));
+        }
+    }
+    if let (Some(prev), Some(Value::String(expected_prev))) = (
+        previous_candidate,
+        manifest.get("previous_planned_keymap_sha256"),
+    ) {
+        if expected_prev != &sha256_hex(prev) {
+            return Err(SessionError::Config(
+                "备份清单 previous_planned_keymap_sha256 校验失败".into(),
+            ));
+        }
+    }
+    if let (Some(pre_write), Some(Value::String(expected_pre_write))) =
+        (pre_write_candidate, manifest.get("pre_write_keymap_sha256"))
+    {
+        if expected_pre_write != &sha256_hex(pre_write) {
+            return Err(SessionError::Config(
+                "备份清单 pre_write_keymap_sha256 校验失败".into(),
+            ));
+        }
+    }
+    Ok(())
 }
