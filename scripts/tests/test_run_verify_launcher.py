@@ -343,6 +343,10 @@ class RunVerifyLauncherTests(unittest.TestCase):
             any(target.endswith('Sparkle.framework/Versions/B/Updater.app') for target in unregistered_targets),
             f'Expected nested Updater.app unregistration in {unregistered_targets}',
         )
+        tcc_idx = next((i for i, cmd in enumerate(run_calls) if len(cmd) >= 4 and cmd[:3] == ['/usr/bin/tccutil', 'reset', 'All']), None)
+        ls_idx = next((i for i, cmd in enumerate(run_calls) if len(cmd) >= 3 and cmd[-2] == '-u'), None)
+        if tcc_idx is not None and ls_idx is not None:
+            self.assertLess(tcc_idx, ls_idx)
 
     def test_verify_prunes_completed_default_qa_runs_beyond_retention_cap(self):
         root = self._prepare_checkout()

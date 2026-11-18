@@ -373,6 +373,13 @@ def main() -> int:
     finally:
         _stop_child()
         if verify and run_dir is not None:
+            if bundle_id and pathlib.Path('/usr/bin/tccutil').is_file():
+                subprocess.run(
+                    ['/usr/bin/tccutil', 'reset', 'All', bundle_id],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
             lsreg = pathlib.Path('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister')
             if app.exists() and lsreg.is_file():
                 for updater_rel in (

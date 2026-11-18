@@ -35,3 +35,7 @@ cargo test --locked --workspace --all-features
 scripts/build
 swift test --package-path app/MicroInput
 python3 scripts/check-boundaries.py
+NOTARY_CHECK="${MICRO_INPUT_NOTARY_CHECK:-${HOME:-}/Projects/agent-home/tools/notary-check/check_notary_policy.py}"
+if [[ -f "$NOTARY_CHECK" ]]; then
+  python3 -B "$NOTARY_CHECK" "$PWD"
+fi
