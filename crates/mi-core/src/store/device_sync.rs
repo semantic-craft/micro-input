@@ -135,6 +135,10 @@ impl WorkbenchStore {
                     .document_store
                     .update(|draft| draft.assign(&pid, &lid, 0, device_key_action));
             }
+            self.ensure_selected_profile_visible();
+            self.sync_modal_for_layer_protection();
+            self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
+            self.sync_lighting_preview_after_document_change();
         }
         snap
     }

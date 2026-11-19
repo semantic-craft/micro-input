@@ -6,7 +6,7 @@ use mi_session::DeviceSession;
 use mi_transport::{MacTransport, TargetKeyboard, UserCommandReceiver};
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -41,15 +41,26 @@ async fn open_vendor_session(
 
 const THSTATUS_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
+struct ThstatusSync<'a> {
+    sync_state: &'a Mutex<WireSyncState>,
+    retry_not_before: &'a Mutex<Option<Instant>>,
+    preview_lease_active: &'a AtomicBool,
+    preview_lease_epoch: &'a AtomicU64,
+}
+
 async fn send_thstatus_bounded(
     session: &DeviceSession,
-    sync_state: &Mutex<WireSyncState>,
-    retry_not_before: &Mutex<Option<Instant>>,
+    sync: &ThstatusSync<'_>,
     digest: String,
     entries: &[OaiKeyStatusEntry],
     session_ok: &mut bool,
-) {
-    *sync_state.lock().unwrap() = WireSyncState::InFlight(digest.clone());
+) -> bool {
+    let lease_epoch_before = sync.preview_lease_epoch.load(Ordering::Acquire);
+    if sync.preview_lease_active.load(Ordering::Acquire) {
+        *sync.sync_state.lock().unwrap() = WireSyncState::Unsynced;
+        return false;
+    }
+    *sync.sync_state.lock().unwrap() = WireSyncState::InFlight(digest.clone());
     match tokio::time::timeout(
         Duration::from_millis(750),
         session.send_oai_thstatus(entries),
@@ -57,18 +68,53 @@ async fn send_thstatus_bounded(
     .await
     {
         Ok(Ok(_)) => {
-            *sync_state.lock().unwrap() = WireSyncState::Confirmed(digest);
-            *retry_not_before.lock().unwrap() = None;
+            let mut guard = sync.sync_state.lock().unwrap();
+            if !sync.preview_lease_active.load(Ordering::Acquire)
+                && sync.preview_lease_epoch.load(Ordering::Acquire) == lease_epoch_before
+            {
+                *guard = WireSyncState::Confirmed(digest);
+            } else {
+                *guard = WireSyncState::Unsynced;
+            }
+            *sync.retry_not_before.lock().unwrap() = None;
         }
         Ok(Err(_)) | Err(_) => {
-            *sync_state.lock().unwrap() = WireSyncState::Unsynced;
+            *sync.sync_state.lock().unwrap() = WireSyncState::Unsynced;
             if session.is_disconnected() {
                 *session_ok = false;
-                *retry_not_before.lock().unwrap() = None;
+                *sync.retry_not_before.lock().unwrap() = None;
             } else {
-                *retry_not_before.lock().unwrap() = Some(Instant::now() + THSTATUS_RETRY_BACKOFF);
+                *sync.retry_not_before.lock().unwrap() =
+                    Some(Instant::now() + THSTATUS_RETRY_BACKOFF);
             }
         }
+    }
+    true
+}
+
+async fn run_v070_bridge_command(
+    session: &DeviceSession,
+    cmd: crate::store::v070_hardware_store::V070BridgeCommand,
+    observed_layer: &AtomicU8,
+    v070_observed_profile_layer: &Mutex<Option<(u8, u8)>>,
+    v070_inbox: &Mutex<Option<crate::store::runtime_inbox::RuntimeInbox>>,
+    session_ok: &mut bool,
+) {
+    let seq = cmd.seq;
+    let result =
+        crate::store::v070_hardware_store::execute_v070_command_on_session(session, &cmd).await;
+    if let Ok(ref bridge_outcome) = result {
+        record_v070_bridge_observation(bridge_outcome, observed_layer, v070_observed_profile_layer);
+    }
+    if session.is_disconnected() {
+        *session_ok = false;
+    }
+    if let Some(inbox) = v070_inbox.lock().unwrap().as_ref().cloned() {
+        let _ = inbox.send(crate::store::HardwareLoopEvent::V070CapabilityOutcome {
+            session_id: session.id,
+            seq,
+            result,
+        });
     }
 }
 
@@ -274,6 +320,7 @@ pub(crate) struct VendorBridge {
     stop_tx: tokio::sync::watch::Sender<bool>,
     pub(super) connected: Arc<AtomicBool>,
     pub(super) preview_lease_active: Arc<AtomicBool>,
+    pub(super) preview_lease_epoch: Arc<AtomicU64>,
     pub(super) preview_lease_tx: tokio::sync::watch::Sender<bool>,
     pub(super) sync_state: Arc<Mutex<WireSyncState>>,
     pub(super) retry_not_before: Arc<Mutex<Option<Instant>>>,
@@ -310,6 +357,7 @@ impl VendorBridge {
             stop_tx,
             connected: Arc::new(AtomicBool::new(false)),
             preview_lease_active: Arc::new(AtomicBool::new(false)),
+            preview_lease_epoch: Arc::new(AtomicU64::new(0)),
             preview_lease_tx,
             sync_state: Arc::new(Mutex::new(WireSyncState::Unsynced)),
             retry_not_before: Arc::new(Mutex::new(None)),
@@ -349,6 +397,7 @@ impl VendorBridge {
         {
             return Err("当前已有灯光预览正在进行".to_string());
         }
+        self.preview_lease_epoch.fetch_add(1, Ordering::AcqRel);
         let lease = VendorBridgePreviewLease {
             active: Arc::clone(&self.preview_lease_active),
             lease_tx: self.preview_lease_tx.clone(),
@@ -494,6 +543,7 @@ impl VendorBridge {
         };
         let connected = Arc::clone(&self.connected);
         let preview_lease_active = Arc::clone(&self.preview_lease_active);
+        let preview_lease_epoch = Arc::clone(&self.preview_lease_epoch);
         let sync_state = Arc::clone(&self.sync_state);
         let retry_not_before = Arc::clone(&self.retry_not_before);
         let active_session = Arc::clone(&self.active_session);
@@ -505,11 +555,19 @@ impl VendorBridge {
         *self.v070_cmd_tx.lock().unwrap() = Some(v070_cmd_tx);
         let v070_cmd_tx_slot = Arc::clone(&self.v070_cmd_tx);
         self.task = Some(runtime.spawn(async move {
+            let thstatus_sync = ThstatusSync {
+                sync_state: &sync_state,
+                retry_not_before: &retry_not_before,
+                preview_lease_active: &preview_lease_active,
+                preview_lease_epoch: &preview_lease_epoch,
+            };
             let mut current_session = initial_session;
             let mut pending_notif_rx = initial_notif_rx;
             let mut pressed_mask: u64 = 0;
             let mut rotated_from_live = false;
             let mut last_v070_snapshot_session: Option<u64> = None;
+            let mut pending_v070_cmd: Option<crate::store::v070_hardware_store::V070BridgeCommand> =
+                None;
             while !*stop_rx.borrow() {
                 if current_session.is_none() {
                     pressed_mask = 0;
@@ -565,15 +623,17 @@ impl VendorBridge {
                 if session_ok && needs_initial_flush && !deferred_led_flush {
                     let initial_payload = { led_rx.borrow_and_update().clone() };
                     if let Some((digest, entries)) = initial_payload {
-                        send_thstatus_bounded(
+                        if !send_thstatus_bounded(
                             &session,
-                            &sync_state,
-                            &retry_not_before,
+                            &thstatus_sync,
                             digest,
                             &entries,
                             &mut session_ok,
                         )
-                        .await;
+                        .await
+                        {
+                            deferred_led_flush = true;
+                        }
                     }
                 }
                 if session_ok
@@ -668,12 +728,32 @@ impl VendorBridge {
                         deferred_led_flush = false;
                         let next_payload = { led_rx.borrow_and_update().clone() };
                         if let Some((digest, entries)) = next_payload {
-                            send_thstatus_bounded(
+                            if !send_thstatus_bounded(
                                 &session,
-                                &sync_state,
-                                &retry_not_before,
+                                &thstatus_sync,
                                 digest,
                                 &entries,
+                                &mut session_ok,
+                            )
+                            .await
+                            {
+                                deferred_led_flush = true;
+                            }
+                            continue;
+                        }
+                    }
+                    if !preview_held {
+                        if let Some(cmd) = pending_v070_cmd.take() {
+                            if *lease_rx.borrow() || preview_lease_active.load(Ordering::Acquire) {
+                                pending_v070_cmd = Some(cmd);
+                                continue;
+                            }
+                            run_v070_bridge_command(
+                                &session,
+                                cmd,
+                                &observed_layer,
+                                &v070_observed_profile_layer,
+                                &v070_inbox,
                                 &mut session_ok,
                             )
                             .await;
@@ -723,53 +803,44 @@ impl VendorBridge {
                                 }
                             }
                         }
-                        cmd_opt = v070_cmd_rx.recv() => {
+                        cmd_opt = v070_cmd_rx.recv(), if !preview_held && pending_v070_cmd.is_none() => {
                             if let Some(cmd) = cmd_opt {
-                                let seq = cmd.seq;
-                                let result = crate::store::v070_hardware_store::execute_v070_command_on_session(
-                                    &session, &cmd,
+                                if *lease_rx.borrow() || preview_lease_active.load(Ordering::Acquire) {
+                                    pending_v070_cmd = Some(cmd);
+                                    continue;
+                                }
+                                run_v070_bridge_command(
+                                    &session,
+                                    cmd,
+                                    &observed_layer,
+                                    &v070_observed_profile_layer,
+                                    &v070_inbox,
+                                    &mut session_ok,
                                 )
                                 .await;
-                                if let Ok(ref bridge_outcome) = result {
-                                    record_v070_bridge_observation(
-                                        bridge_outcome,
-                                        &observed_layer,
-                                        &v070_observed_profile_layer,
-                                    );
-                                }
-                                if session.is_disconnected() {
-                                    session_ok = false;
-                                }
-                                if let Some(inbox) = v070_inbox.lock().unwrap().as_ref().cloned() {
-                                    let _ = inbox.send(crate::store::HardwareLoopEvent::V070CapabilityOutcome {
-                                        session_id: session.id,
-                                        seq,
-                                        result,
-                                    });
-                                }
                             }
                         }
                         changed = led_rx.changed(), if !preview_held => {
                             if changed.is_err() {
                                 break;
                             }
-                            // Re-check atomic lease flag to close the window between acquire_preview_lease()
-                            // returning and this select arm waking up with a stale preview_held=false.
                             if *lease_rx.borrow() || preview_lease_active.load(Ordering::Acquire) {
                                 deferred_led_flush = true;
                                 continue;
                             }
                             let next_payload = { led_rx.borrow_and_update().clone() };
                             if let Some((digest, entries)) = next_payload {
-                                send_thstatus_bounded(
+                                if !send_thstatus_bounded(
                                     &session,
-                                    &sync_state,
-                                    &retry_not_before,
+                                    &thstatus_sync,
                                     digest,
                                     &entries,
                                     &mut session_ok,
                                 )
-                                .await;
+                                .await
+                                {
+                                    deferred_led_flush = true;
+                                }
                             }
                         }
                     }
@@ -784,6 +855,15 @@ impl VendorBridge {
                 *sync_state.lock().unwrap() = WireSyncState::Unsynced;
                 *retry_not_before.lock().unwrap() = None;
                 *v070_cmd_tx_slot.lock().unwrap() = None;
+                if let Some(cmd) = pending_v070_cmd.take() {
+                    if let Some(inbox) = v070_inbox.lock().unwrap().as_ref().cloned() {
+                        let _ = inbox.send(crate::store::HardwareLoopEvent::V070CapabilityOutcome {
+                            session_id: session.id,
+                            seq: cmd.seq,
+                            result: Err("USB 会话已断开".into()),
+                        });
+                    }
+                }
                 while let Ok(cmd) = v070_cmd_rx.try_recv() {
                     if let Some(inbox) = v070_inbox.lock().unwrap().as_ref().cloned() {
                         let _ = inbox.send(crate::store::HardwareLoopEvent::V070CapabilityOutcome {

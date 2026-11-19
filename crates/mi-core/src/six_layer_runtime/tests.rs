@@ -3844,3 +3844,167 @@ fn vendor_bridge_preview_lease_suppresses_thstatus_and_rotation_while_keeping_hi
     responder1.abort();
     responder2.abort();
 }
+
+#[test]
+fn preview_lease_invalidates_overlapping_in_flight_thstatus_and_defers_v070_commands() {
+    use mi_proto::Framer;
+    use std::sync::atomic::AtomicUsize;
+
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (link, mut writes) = mi_transport::MockLink::new();
+    let inject = link.inject.clone();
+    let sent_methods = Arc::new(Mutex::new(Vec::<String>::new()));
+    let recorded = Arc::clone(&sent_methods);
+    let thstatus_seen = Arc::new(AtomicUsize::new(0));
+    let thstatus_seen_resp = Arc::clone(&thstatus_seen);
+    let thstatus_release = Arc::new(tokio::sync::Notify::new());
+    let thstatus_release_resp = Arc::clone(&thstatus_release);
+
+    let session = {
+        let _entered = runtime.enter();
+        DeviceSession::new(
+            Arc::new(MockVendorLink {
+                inner: link.clone(),
+                exclusive: true,
+            }),
+            Box::new(mi_proto::NativeFramer::default()),
+            Arc::new(mi_session::ReadOnlySchema),
+            mi_session::SessionConfig {
+                timeout: Duration::from_secs(2),
+                interval: Duration::ZERO,
+            },
+        )
+    };
+    let responder = runtime.spawn(async move {
+        let mut in_framer = mi_proto::NativeFramer::default();
+        let out_framer = mi_proto::NativeFramer::default();
+        while let Some(report) = writes.recv().await {
+            let Ok(messages) = in_framer.feed(&report) else {
+                break;
+            };
+            for msg in messages {
+                let Ok(req) = serde_json::from_slice::<serde_json::Value>(&msg) else {
+                    continue;
+                };
+                let method = req["method"].as_str().unwrap_or("");
+                recorded.lock().unwrap().push(method.to_string());
+                let reply = match method {
+                    "device.status" => serde_json::json!({
+                        "id": req["id"],
+                        "result": {"version": "0.7.0-rc.16", "profile_index": 1, "layer_index": 1}
+                    }),
+                    "v.oai.thstatus" => {
+                        let count = thstatus_seen_resp.fetch_add(1, Ordering::AcqRel) + 1;
+                        if count == 1 {
+                            thstatus_release_resp.notified().await;
+                        }
+                        serde_json::json!({"id": req["id"], "result": null})
+                    }
+                    "kb.pl.set" => serde_json::json!({
+                        "id": req["id"],
+                        "method": "kb.pl.set",
+                        "result": {"p": 1, "l": 2}
+                    }),
+                    _ => serde_json::json!({
+                        "id": req["id"],
+                        "error": {"code": 400, "message": "unused in test"}
+                    }),
+                };
+                let mut wire = reply.to_string();
+                wire.push('\n');
+                for frame in out_framer.encode(wire.as_bytes()).unwrap() {
+                    let _ = inject.send(frame);
+                }
+            }
+        }
+    });
+
+    runtime.block_on(session.read_identity_info()).unwrap();
+
+    let mut running = RunningSixLayer::isolated(Arc::clone(&session), dir.path());
+    running.attach_test_vendor_session(&runtime, Arc::clone(&session));
+
+    let entries = vec![OaiKeyStatusEntry::new("AG06", 0x22c55e)];
+    let _ = running.queue_session_lighting("digest-overlap", &entries);
+
+    let wait_start = Instant::now();
+    while thstatus_seen.load(Ordering::Acquire) < 1 && wait_start.elapsed() < Duration::from_secs(2)
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(thstatus_seen.load(Ordering::Acquire), 1);
+
+    let (_leased, lease) = running
+        .acquire_preview_session()
+        .expect("acquire preview lease while thstatus is in flight");
+    thstatus_release.notify_one();
+
+    running
+        .send_v070_command(crate::store::v070_hardware_store::V070BridgeCommand {
+            seq: 1,
+            command: crate::v070_hardware::ValidatedV070DeviceCommand::SelectLayer { layer: 2 },
+            document_dir: dir.path().to_path_buf(),
+            active_six_layer_backup: None,
+        })
+        .expect("queue v070 command during preview lease");
+
+    thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        running.confirmed_lighting_digest(),
+        None,
+        "in-flight thstatus finishing after lease acquire must never confirm digest"
+    );
+    assert_eq!(
+        *running.vendor_bridge.sync_state.lock().unwrap(),
+        vendor_bridge::WireSyncState::Unsynced
+    );
+    assert!(
+        !sent_methods
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m == "kb.pl.set"),
+        "queued v070 commands must remain gated while preview lease is held"
+    );
+
+    drop(lease);
+
+    let wait_v070 = Instant::now();
+    while !sent_methods
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|m| m == "kb.pl.set")
+        && wait_v070.elapsed() < Duration::from_secs(2)
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        sent_methods
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m == "kb.pl.set"),
+        "queued v070 command must resume once preview lease drops"
+    );
+
+    let _ = running.queue_session_lighting("digest-overlap", &entries);
+    let wait_reflush = Instant::now();
+    while running.confirmed_lighting_digest().as_deref() != Some("digest-overlap")
+        && wait_reflush.elapsed() < Duration::from_secs(2)
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        running.confirmed_lighting_digest().as_deref(),
+        Some("digest-overlap")
+    );
+    assert!(
+        thstatus_seen.load(Ordering::Acquire) >= 2,
+        "unchanged-digest queue_session_lighting must re-flush v.oai.thstatus after lease drop"
+    );
+
+    running.shutdown(&runtime).unwrap();
+    responder.abort();
+}

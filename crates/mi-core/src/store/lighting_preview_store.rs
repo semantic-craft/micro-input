@@ -207,6 +207,7 @@ fn normalize_preview_start_error(raw: &str) -> String {
             "当前设备连接不支持原生灯光预览（需 macOS USB 专用独占通道）".to_string()
         }
         "unsupported preview firmware" => "当前设备固件版本不支持原生灯光预览".to_string(),
+        "channel closed" => "设备预览通道已关闭，无法启动灯光预览".to_string(),
         msg if msg.starts_with("当前")
             || msg.starts_with("需要")
             || msg.starts_with("尚未")
@@ -215,7 +216,8 @@ fn normalize_preview_start_error(raw: &str) -> String {
             || msg.starts_with("USB ")
             || msg.starts_with("设备")
             || msg.starts_with("灯光")
-            || msg.starts_with("上一轮") =>
+            || msg.starts_with("上一轮")
+            || msg.starts_with("正在核验") =>
         {
             msg.to_string()
         }
@@ -248,10 +250,21 @@ impl WorkbenchStore {
             self.active_modal,
             Some(EditorModalProjection::LightingEditor(_))
         ) {
-            if let Ok(proj) = self.build_lighting_modal_projection(validation_error) {
-                self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
+            match self.build_lighting_modal_projection(validation_error) {
+                Ok(proj) => {
+                    self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
+                }
+                Err(_) => {
+                    self.active_modal = None;
+                }
             }
         }
+    }
+
+    fn resume_background_device_sync(&mut self) {
+        self.refresh_four_app_lighting();
+        self.sync_v070_session_sa_rgb();
+        let _ = self.maybe_sync_v070_active_profile_layer();
     }
 
     fn present_lighting_preview_start_error(&mut self, msg: String) {
@@ -281,6 +294,9 @@ impl WorkbenchStore {
             .ok_or_else(|| "尚未连接已核验的 USB 专用独占键盘，无法启动硬件灯光预览".to_string())?;
         if session.is_disconnected() || !session.has_exclusive_vendor_link() {
             return Err("需要已连接的 USB 专用独占会话".to_string());
+        }
+        if !self.hardware_rpc_verified {
+            return Err("正在核验 USB 键盘会话，请稍后再试".to_string());
         }
         if session.request_count() >= 900 {
             return Err("当前 USB 会话请求配额即将耗尽，请稍后重试预览".to_string());
@@ -387,8 +403,7 @@ impl WorkbenchStore {
                 self.lighting_preview_remaining_secs = 0;
                 self.apply_preview_stop_copy(reason);
                 if self.should_resume_background_leds_after_stop(reason) {
-                    self.refresh_four_app_lighting();
-                    self.sync_v070_session_sa_rgb();
+                    self.resume_background_device_sync();
                 }
             }
             LightingPreviewState::Active {
@@ -506,14 +521,20 @@ impl WorkbenchStore {
                 };
                 self.block_on_preview_teardown(fut);
             }
-            LightingPreviewState::Stopping { join_handle, .. } => {
+            LightingPreviewState::Stopping {
+                mut join_handle, ..
+            } => {
                 let fut = async move {
                     let abort = join_handle.abort_handle();
-                    if tokio::time::timeout(LIGHTING_PREVIEW_BLOCKING_STOP_TIMEOUT, join_handle)
-                        .await
-                        .is_err()
+                    if tokio::time::timeout(
+                        LIGHTING_PREVIEW_BLOCKING_STOP_TIMEOUT,
+                        &mut join_handle,
+                    )
+                    .await
+                    .is_err()
                     {
                         abort.abort();
+                        let _ = tokio::time::timeout(Duration::from_millis(50), join_handle).await;
                     }
                 };
                 self.block_on_preview_teardown(fut);
@@ -564,8 +585,7 @@ impl WorkbenchStore {
         self.status_message = msg.clone();
         self.refresh_open_lighting_modal(Some(msg.clone()));
         if self.system_lifecycle == SystemLifecycle::Awake {
-            self.refresh_four_app_lighting();
-            self.sync_v070_session_sa_rgb();
+            self.resume_background_device_sync();
         }
         msg
     }
@@ -673,6 +693,7 @@ impl WorkbenchStore {
     }
 
     pub(crate) fn sync_lighting_preview_after_document_change(&mut self) {
+        self.sync_modal_for_layer_protection();
         let active_target = match &self.lighting_preview_state {
             LightingPreviewState::Starting {
                 profile_id,
@@ -686,11 +707,13 @@ impl WorkbenchStore {
             } => Some((profile_id.clone(), layer_id.clone())),
             LightingPreviewState::Idle | LightingPreviewState::Stopping { .. } => None,
         };
+        let mut refreshed = false;
         let preview_err = if let Some((pid, lid)) = active_target {
             if self.selected_profile_id.as_deref() != Some(pid.as_str())
                 || self.selected_layer_id.as_deref() != Some(lid.as_str())
             {
                 self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
+                refreshed = true;
                 None
             } else {
                 self.sync_lighting_preview_for_layer(&lid)
@@ -698,10 +721,7 @@ impl WorkbenchStore {
         } else {
             None
         };
-        if matches!(
-            self.active_modal,
-            Some(EditorModalProjection::LightingEditor(_))
-        ) {
+        if !refreshed {
             self.refresh_open_lighting_modal(preview_err);
         }
     }
@@ -749,8 +769,7 @@ impl WorkbenchStore {
                         self.lighting_preview_remaining_secs = 0;
                         self.status_message = msg.clone();
                         self.refresh_open_lighting_modal(Some(msg));
-                        self.refresh_four_app_lighting();
-                        self.sync_v070_session_sa_rgb();
+                        self.resume_background_device_sync();
                         return true;
                     }
                     LightingPreviewPhase::Stopped => {
@@ -762,28 +781,37 @@ impl WorkbenchStore {
                         self.status_message =
                             "硬件灯光预览已停止（未自动恢复设备运行态灯效）".to_string();
                         self.refresh_open_lighting_modal(None);
-                        self.refresh_four_app_lighting();
-                        self.sync_v070_session_sa_rgb();
+                        self.resume_background_device_sync();
                         return true;
                     }
                     LightingPreviewPhase::Starting | LightingPreviewPhase::Active => {}
                 }
                 if lights_dirty {
                     if let Err(err) = handle.replace(latest_lights) {
-                        let detail = match handle.phase() {
-                            LightingPreviewPhase::Unknown(detail) => detail,
-                            _ => err,
-                        };
+                        let phase = handle.phase();
                         handle.detach_on_drop();
                         drop(handle);
                         drop(lease);
-                        let msg = normalize_preview_unknown_error(&detail);
                         self.lighting_preview_active = false;
                         self.lighting_preview_remaining_secs = 0;
-                        self.status_message = msg.clone();
-                        self.refresh_open_lighting_modal(Some(msg));
-                        self.refresh_four_app_lighting();
-                        self.sync_v070_session_sa_rgb();
+                        match phase {
+                            LightingPreviewPhase::Stopped => {
+                                self.status_message =
+                                    "硬件灯光预览已停止（未自动恢复设备运行态灯效）".to_string();
+                                self.refresh_open_lighting_modal(None);
+                            }
+                            LightingPreviewPhase::Unknown(detail) => {
+                                let msg = normalize_preview_unknown_error(&detail);
+                                self.status_message = msg.clone();
+                                self.refresh_open_lighting_modal(Some(msg));
+                            }
+                            LightingPreviewPhase::Starting | LightingPreviewPhase::Active => {
+                                let msg = normalize_preview_unknown_error(&err);
+                                self.status_message = msg.clone();
+                                self.refresh_open_lighting_modal(Some(msg));
+                            }
+                        }
+                        self.resume_background_device_sync();
                         return true;
                     }
                 }
@@ -812,8 +840,7 @@ impl WorkbenchStore {
                 self.lighting_preview_remaining_secs = 0;
                 self.status_message = msg.clone();
                 self.refresh_open_lighting_modal(Some(msg));
-                self.refresh_four_app_lighting();
-                self.sync_v070_session_sa_rgb();
+                self.resume_background_device_sync();
                 true
             }
         }
@@ -832,9 +859,9 @@ impl WorkbenchStore {
         self.lighting_preview_state = LightingPreviewState::Idle;
         self.lighting_preview_active = false;
         self.lighting_preview_remaining_secs = 0;
+        self.refresh_open_lighting_modal(None);
         if self.system_lifecycle == SystemLifecycle::Awake {
-            self.refresh_four_app_lighting();
-            self.sync_v070_session_sa_rgb();
+            self.resume_background_device_sync();
         }
         true
     }
@@ -952,6 +979,8 @@ mod tests {
                         json!({"id": request["id"], "result": {"version": firmware_version}})
                     } else if method == "lights.preview" && fault.load(Ordering::Acquire) {
                         json!({"id": request["id"], "error": {"code": 400, "message": "fixture rejected"}})
+                    } else if method == "kb.pl.set" || method == "kb.sa.rgb" {
+                        json!({"id": request["id"], "method": method, "result": {}})
                     } else {
                         json!({"id": request["id"], "result": null})
                     };
@@ -1082,6 +1111,7 @@ mod tests {
             ..
         } = spawn_native_mock_session(&store.tokio_runtime, "0.6.3");
         store.device_session = Some(Arc::clone(&session));
+        store.hardware_rpc_verified = true;
 
         store
             .dispatch_editor_action(EditorAction::OpenLightingEditor)
@@ -1180,6 +1210,7 @@ mod tests {
             responder: responder1,
         } = spawn_native_mock_session(&store.tokio_runtime, "0.6.3");
         store.device_session = Some(Arc::clone(&session1));
+        store.hardware_rpc_verified = true;
         store
             .dispatch_editor_action(EditorAction::LightingBeginPreview)
             .unwrap();
@@ -1263,5 +1294,445 @@ mod tests {
         assert!(store.six_layer_running.is_none());
         assert!(session2.is_disconnected());
         responder2.abort();
+    }
+
+    #[test]
+    fn direct_mode_unverified_session_rejects_preview_and_normalizes_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        store
+            .dispatch_editor_action(EditorAction::OpenLightingEditor)
+            .unwrap();
+        store
+            .dispatch_editor_action(EditorAction::LightingAddDefault)
+            .unwrap();
+
+        let NativeMockSession {
+            session,
+            requests,
+            responder,
+            ..
+        } = spawn_native_mock_session(&store.tokio_runtime, "0.6.3");
+        store.device_session = Some(Arc::clone(&session));
+        store.hardware_rpc_verified = false;
+
+        let err = store
+            .dispatch_editor_action(EditorAction::LightingBeginPreview)
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("正在核验 USB 键盘会话，请稍后再试"));
+        assert!(!store.is_lighting_preview_busy());
+        assert_eq!(store.status_message(), "正在核验 USB 键盘会话，请稍后再试");
+        assert!(requests.lock().unwrap().is_empty());
+        if let Some(EditorModalProjection::LightingEditor(modal)) = store.active_modal() {
+            assert_eq!(
+                modal.validation_error.as_deref(),
+                Some("正在核验 USB 键盘会话，请稍后再试")
+            );
+        } else {
+            panic!("expected LightingEditor modal");
+        }
+
+        assert_eq!(
+            normalize_preview_start_error("正在核验 USB 键盘会话，请稍后再试"),
+            "正在核验 USB 键盘会话，请稍后再试"
+        );
+        assert_eq!(
+            normalize_preview_start_error("channel closed"),
+            "设备预览通道已关闭，无法启动灯光预览"
+        );
+        assert_ne!(
+            crate::i18n::tr(
+                "正在核验 USB 键盘会话，请稍后再试",
+                mi_model::ResolvedLocale::En
+            ),
+            "正在核验 USB 键盘会话，请稍后再试"
+        );
+        assert_ne!(
+            crate::i18n::tr(
+                "设备预览通道已关闭，无法启动灯光预览",
+                mi_model::ResolvedLocale::En
+            ),
+            "设备预览通道已关闭，无法启动灯光预览"
+        );
+
+        if let Some(s) = store.device_session.take() {
+            store.tokio_runtime.block_on(s.shutdown());
+        }
+        responder.abort();
+    }
+
+    #[test]
+    fn v070_auto_layer_sync_defers_during_preview_and_explicit_command_tears_down_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        let ag_id = store
+            .find_canonical_profile_id(CanonicalAgent::Antigravity)
+            .expect("Antigravity profile");
+        store.select_and_activate_profile(&ag_id).unwrap();
+        store.set_host_execution_enabled(true).unwrap();
+        store
+            .document_store
+            .set_v070_auto_layer_sync_enabled(true)
+            .unwrap();
+
+        store
+            .dispatch_editor_action(EditorAction::OpenLightingEditor)
+            .unwrap();
+        store
+            .dispatch_editor_action(EditorAction::LightingAddDefault)
+            .unwrap();
+
+        let NativeMockSession {
+            session,
+            requests,
+            responder,
+            ..
+        } = spawn_native_mock_session(&store.tokio_runtime, "0.7.0-rc.16");
+        store
+            .tokio_runtime
+            .block_on(session.read_identity_info())
+            .unwrap();
+        store.device_session = Some(Arc::clone(&session));
+        store.hardware_rpc_verified = true;
+        store
+            .v070_hardware
+            .mark_supported("0.7.0-rc.16", Some(0), Some(1), None, None);
+
+        store
+            .dispatch_editor_action(EditorAction::LightingBeginPreview)
+            .unwrap();
+        wait_for_condition(|| {
+            store.poll_at(Instant::now());
+            matches!(
+                store.active_modal(),
+                Some(EditorModalProjection::LightingEditor(m)) if m.preview_active
+            )
+        });
+        wait_for_preview_frames(&requests, 1);
+
+        assert!(
+            !store.maybe_sync_v070_active_profile_layer(),
+            "auto layer sync must defer while preview is busy"
+        );
+        assert!(
+            !requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r["method"] == "kb.pl.set"),
+            "kb.pl.set must not be sent while preview is active"
+        );
+
+        store
+            .dispatch_editor_action(EditorAction::LightingEndPreview)
+            .unwrap();
+        wait_for_condition(|| {
+            store.poll_at(Instant::now());
+            !store.is_lighting_preview_busy()
+                && requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["method"] == "kb.pl.set")
+        });
+        wait_for_condition(|| {
+            store.poll_at(Instant::now());
+            !store.v070_hardware.projection.busy
+        });
+
+        store
+            .dispatch_editor_action(EditorAction::LightingBeginPreview)
+            .unwrap();
+        wait_for_condition(|| {
+            store.poll_at(Instant::now());
+            matches!(
+                store.active_modal(),
+                Some(EditorModalProjection::LightingEditor(m)) if m.preview_active
+            )
+        });
+
+        let pl_before = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r["method"] == "kb.pl.set")
+            .count();
+        store
+            .dispatch_v070_hardware(crate::V070HardwareAction::SelectLayer { layer: 3 })
+            .expect("explicit v070 device command must tear down preview and dispatch");
+        assert!(
+            !store.is_lighting_preview_busy(),
+            "explicit v070 device command must end preview synchronously before wire dispatch"
+        );
+        wait_for_condition(|| {
+            store.poll_at(Instant::now());
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r["method"] == "kb.pl.set")
+                .count()
+                > pl_before
+        });
+
+        if let Some(s) = store.device_session.take() {
+            store.tokio_runtime.block_on(s.shutdown());
+        }
+        responder.abort();
+    }
+
+    #[derive(Debug)]
+    struct ControlledPreviewHandle {
+        phase: Mutex<LightingPreviewPhase>,
+        replace_err: Option<String>,
+        end_gate: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    impl LightingPreviewHandle for ControlledPreviewHandle {
+        fn update(
+            &self,
+            _zone: mi_model::lighting::Zone,
+            _edit: mi_model::lighting::Edit,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn replace(&self, _lights: mi_model::lighting::Lighting) -> Result<(), String> {
+            match &self.replace_err {
+                Some(err) => Err(err.clone()),
+                None => Ok(()),
+            }
+        }
+
+        fn phase(&self) -> LightingPreviewPhase {
+            self.phase.lock().unwrap().clone()
+        }
+
+        fn end_future(&self) -> LightingPreviewEndFuture {
+            let gate = self.end_gate.clone();
+            Box::pin(async move {
+                if let Some(g) = gate {
+                    g.notified().await;
+                }
+                LightingPreviewPhase::Stopped
+            })
+        }
+
+        fn detach_on_drop(&self) {}
+    }
+
+    struct ControlledPreviewStarter {
+        next_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+        next_handle: Mutex<Option<Box<dyn LightingPreviewHandle>>>,
+    }
+
+    impl LightingPreviewStarter for ControlledPreviewStarter {
+        fn requires_verified_session(&self) -> bool {
+            false
+        }
+
+        fn begin_future(
+            &self,
+            _session: Option<Arc<DeviceSession>>,
+            _lights: mi_model::lighting::Lighting,
+        ) -> LightingPreviewBeginFuture {
+            let gate = self.next_gate.lock().unwrap().take();
+            let handle = self.next_handle.lock().unwrap().take().unwrap();
+            Box::pin(async move {
+                if let Some(g) = gate {
+                    g.notified().await;
+                }
+                Ok(handle)
+            })
+        }
+    }
+
+    #[test]
+    fn stopping_validation_error_clears_on_end_and_lights_dirty_stopped_uses_clean_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let end_gate = Arc::new(tokio::sync::Notify::new());
+        let starter = Arc::new(ControlledPreviewStarter {
+            next_gate: Mutex::new(None),
+            next_handle: Mutex::new(Some(Box::new(ControlledPreviewHandle {
+                phase: Mutex::new(LightingPreviewPhase::Active),
+                replace_err: None,
+                end_gate: Some(Arc::clone(&end_gate)),
+            }))),
+        });
+        let mut cfg = WorkbenchStoreConfig::isolated(dir.path());
+        cfg.lighting_preview_starter = Arc::clone(&starter) as Arc<dyn LightingPreviewStarter>;
+        let mut store = WorkbenchStore::open(cfg).unwrap();
+        store
+            .dispatch_editor_action(EditorAction::OpenLightingEditor)
+            .unwrap();
+        store
+            .dispatch_editor_action(EditorAction::LightingAddDefault)
+            .unwrap();
+
+        store
+            .dispatch_editor_action(EditorAction::LightingBeginPreview)
+            .unwrap();
+        wait_for_condition(|| {
+            store.poll_at(Instant::now());
+            matches!(
+                store.active_modal(),
+                Some(EditorModalProjection::LightingEditor(m)) if m.preview_active
+            )
+        });
+
+        store
+            .dispatch_editor_action(EditorAction::LightingEndPreview)
+            .unwrap();
+        let retry_err = store
+            .dispatch_editor_action(EditorAction::LightingBeginPreview)
+            .unwrap_err();
+        assert!(retry_err.to_string().contains("上一轮灯光预览正在停止"));
+        if let Some(EditorModalProjection::LightingEditor(modal)) = store.active_modal() {
+            assert_eq!(
+                modal.validation_error.as_deref(),
+                Some("上一轮灯光预览正在停止，请稍候重试")
+            );
+        } else {
+            panic!("expected LightingEditor modal");
+        }
+
+        end_gate.notify_one();
+        wait_for_condition(|| {
+            store.poll_at(Instant::now());
+            !store.is_lighting_preview_busy()
+        });
+        if let Some(EditorModalProjection::LightingEditor(modal)) = store.active_modal() {
+            assert_eq!(
+                modal.validation_error, None,
+                "stopping validation error must clear when Stopping -> Idle completes"
+            );
+        } else {
+            panic!("expected LightingEditor modal");
+        }
+
+        let start_gate = Arc::new(tokio::sync::Notify::new());
+        *starter.next_gate.lock().unwrap() = Some(Arc::clone(&start_gate));
+        let dirty_handle_phase = Arc::new(Mutex::new(LightingPreviewPhase::Active));
+        #[derive(Debug)]
+        struct StoppedOnReplaceHandle {
+            phase: Arc<Mutex<LightingPreviewPhase>>,
+        }
+        impl LightingPreviewHandle for StoppedOnReplaceHandle {
+            fn update(
+                &self,
+                _zone: mi_model::lighting::Zone,
+                _edit: mi_model::lighting::Edit,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn replace(&self, _lights: mi_model::lighting::Lighting) -> Result<(), String> {
+                *self.phase.lock().unwrap() = LightingPreviewPhase::Stopped;
+                Err("preview has ended".into())
+            }
+            fn phase(&self) -> LightingPreviewPhase {
+                self.phase.lock().unwrap().clone()
+            }
+            fn end_future(&self) -> LightingPreviewEndFuture {
+                Box::pin(async { LightingPreviewPhase::Stopped })
+            }
+            fn detach_on_drop(&self) {}
+        }
+        *starter.next_handle.lock().unwrap() = Some(Box::new(StoppedOnReplaceHandle {
+            phase: Arc::clone(&dirty_handle_phase),
+        }));
+
+        store
+            .dispatch_editor_action(EditorAction::LightingBeginPreview)
+            .unwrap();
+        store
+            .dispatch_editor_action(EditorAction::LightingEditColorHex {
+                zone: LightingZone::Backlight,
+                color_hex: "#223344".into(),
+                all_layers: false,
+            })
+            .unwrap();
+        start_gate.notify_one();
+        wait_for_condition(|| {
+            store.poll_at(Instant::now());
+            !store.is_lighting_preview_busy()
+        });
+        assert_eq!(
+            store.status_message(),
+            "硬件灯光预览已停止（未自动恢复设备运行态灯效）"
+        );
+        if let Some(EditorModalProjection::LightingEditor(modal)) = store.active_modal() {
+            assert!(!modal.preview_active);
+            assert_eq!(modal.validation_error, None);
+        } else {
+            panic!("expected LightingEditor modal");
+        }
+    }
+
+    #[test]
+    fn poll_six_layer_runtime_disconnect_with_busy_preview_commits_projection_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        store
+            .dispatch_editor_action(EditorAction::OpenLightingEditor)
+            .unwrap();
+        store
+            .dispatch_editor_action(EditorAction::LightingAddDefault)
+            .unwrap();
+
+        let NativeMockSession {
+            session, responder, ..
+        } = spawn_native_mock_session(&store.tokio_runtime, "0.7.0");
+        let mut running =
+            crate::six_layer_runtime::RunningSixLayer::isolated(Arc::clone(&session), dir.path());
+        running.attach_test_vendor_session(&store.tokio_runtime, Arc::clone(&session));
+        store.six_layer_running = Some(running);
+
+        store
+            .dispatch_editor_action(EditorAction::LightingBeginPreview)
+            .unwrap();
+        wait_for_condition(|| {
+            store.poll_at(Instant::now());
+            matches!(
+                store.active_modal(),
+                Some(EditorModalProjection::LightingEditor(m)) if m.preview_active
+            )
+        });
+
+        let failure_msg = "USB 独占会话已失效，输入已暂停";
+        store.status_message = failure_msg.to_string();
+        store.commit_runtime_update();
+        let gen_before = store.projection_generation();
+        store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .receiver
+            .invalidate(failure_msg);
+
+        store.poll_six_layer_runtime();
+        assert!(!store.is_lighting_preview_busy());
+        assert!(
+            store.projection_generation() > gen_before,
+            "poll_six_layer_runtime must commit updated modal state when disconnecting an active preview"
+        );
+        if let Some(EditorModalProjection::LightingEditor(modal)) = store.active_modal() {
+            assert!(!modal.preview_active);
+            assert!(modal
+                .validation_error
+                .as_deref()
+                .is_some_and(|e| e.contains("设备连接已断开")));
+        } else {
+            panic!("expected LightingEditor modal");
+        }
+
+        store
+            .six_layer_running
+            .take()
+            .unwrap()
+            .shutdown(&store.tokio_runtime)
+            .unwrap();
+        responder.abort();
     }
 }

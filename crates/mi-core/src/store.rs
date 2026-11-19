@@ -933,14 +933,15 @@ impl WorkbenchStore {
                 profile_id: Some(target_pid.clone()),
             })?;
             if prefer_selected || self.selected_profile_id.is_none() {
-                if self.selected_profile_id.as_deref() != Some(target_pid.as_str())
-                    || self.selected_layer_id != first_layer_id
-                {
-                    self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
-                }
+                let context_changed = self.selected_profile_id.as_deref()
+                    != Some(target_pid.as_str())
+                    || self.selected_layer_id != first_layer_id;
                 self.selected_profile_id = Some(target_pid);
                 self.selected_layer_id = first_layer_id;
                 self.normalize_surface_for_current_layer();
+                if context_changed {
+                    self.sync_lighting_preview_after_document_change();
+                }
             }
             let name = self
                 .projection_inputs()
@@ -1586,24 +1587,59 @@ impl WorkbenchStore {
 
     fn ensure_selected_profile_visible(&mut self) {
         let rows = self.compute_sidebar_rows();
+        let prev_profile_id = self.selected_profile_id.clone();
+        let prev_layer_id = self.selected_layer_id.clone();
         if self
             .selected_profile_id
             .as_ref()
             .is_some_and(|pid| rows.iter().any(|r| &r.profile_id == pid))
         {
-            return;
+            let layer_valid = self
+                .selected_profile_id
+                .as_ref()
+                .and_then(|pid| {
+                    self.document_store
+                        .draft
+                        .document
+                        .editable
+                        .graph
+                        .profiles
+                        .get(pid)
+                })
+                .is_some_and(|p| {
+                    self.selected_layer_id
+                        .as_ref()
+                        .is_some_and(|lid| p.layer_order.iter().any(|id| id == lid))
+                });
+            if !layer_valid {
+                self.selected_layer_id = self.selected_profile_id.as_ref().and_then(|pid| {
+                    self.document_store
+                        .draft
+                        .document
+                        .editable
+                        .graph
+                        .profiles
+                        .get(pid)
+                        .and_then(|p| p.layer_order.first().cloned())
+                });
+            }
+        } else {
+            self.selected_profile_id = rows.first().map(|r| r.profile_id.clone());
+            self.selected_layer_id = self.selected_profile_id.as_ref().and_then(|pid| {
+                self.document_store
+                    .draft
+                    .document
+                    .editable
+                    .graph
+                    .profiles
+                    .get(pid)
+                    .and_then(|p| p.layer_order.first().cloned())
+            });
         }
-        self.selected_profile_id = rows.first().map(|r| r.profile_id.clone());
-        self.selected_layer_id = self.selected_profile_id.as_ref().and_then(|pid| {
-            self.document_store
-                .draft
-                .document
-                .editable
-                .graph
-                .profiles
-                .get(pid)
-                .and_then(|p| p.layer_order.first().cloned())
-        });
+        if self.selected_profile_id != prev_profile_id || self.selected_layer_id != prev_layer_id {
+            self.normalize_surface_for_current_layer();
+            self.sync_lighting_preview_after_document_change();
+        }
     }
 
     fn is_protected_oai_profile(&self, profile_id: &str) -> bool {

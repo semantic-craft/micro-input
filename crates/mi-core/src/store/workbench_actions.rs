@@ -155,7 +155,6 @@ impl WorkbenchStore {
         if self.selected_profile_id == profile_id {
             return;
         }
-        self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
         self.selected_layer_id = profile_id.as_ref().and_then(|id| {
             self.document_store
                 .draft
@@ -168,6 +167,7 @@ impl WorkbenchStore {
         });
         self.selected_profile_id = profile_id;
         self.normalize_surface_for_current_layer();
+        self.sync_lighting_preview_after_document_change();
     }
 
     pub fn select_and_activate_profile(&mut self, profile_id: &str) -> Result<(), WorkbenchError> {
@@ -203,17 +203,17 @@ impl WorkbenchStore {
             profile_id: profile_id.to_string(),
         })?;
         self.cancel_encoder_model_picker();
-        if self.selected_profile_id.as_deref() != Some(profile_id)
-            || self.selected_layer_id != first_layer_id
-        {
-            self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
-        }
+        let context_changed = self.selected_profile_id.as_deref() != Some(profile_id)
+            || self.selected_layer_id != first_layer_id;
         self.selected_profile_id = Some(profile_id.to_string());
         self.selected_layer_id = first_layer_id;
         self.v070_hardware.device_layer_override = None;
         self.v070_hardware.pending_auto_layer_sync = None;
         self.six_layer_user_pinned = true;
         self.normalize_surface_for_current_layer();
+        if context_changed {
+            self.sync_lighting_preview_after_document_change();
+        }
         self.sync_six_layer_routing_context();
         let _ = self.maybe_sync_v070_active_profile_layer();
         self.sync_live_session_source();
@@ -365,7 +365,6 @@ impl WorkbenchStore {
                 if CanonicalAgent::from_profile_name(&name).is_none() {
                     self.show_other_profiles = true;
                 }
-                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.selected_profile_id = Some(created_id.clone());
                 self.selected_layer_id = self
                     .document_store
@@ -376,6 +375,8 @@ impl WorkbenchStore {
                     .profiles
                     .get(&created_id)
                     .and_then(|p| p.layer_order.first().cloned());
+                self.normalize_surface_for_current_layer();
+                self.sync_lighting_preview_after_document_change();
                 self.status_message = format!("已新建方案「{name}」");
             }
             ProfileCommand::Rename { profile_id, name } => {
@@ -410,7 +411,6 @@ impl WorkbenchStore {
                 if CanonicalAgent::from_profile_name(&resolved_name).is_none() {
                     self.show_other_profiles = true;
                 }
-                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.selected_profile_id = Some(duplicated_id.clone());
                 self.selected_layer_id = self
                     .document_store
@@ -421,6 +421,8 @@ impl WorkbenchStore {
                     .profiles
                     .get(&duplicated_id)
                     .and_then(|p| p.layer_order.first().cloned());
+                self.normalize_surface_for_current_layer();
+                self.sync_lighting_preview_after_document_change();
                 self.status_message = format!("已复制方案「{resolved_name}」");
             }
             ProfileCommand::MoveUp { profile_id } => {
@@ -457,15 +459,21 @@ impl WorkbenchStore {
                 }
             }
             ProfileCommand::Delete { profile_id } => {
+                let deleted_selected =
+                    self.selected_profile_id.as_deref() == Some(profile_id.as_str());
                 self.document_store
                     .update(|draft| draft.delete_profile(&profile_id))
                     .map_err(WorkbenchError::Storage)?;
-                if self.selected_profile_id.as_deref() == Some(profile_id.as_str()) {
-                    self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
+                if deleted_selected {
                     self.selected_profile_id = None;
+                    self.selected_layer_id = None;
                 }
                 self.sync_routing_snapshot();
                 self.ensure_selected_profile_visible();
+                if deleted_selected {
+                    self.normalize_surface_for_current_layer();
+                    self.sync_lighting_preview_after_document_change();
+                }
                 self.status_message = "已删除方案".to_string();
             }
             ProfileCommand::InstallCodingAgentPresets => {
@@ -520,17 +528,22 @@ impl WorkbenchStore {
                 self.show_other_profiles = true;
                 self.v070_hardware.device_layer_override = None;
                 self.ensure_selected_profile_visible();
+                self.normalize_surface_for_current_layer();
+                self.sync_lighting_preview_after_document_change();
                 self.sync_v070_session_sa_rgb();
                 self.status_message = "已导入方案预设".to_string();
                 self.commit_runtime_update();
                 Ok(None)
             }
             BackupCommand::ReturnToHostDocument => {
-                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.document_store.return_to_host();
                 self.sync_routing_snapshot();
                 self.v070_hardware.device_layer_override = None;
                 self.ensure_selected_profile_visible();
+                self.normalize_surface_for_current_layer();
+                self.sync_modal_for_layer_protection();
+                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
+                self.sync_lighting_preview_after_document_change();
                 self.sync_v070_session_sa_rgb();
                 self.status_message = "已返回常用软件方案".to_string();
                 self.commit_runtime_update();
@@ -818,13 +831,17 @@ impl WorkbenchStore {
                     .layers
                     .contains_key(&layer_id)
                 {
-                    if self.selected_layer_id.as_deref() != Some(layer_id.as_str()) {
+                    let layer_changed =
+                        self.selected_layer_id.as_deref() != Some(layer_id.as_str());
+                    if layer_changed {
                         self.cancel_encoder_model_picker();
-                        self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                     }
                     self.selected_layer_id = Some(layer_id);
                     self.v070_hardware.device_layer_override = None;
                     self.normalize_surface_for_current_layer();
+                    if layer_changed {
+                        self.sync_lighting_preview_after_document_change();
+                    }
                     self.refresh_four_app_lighting();
                     self.commit_runtime_update();
                 }
@@ -1059,10 +1076,10 @@ impl WorkbenchStore {
                         .map_err(WorkbenchError::Storage)?;
                     created_lid
                 };
-                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.selected_layer_id = Some(target_lid);
                 self.v070_hardware.device_layer_override = None;
                 self.normalize_surface_for_current_layer();
+                self.sync_lighting_preview_after_document_change();
                 self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())

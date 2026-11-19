@@ -147,10 +147,10 @@ impl WorkbenchStore {
                         Ok(())
                     })
                     .map_err(WorkbenchError::Storage)?;
-                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.selected_layer_id = Some(created_lid);
                 self.v070_hardware.device_layer_override = None;
                 self.normalize_surface_for_current_layer();
+                self.sync_lighting_preview_after_document_change();
                 self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())
@@ -563,9 +563,10 @@ impl WorkbenchStore {
                         Ok(())
                     })
                     .map_err(WorkbenchError::Storage)?;
-                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.selected_layer_id = Some(created);
                 self.v070_hardware.device_layer_override = None;
+                self.normalize_surface_for_current_layer();
+                self.sync_lighting_preview_after_document_change();
                 self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
@@ -576,7 +577,6 @@ impl WorkbenchStore {
                 self.document_store
                     .update(|draft| draft.delete_layer(&pid, &lid))
                     .map_err(WorkbenchError::Storage)?;
-                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.selected_layer_id = self
                     .document_store
                     .draft
@@ -587,6 +587,8 @@ impl WorkbenchStore {
                     .get(&pid)
                     .and_then(|p| p.layer_order.first().cloned());
                 self.v070_hardware.device_layer_override = None;
+                self.normalize_surface_for_current_layer();
+                self.sync_lighting_preview_after_document_change();
                 self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
@@ -616,14 +618,6 @@ impl WorkbenchStore {
             }
             EditorAction::LightingEndPreview => {
                 self.end_lighting_preview(LightingPreviewStopReason::UserRequested);
-                if matches!(
-                    self.active_modal,
-                    Some(EditorModalProjection::LightingEditor(_))
-                ) {
-                    if let Ok(proj) = self.build_lighting_modal_projection(None) {
-                        self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                    }
-                }
                 self.commit_runtime_update();
                 Ok(())
             }

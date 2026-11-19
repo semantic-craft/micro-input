@@ -203,7 +203,7 @@ impl Preview {
                 tokio::select! { biased;
                     _ = session.wait_disconnected() => { failed = true; break; }
                     _ = tokio::time::sleep_until(deadline) => break,
-                    change = rx.changed() => if change.is_err() { break; }
+                    change = rx.changed() => if change.is_err() || rx.borrow().is_none() { break; }
                 }
                 // Coalesce pending edits without cancelling an exchange already in flight.
                 tokio::select! { biased;
@@ -680,7 +680,13 @@ mod native_tests {
             assert_eq!(last["params"]["underglow"]["brightness"], 0.4);
             assert_eq!(last["params"]["underglow"]["color"], 0x445566);
         }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let started = std::time::Instant::now();
         assert_eq!(preview.end().await["phase"], "Stopped");
+        assert!(
+            started.elapsed() < Duration::from_millis(60),
+            "idle native preview end must bypass the 80ms coalescing delay"
+        );
         assert!(preview.replace(updated).is_err());
         session.shutdown().await;
     }

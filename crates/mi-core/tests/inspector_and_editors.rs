@@ -1083,6 +1083,279 @@ fn lighting_preview_fake_starter_lifecycle_edits_countdown_errors_and_teardowns(
 }
 
 #[test]
+fn lighting_preview_context_switches_refresh_open_modal_or_close_on_protected_layer() {
+    let ws = TempWorkspace::new("lighting-context-switch-modal");
+    let starter = FakePreviewStarter::new(Duration::from_secs(30));
+    let mut cfg = WorkbenchStoreConfig::isolated(&ws.dir);
+    cfg.lighting_preview_starter = Arc::clone(&starter) as Arc<dyn LightingPreviewStarter>;
+    let mut store = WorkbenchStore::open(cfg).expect("open store with fake preview starter");
+    let t0 = Instant::now();
+
+    let ag_id = store
+        .find_canonical_profile_id(CanonicalAgent::Antigravity)
+        .expect("Antigravity profile");
+    let dsh_id = store
+        .find_canonical_profile_id(CanonicalAgent::DeepseekHarness)
+        .expect("DSH profile");
+    let codex_id = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
+        .expect("Codex protected profile");
+
+    store
+        .dispatch_sidebar_action(SidebarAction::SelectProfile(ag_id.clone()))
+        .unwrap();
+    let layer1_id = store.selected_layer_id().unwrap().to_string();
+    store
+        .dispatch_editor_action(EditorAction::OpenLightingEditor)
+        .unwrap();
+    store
+        .dispatch_editor_action(EditorAction::LightingAddDefault)
+        .unwrap();
+    store
+        .dispatch_editor_action(EditorAction::LightingEditColorHex {
+            zone: LightingZone::Backlight,
+            color_hex: "#112233".into(),
+            all_layers: false,
+        })
+        .unwrap();
+
+    store
+        .dispatch_inspector_action(InspectorAction::CreateCustomLayer {
+            name: "第二层".into(),
+        })
+        .unwrap();
+    let layer2_id = store.selected_layer_id().unwrap().to_string();
+    assert_eq!(lighting_modal(&store).layer_id, layer2_id);
+    assert_eq!(lighting_modal(&store).layer_name, "第二层");
+    assert!(!lighting_modal(&store).has_lighting);
+
+    store
+        .dispatch_editor_action(EditorAction::LightingAddDefault)
+        .unwrap();
+    store
+        .dispatch_editor_action(EditorAction::LightingEditColorHex {
+            zone: LightingZone::Backlight,
+            color_hex: "#AABBCC".into(),
+            all_layers: false,
+        })
+        .unwrap();
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t0,
+        )
+        .unwrap();
+    wait_until(|| {
+        store.poll_at(t0);
+        lighting_modal(&store).preview_active
+    });
+    let h_select_layer = starter.last_handle();
+
+    store
+        .dispatch_canvas_action(CanvasAction::SelectLayer(layer1_id.clone()))
+        .unwrap();
+    let modal_after_layer = lighting_modal(&store);
+    assert_eq!(modal_after_layer.profile_id, ag_id);
+    assert_eq!(modal_after_layer.layer_id, layer1_id);
+    assert!(!modal_after_layer.preview_active);
+    assert_eq!(
+        modal_after_layer
+            .backlight
+            .as_ref()
+            .map(|z| z.color_hex.as_str()),
+        Some("#112233")
+    );
+    wait_until(|| {
+        store.poll_at(t0);
+        h_select_layer.end_calls.load(Ordering::Acquire) == 1
+    });
+    wait_until(|| {
+        store.poll_at(t0);
+        store.refresh_four_app_lighting();
+        store.lighting_arbiter.last_update_result == LightingUpdateResult::Applied
+    });
+
+    store
+        .dispatch_canvas_action(CanvasAction::SelectLayer(layer2_id.clone()))
+        .unwrap();
+    assert_eq!(lighting_modal(&store).layer_id, layer2_id);
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t0,
+        )
+        .unwrap();
+    wait_until(|| {
+        store.poll_at(t0);
+        lighting_modal(&store).preview_active
+    });
+    let h_delete_layer = starter.last_handle();
+
+    store
+        .dispatch_inspector_action(InspectorAction::DeleteSelectedLayer)
+        .unwrap();
+    let modal_after_delete = lighting_modal(&store);
+    assert_eq!(modal_after_delete.layer_id, layer1_id);
+    assert!(!modal_after_delete.preview_active);
+    wait_until(|| {
+        store.poll_at(t0);
+        h_delete_layer.end_calls.load(Ordering::Acquire) == 1
+    });
+    wait_until(|| {
+        store.poll_at(t0);
+        store.refresh_four_app_lighting();
+        store.lighting_arbiter.last_update_result == LightingUpdateResult::Applied
+    });
+
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t0,
+        )
+        .unwrap();
+    wait_until(|| {
+        store.poll_at(t0);
+        lighting_modal(&store).preview_active
+    });
+    let h_switch_editable = starter.last_handle();
+
+    store
+        .dispatch_sidebar_action(SidebarAction::SelectProfile(dsh_id.clone()))
+        .unwrap();
+    let modal_after_dsh = lighting_modal(&store);
+    assert_eq!(modal_after_dsh.profile_id, dsh_id);
+    assert_eq!(
+        Some(modal_after_dsh.layer_id.as_str()),
+        store.selected_layer_id()
+    );
+    assert!(!modal_after_dsh.preview_active);
+    wait_until(|| {
+        store.poll_at(t0);
+        h_switch_editable.end_calls.load(Ordering::Acquire) == 1
+    });
+    wait_until(|| {
+        store.poll_at(t0);
+        store.refresh_four_app_lighting();
+        store.lighting_arbiter.last_update_result == LightingUpdateResult::Applied
+    });
+
+    store
+        .dispatch_editor_action(EditorAction::LightingAddDefault)
+        .unwrap();
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t0,
+        )
+        .unwrap();
+    wait_until(|| {
+        store.poll_at(t0);
+        lighting_modal(&store).preview_active
+    });
+    let h_switch_protected = starter.last_handle();
+
+    store
+        .dispatch_sidebar_action(SidebarAction::SelectProfile(codex_id))
+        .unwrap();
+    assert!(store.is_selected_layer_protected());
+    assert!(
+        store.active_modal().is_none(),
+        "switching to protected profile must close open LightingEditor"
+    );
+    wait_until(|| {
+        store.poll_at(t0);
+        h_switch_protected.end_calls.load(Ordering::Acquire) == 1
+    });
+
+    store
+        .dispatch_sidebar_action(SidebarAction::SelectProfile(dsh_id))
+        .unwrap();
+    store
+        .dispatch_editor_action(EditorAction::OpenLightingEditor)
+        .unwrap();
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t0,
+        )
+        .unwrap();
+    wait_until(|| {
+        store.poll_at(t0);
+        lighting_modal(&store).preview_active
+    });
+    let h_snapshot = starter.last_handle();
+    store
+        .dispatch_device_workflow_action(mi_core::DeviceWorkflowAction::ReadSnapshot)
+        .unwrap();
+    wait_until(|| {
+        store.poll_at(t0);
+        h_snapshot.end_calls.load(Ordering::Acquire) == 1
+    });
+    if let Some(EditorModalProjection::LightingEditor(modal)) = store.active_modal() {
+        assert_eq!(Some(modal.profile_id.as_str()), store.selected_profile_id());
+        assert_eq!(Some(modal.layer_id.as_str()), store.selected_layer_id());
+        assert!(!modal.preview_active);
+    }
+}
+
+#[test]
+fn lighting_preview_hiding_other_profiles_ends_preview_and_refreshes_open_modal() {
+    let ws = TempWorkspace::new("lighting-hide-other-profiles");
+    let starter = FakePreviewStarter::new(Duration::from_secs(30));
+    let mut cfg = WorkbenchStoreConfig::isolated(&ws.dir);
+    cfg.lighting_preview_starter = Arc::clone(&starter) as Arc<dyn LightingPreviewStarter>;
+    let mut store = WorkbenchStore::open(cfg).expect("open store with fake preview starter");
+    let t0 = Instant::now();
+
+    store
+        .dispatch_sidebar_action(SidebarAction::Profile(mi_core::ProfileCommand::Create {
+            name: "Custom Studio".into(),
+        }))
+        .unwrap();
+    let custom_pid = store.selected_profile_id().unwrap().to_string();
+
+    store
+        .dispatch_editor_action(EditorAction::OpenLightingEditor)
+        .unwrap();
+    store
+        .dispatch_editor_action(EditorAction::LightingAddDefault)
+        .unwrap();
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t0,
+        )
+        .unwrap();
+    wait_until(|| {
+        store.poll_at(t0);
+        lighting_modal(&store).preview_active
+    });
+    assert_eq!(lighting_modal(&store).profile_id, custom_pid);
+    let handle = starter.last_handle();
+
+    store
+        .dispatch_sidebar_action(SidebarAction::SetShowOtherProfiles(false))
+        .unwrap();
+    assert_ne!(store.selected_profile_id(), Some(custom_pid.as_str()));
+    wait_until(|| {
+        store.poll_at(t0);
+        handle.end_calls.load(Ordering::Acquire) == 1
+    });
+
+    if store.is_selected_layer_protected() {
+        assert!(store.active_modal().is_none());
+    } else {
+        let refreshed = lighting_modal(&store);
+        assert_eq!(
+            Some(refreshed.profile_id.as_str()),
+            store.selected_profile_id()
+        );
+        assert_eq!(Some(refreshed.layer_id.as_str()), store.selected_layer_id());
+        assert!(!refreshed.preview_active);
+    }
+}
+
+#[test]
 fn multi_editor_four_branch_actions_and_macros_lifecycle() {
     let ws = TempWorkspace::new("multi-editor");
     let mut store = WorkbenchStore::open_isolated(&ws.dir).expect("open isolated workbench");

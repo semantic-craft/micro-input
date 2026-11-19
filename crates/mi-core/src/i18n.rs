@@ -557,6 +557,14 @@ pub const CORE_EN_TABLE: &[(&str, &str)] = &[
         "No verified USB exclusive keypad connected; cannot start hardware lighting preview",
     ),
     (
+        "正在核验 USB 键盘会话，请稍后再试",
+        "Verifying USB keypad session; try again shortly",
+    ),
+    (
+        "设备预览通道已关闭，无法启动灯光预览",
+        "Device preview channel closed; cannot start lighting preview",
+    ),
+    (
         "当前设备连接不支持原生灯光预览（需 macOS USB 专用独占通道）",
         "Current device connection does not support native lighting preview (requires macOS USB exclusive vendor link)",
     ),
