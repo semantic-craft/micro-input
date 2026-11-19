@@ -11,8 +11,7 @@ impl WorkbenchStore {
                 self.active_modal = None;
             }
             self.shortcut_recorder.is_recording = false;
-            self.lighting_preview_active = false;
-            self.lighting_preview_remaining_secs = 0;
+            self.end_lighting_preview(LightingPreviewStopReason::LayerProtected);
             self.lighting_popover.manual_preview_phase = None;
             self.lighting_arbiter.manual_preview_phase = None;
         }
@@ -151,6 +150,7 @@ impl WorkbenchStore {
                 self.selected_layer_id = Some(created_lid);
                 self.v070_hardware.device_layer_override = None;
                 self.normalize_surface_for_current_layer();
+                self.sync_lighting_preview_after_document_change();
                 self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())
@@ -565,6 +565,8 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.selected_layer_id = Some(created);
                 self.v070_hardware.device_layer_override = None;
+                self.normalize_surface_for_current_layer();
+                self.sync_lighting_preview_after_document_change();
                 self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
@@ -585,6 +587,8 @@ impl WorkbenchStore {
                     .get(&pid)
                     .and_then(|p| p.layer_order.first().cloned());
                 self.v070_hardware.device_layer_override = None;
+                self.normalize_surface_for_current_layer();
+                self.sync_lighting_preview_after_document_change();
                 self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
@@ -607,9 +611,13 @@ impl WorkbenchStore {
         }
         match action {
             EditorAction::CloseModal => {
-                self.lighting_preview_active = false;
-                self.lighting_preview_remaining_secs = 0;
+                self.end_lighting_preview(LightingPreviewStopReason::ModalClosed);
                 self.active_modal = None;
+                self.commit_runtime_update();
+                Ok(())
+            }
+            EditorAction::LightingEndPreview => {
+                self.end_lighting_preview(LightingPreviewStopReason::UserRequested);
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -627,6 +635,7 @@ impl WorkbenchStore {
                     .document_store
                     .compare(&device_config, baseline)
                     .map_err(WorkbenchError::Storage)?;
+                self.end_lighting_preview(LightingPreviewStopReason::ModalClosed);
                 self.active_modal = Some(EditorModalProjection::ReconnectComparison(
                     build_comparison_modal_projection(&cmp),
                 ));
@@ -659,6 +668,7 @@ impl WorkbenchStore {
                 self.document_store
                     .resolve_comparison(&token, choice, &current_snapshot)
                     .map_err(WorkbenchError::Storage)?;
+                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.active_modal = None;
                 self.v070_hardware.device_layer_override = None;
                 self.ensure_selected_profile_visible();
@@ -671,6 +681,7 @@ impl WorkbenchStore {
                     .document_store
                     .preview_apply(&current_snapshot)
                     .map_err(WorkbenchError::Storage)?;
+                self.end_lighting_preview(LightingPreviewStopReason::ModalClosed);
                 self.active_modal = Some(EditorModalProjection::ApplyPreparation(
                     build_apply_modal_projection(&preview),
                 ));
@@ -783,6 +794,7 @@ impl WorkbenchStore {
                         Vec::new(),
                     )
                 };
+                self.end_lighting_preview(LightingPreviewStopReason::ModalClosed);
                 self.active_modal = Some(EditorModalProjection::MacroEditor(proj));
                 self.commit_runtime_update();
                 Ok(())
@@ -1009,7 +1021,8 @@ impl WorkbenchStore {
                 self.document_store
                     .update(|draft| ensure_layer_has_base_lighting(draft, &pid, &lid, all_layers))
                     .map_err(WorkbenchError::Storage)?;
-                let proj = self.build_lighting_modal_projection(None)?;
+                let preview_err = self.sync_lighting_preview_for_layer(&lid);
+                let proj = self.build_lighting_modal_projection(preview_err)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
                 self.commit_runtime_update();
                 Ok(())
@@ -1033,7 +1046,9 @@ impl WorkbenchStore {
                         )
                     })
                     .map_err(WorkbenchError::Storage)?;
-                let proj = self.build_lighting_modal_projection(None)?;
+                let preview_err =
+                    self.push_lighting_preview_edit(&lid, zone, LightingEdit::Effect(effect));
+                let proj = self.build_lighting_modal_projection(preview_err)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
                 self.commit_runtime_update();
                 Ok(())
@@ -1058,7 +1073,9 @@ impl WorkbenchStore {
                         )
                     })
                     .map_err(WorkbenchError::Storage)?;
-                let proj = self.build_lighting_modal_projection(None)?;
+                let preview_err =
+                    self.push_lighting_preview_edit(&lid, zone, LightingEdit::Brightness(clamped));
+                let proj = self.build_lighting_modal_projection(preview_err)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
                 self.commit_runtime_update();
                 Ok(())
@@ -1083,7 +1100,9 @@ impl WorkbenchStore {
                         )
                     })
                     .map_err(WorkbenchError::Storage)?;
-                let proj = self.build_lighting_modal_projection(None)?;
+                let preview_err =
+                    self.push_lighting_preview_edit(&lid, zone, LightingEdit::Speed(clamped));
+                let proj = self.build_lighting_modal_projection(preview_err)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
                 self.commit_runtime_update();
                 Ok(())
@@ -1108,7 +1127,9 @@ impl WorkbenchStore {
                         )
                     })
                     .map_err(WorkbenchError::Storage)?;
-                let proj = self.build_lighting_modal_projection(None)?;
+                let preview_err =
+                    self.push_lighting_preview_edit(&lid, zone, LightingEdit::Magic(clamped));
+                let proj = self.build_lighting_modal_projection(preview_err)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
                 self.commit_runtime_update();
                 Ok(())
@@ -1120,7 +1141,16 @@ impl WorkbenchStore {
             } => {
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
                 self.lighting_apply_to_all_layers = all_layers;
-                let rgb_u32 = parse_hex_color(&color_hex).map_err(WorkbenchError::Storage)?;
+                let rgb_u32 = match parse_hex_color(&color_hex) {
+                    Ok(rgb) => rgb,
+                    Err(err) => {
+                        if let Ok(proj) = self.build_lighting_modal_projection(Some(err.clone())) {
+                            self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
+                        }
+                        self.commit_runtime_update();
+                        return Err(WorkbenchError::Storage(err));
+                    }
+                };
                 self.document_store
                     .update(|draft| {
                         ensure_layer_has_base_lighting(draft, &pid, &lid, all_layers)?;
@@ -1133,7 +1163,9 @@ impl WorkbenchStore {
                         )
                     })
                     .map_err(WorkbenchError::Storage)?;
-                let proj = self.build_lighting_modal_projection(None)?;
+                let preview_err =
+                    self.push_lighting_preview_edit(&lid, zone, LightingEdit::Color(rgb_u32));
+                let proj = self.build_lighting_modal_projection(preview_err)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
                 self.commit_runtime_update();
                 Ok(())
@@ -1161,29 +1193,16 @@ impl WorkbenchStore {
                         }
                     })
                     .map_err(WorkbenchError::Storage)?;
-                let proj = self.build_lighting_modal_projection(None)?;
+                let preview_err = self.sync_lighting_preview_for_layer(&lid);
+                let proj = self.build_lighting_modal_projection(preview_err)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
                 self.commit_runtime_update();
                 Ok(())
             }
-            EditorAction::LightingBeginPreview => {
-                self.lighting_preview_active = true;
-                self.lighting_preview_remaining_secs = 30;
-                let proj = self.build_lighting_modal_projection(None)?;
-                self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.commit_runtime_update();
-                Ok(())
-            }
-            EditorAction::LightingEndPreview => {
-                self.lighting_preview_active = false;
-                self.lighting_preview_remaining_secs = 0;
-                let proj = self.build_lighting_modal_projection(None)?;
-                self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.commit_runtime_update();
-                Ok(())
-            }
+            EditorAction::LightingBeginPreview => self.begin_lighting_preview(),
             EditorAction::OpenMultiEditor { multi_id } => {
                 let proj = self.build_multi_modal_projection(multi_id)?;
+                self.end_lighting_preview(LightingPreviewStopReason::ModalClosed);
                 self.active_modal = Some(EditorModalProjection::MultiEditor(proj));
                 self.commit_runtime_update();
                 Ok(())
@@ -1402,7 +1421,7 @@ impl WorkbenchStore {
         }
     }
 
-    fn build_lighting_modal_projection(
+    pub(super) fn build_lighting_modal_projection(
         &self,
         validation_error: Option<String>,
     ) -> Result<LightingEditorModalProjection, WorkbenchError> {

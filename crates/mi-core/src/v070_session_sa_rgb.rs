@@ -354,6 +354,15 @@ impl SessionSaRgbReconciler {
         self.desired.clear();
         self.urgent_clear_pending = false;
         self.last_target_was_urgent_clear = false;
+        if let Some(batch) = self.in_flight.take() {
+            for chunk in batch.chunks {
+                let (SaRgbChunkKind::Reset(ids) | SaRgbChunkKind::Set { ids, .. }) = chunk.kind;
+                for sa in ids {
+                    self.confirmed.remove(&sa);
+                    self.uncertain_dirty.insert(sa);
+                }
+            }
+        }
     }
 
     pub fn reset_for_new_session(&mut self) {

@@ -507,6 +507,80 @@ pub const CORE_EN_TABLE: &[(&str, &str)] = &[
     ("会话未确认", "Session switch unconfirmed"),
     ("已切换会话", "Switched session"),
     ("会话未切换", "Session not switched"),
+    (
+        "正在启动 30 秒硬件灯光预览…",
+        "Starting 30s hardware lighting preview…",
+    ),
+    (
+        "硬件灯光预览已开启（仅临时 lights.preview，不写入闪存）",
+        "Hardware lighting preview active (temporary lights.preview only, no Flash write)",
+    ),
+    (
+        "硬件灯光预览已停止（未自动恢复设备运行态灯效）",
+        "Hardware lighting preview stopped (runtime lighting not auto-restored)",
+    ),
+    (
+        "30 秒硬件灯光预览已自动停止（未自动恢复设备运行态灯效）",
+        "30s hardware lighting preview auto-stopped (runtime lighting not auto-restored)",
+    ),
+    (
+        "灯光预览正在启动，请稍候",
+        "Lighting preview is starting; please wait",
+    ),
+    ("灯光预览已在进行中", "Lighting preview is already active"),
+    (
+        "上一轮灯光预览正在停止，请稍候重试",
+        "Previous lighting preview is stopping; try again shortly",
+    ),
+    (
+        "当前图层尚未配置双区灯效，请先初始化灯效后再预览",
+        "This layer has no dual-zone lighting configured; initialize lighting first",
+    ),
+    (
+        "六层操作正在进行，请稍后重试灯光预览",
+        "6-layer operation in progress; retry lighting preview shortly",
+    ),
+    (
+        "六层运行代次已失效，无法启动灯光预览",
+        "6-layer runtime generation retired; cannot start lighting preview",
+    ),
+    (
+        "当前已有灯光预览正在进行",
+        "A lighting preview is already in progress",
+    ),
+    (
+        "当前 USB 会话请求配额即将耗尽，请稍后重试预览",
+        "Current USB session request budget is nearly exhausted; retry preview shortly",
+    ),
+    (
+        "尚未连接已核验的 USB 专用独占键盘，无法启动硬件灯光预览",
+        "No verified USB exclusive keypad connected; cannot start hardware lighting preview",
+    ),
+    (
+        "正在核验 USB 键盘会话，请稍后再试",
+        "Verifying USB keypad session; try again shortly",
+    ),
+    (
+        "设备预览通道已关闭，无法启动灯光预览",
+        "Device preview channel closed; cannot start lighting preview",
+    ),
+    (
+        "当前设备连接不支持原生灯光预览（需 macOS USB 专用独占通道）",
+        "Current device connection does not support native lighting preview (requires macOS USB exclusive vendor link)",
+    ),
+    (
+        "当前设备固件版本不支持原生灯光预览",
+        "Current device firmware does not support native lighting preview",
+    ),
+    (
+        "设备连接已断开，灯光预览已停止（未自动恢复原灯效）",
+        "Device disconnected; lighting preview stopped (original lighting not auto-restored)",
+    ),
+    (
+        "设备预览连接异常中断，已停止预览（未自动恢复原灯效）",
+        "Preview connection interrupted; preview stopped without retry (original lighting not auto-restored)",
+    ),
+    ("灯光预览状态不可用", "Lighting preview status unavailable"),
 ];
 
 pub fn en_lookup(zh: &str) -> Option<&'static str> {
@@ -885,6 +959,10 @@ pub fn relocalize_status_message(msg: &str, next_locale: ResolvedLocale) -> Stri
             if fw != msg {
                 return fw;
             }
+            let preview = localize_lighting_preview_message(msg, ResolvedLocale::En);
+            if preview != msg {
+                return preview;
+            }
             let v070 = localize_v070_status_message(msg, ResolvedLocale::En);
             if v070 != msg {
                 return v070;
@@ -896,6 +974,34 @@ pub fn relocalize_status_message(msg: &str, next_locale: ResolvedLocale) -> Stri
             msg.to_string()
         }
     }
+}
+
+pub fn localize_lighting_preview_message(msg: &str, locale: ResolvedLocale) -> String {
+    if locale == ResolvedLocale::ZhHans {
+        return msg.to_string();
+    }
+    if let Some(en) = en_lookup(msg) {
+        return en.to_string();
+    }
+    if let Some(err) = msg.strip_prefix("当前灯光配置无效，无法启动硬件预览：") {
+        return format!("Invalid lighting configuration; cannot start hardware preview: {err}");
+    }
+    if let Some(err) = msg.strip_prefix("硬件灯光预览启动失败：") {
+        return format!("Failed to start hardware lighting preview: {err}");
+    }
+    if let Some(err) = msg.strip_prefix("硬件灯光预览异常停止（未自动恢复原灯效）：")
+    {
+        return format!(
+            "Hardware lighting preview stopped on error (original lighting not auto-restored): {err}"
+        );
+    }
+    if let Some(input) = msg.strip_prefix("颜色格式无效（需为 #RRGGBB）：") {
+        return format!("Invalid color format (expected #RRGGBB): {input}");
+    }
+    if let Some(input) = msg.strip_prefix("颜色十六进制无效：") {
+        return format!("Invalid hex color: {input}");
+    }
+    msg.to_string()
 }
 
 pub fn localize_v070_status_message(msg: &str, locale: ResolvedLocale) -> String {

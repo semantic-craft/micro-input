@@ -32,6 +32,7 @@ impl WorkbenchStore {
         }
         self.cancel_session_navigation();
         self.session_navigation.catalog = None;
+        self.end_lighting_preview_blocking(LightingPreviewStopReason::SystemSleep);
         self.teardown_v070_session_sa_rgb();
         self.system_lifecycle = SystemLifecycle::Sleeping;
         self.v070_hardware.on_disconnected();
@@ -65,8 +66,6 @@ impl WorkbenchStore {
         ) {
             self.active_modal = None;
         }
-        self.lighting_preview_active = false;
-        self.lighting_preview_remaining_secs = 0;
         self.connected_candidate = None;
         self.available_usb_candidates.clear();
         self.hardware_rpc_verified = false;

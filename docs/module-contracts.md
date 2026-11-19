@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | 输入流与按键解析 | [input.rs](../crates/mi-session/src/input.rs) | `CandidateInputDecoder` 与 `VerifiedInputDecoder`、`WideKeyMerger` 宽键合并 |
 | 配置写入与分块传输 | [config_write.rs](../crates/mi-session/src/config_write.rs) | `ConfigWriter` 的计划绑定应用与恢复，合成构造受 feature 限制 |
-| 灯光即时预览 | [lighting_preview.rs](../crates/mi-session/src/lighting_preview.rs) | 原生 `Preview::begin_native` 与合成 `Preview::begin` |
+| 灯光即时预览 | [lighting_preview.rs](../crates/mi-session/src/lighting_preview.rs)、[lighting_preview_store.rs](../crates/mi-core/src/store/lighting_preview_store.rs) | 原生 `Preview::begin_native`、合成 `Preview::begin` 与工作台 `LightingPreviewState` / `VendorBridgePreviewLease` 接线 |
 | 宿主动作与透传路由 | [host_router.rs](../crates/mi-model/src/host_router.rs) | `check_passthrough_health`、`resolve_host_action` 纯函数路由 |
 | 偏好与路由存储 | [routing.rs](../crates/mi-model/src/storage/routing.rs) | 宿主启用状态、手动选择/锁定方案、常用置顶与旧偏好字段静默退役 |
 | 变更候选生成 | [apply.rs](../crates/mi-model/src/apply.rs) | `Pending`、`Preview` 与一次消费的 `PreparedCandidate` |
@@ -94,7 +94,7 @@
 
 ## RGB 编辑与合成预览
 
-RGB 编辑由 [Draft](../crates/mi-model/src/draft.rs) 与 [mi-model::lighting](../crates/mi-model/src/lighting.rs) 保存，`WorkbenchStore` 转发编辑并生成参数投影。旧 `mi-ffi::lighting` 是已退役的历史模块。当前 `LightingBeginPreview` 只更新工作台预览状态与秒数，未调用会话 `Preview::begin_native`；这是工程接线缺口，不能只标为实体效果未验收。下面的合成和原生预览契约描述会话层能力。
+RGB 编辑由 [Draft](../crates/mi-model/src/draft.rs) 与 [mi-model::lighting](../crates/mi-model/src/lighting.rs) 保存，`WorkbenchStore`（[lighting_preview_store.rs](../crates/mi-core/src/store/lighting_preview_store.rs)）转发编辑、生成参数投影，并经 `LightingPreviewState` 与 `VendorBridgePreviewLease` 将 `LightingBeginPreview`、`LightingEndPreview` 及实时参数编辑/重置接入会话层 `Preview::begin_native`（支持 `0.6.3` / `0.7.0*` 原生固件）。预览持有租约期间暂停 `v.oai.thstatus`、`kb.sa.rgb` 与 900 请求预轮转，并在关闭弹窗、切换方案/层、进入受保护层、断连、睡眠或挂起时干净停止，不宣称自动恢复原灯效或已完成实体灯光视觉验收。旧 `mi-ffi::lighting` 是已退役的历史模块。下面的合成和原生预览契约描述会话层能力。
 
 `mi-session::lighting_preview::Preview::begin`（[lighting_preview.rs](../crates/mi-session/src/lighting_preview.rs)）只在 synthetic-backend 编译并拒绝非合成连接；使用明确标记的 `synthetic.lights.read/set` 测试协议，而非臆造官方预览 ACK/目标绑定规则。可变合成文件另存运行态和活动目标；目标及最后一次已确认运行态同时匹配的原子 set 才改变运行态，文件保持原字节。原生 `begin_native` 按文末契约单独发送，不复用这些合成消息。
 
@@ -118,7 +118,7 @@ RGB 编辑由 [Draft](../crates/mi-model/src/draft.rs) 与 [mi-model::lighting](
 
 ## 原生配置计划入口（E-108）
 
-`ConfigWriter` 共用持久记录和独立读回，原生构造要求受支持后端与接口身份，执行时重新核验固件和计划基线。旧 FFI 的唯一 USB 型号检查属于历史接线，不能替当前 C-ABI 作证。一般RPC仍只读；只有私有 `exchange_keymap` 为审阅计划构造固定keymap写块。MacLink按整条RPC持锁发送所有报告，唯一reader不会插入阻塞读取。原生基线包含随机connection_nonce，同连接原值恢复可用，跨连接旧记录拒绝。RGB 可进入 keymap 候选；会话层原生即时预览遵循文末契约，工作台接线缺口见上节；文件读回不代表物理/视觉验收。
+`ConfigWriter` 共用持久记录和独立读回，原生构造要求受支持后端与接口身份，执行时重新核验固件和计划基线。旧 FFI 的唯一 USB 型号检查属于历史接线，不能替当前 C-ABI 作证。一般RPC仍只读；只有私有 `exchange_keymap` 为审阅计划构造固定keymap写块。MacLink按整条RPC持锁发送所有报告，唯一reader不会插入阻塞读取。原生基线包含随机connection_nonce，同连接原值恢复可用，跨连接旧记录拒绝。RGB 可进入 keymap 候选；工作台经 `LightingPreviewState` 与 `VendorBridgePreviewLease` 接入会话层 `Preview::begin_native`（支持 `0.6.3` / `0.7.0*`，契约见上节与文末），不自动恢复原灯效；文件读回与协议 ACK 均不代表物理/视觉验收。
 
 ## 设备编辑与宿主文档隔离
 
@@ -130,9 +130,9 @@ RGB 编辑由 [Draft](../crates/mi-model/src/draft.rs) 与 [mi-model::lighting](
 
 原生预览为显式设备级操作：将所选草稿灯光的两区已知参数发送到当前核验连接，不切换 Profile/Layer、不写配置文件。结束、关闭或 30 秒到期停止待发更新并等待在途请求，返回 Stopped；不声称自动恢复或运行态读回。失败停止且不重发，明确断连退役旧预览。合成恢复模拟器的 Restored/原子比较不作为原生开放前提。
 
-会话层 `Preview::begin_native` 接收两区值，并经当前连接重新核对 0.6.3。当前工作台尚未调用此入口，旧 FFI 的唯一 USB 型号检查不代表当前生产调用。每次持有现有队列后重新取最新watch值，停止/所有者取消/到期后不发送旧pending；已经发送的交换完成后再结束，失败断开旧会话、不重发。`exchange_lighting` 只编码固定两区DTO，通用字节出口仍拒绝灯光方法。
+会话层 `Preview::begin_native`（及有界变体 `Preview::begin_native_bounded`）接收两区值，并经当前连接重新核对受支持原生固件（`0.6.3` / `0.7.0*`，见 `is_supported_native_firmware`）。`WorkbenchStore` 已通过 [lighting_preview_store.rs](../crates/mi-core/src/store/lighting_preview_store.rs) 的 `LightingPreviewState` 与 `VendorBridgePreviewLease` 接入此入口，转发 `LightingBeginPreview`、`LightingEndPreview` 与模态框内实时参数编辑（`update` / `replace`）；预览持有租约期间抑制 `v.oai.thstatus`、`kb.sa.rgb` 及 900 请求预轮转，在关闭弹窗、切换上下文、断连、系统睡眠或挂起时干净停止并排空旧预览，且不宣称自动恢复运行态或实体灯光视觉已验收。每次持有现有队列后重新取最新 watch 值，停止/所有者取消/到期后不发送旧 pending；已经发送的交换完成后再结束，失败断开旧会话、不重发。`exchange_lighting` 只编码固定两区 DTO，通用字节出口仍拒绝灯光方法。
 
-历史预览采纳设计要求绑定进入时的文档身份与修订，通过 DocumentStore 原子保存并作为一次 undo；当前实时预览接线尚未证实。`add_lighting` 只对原始来源完全不存在 lights 成员开放，新增成员编译保持所有非目标原字节；未知字段和已有null不补默认值。
+模态框实时编辑通过 `DocumentStore` 原子保存并同步推送到当前活跃预览，不写入设备 Flash 也不宣称自动恢复原灯效；旧 FFI 的唯一 USB 型号检查与历史独立预览采纳设计均已退役。`add_lighting` 只对原始来源完全不存在 lights 成员开放，新增成员编译保持所有非目标原字节；未知字段和已有 null 不补默认值。
 
 ## 本地文档 v2 与三方比较契约
 

@@ -135,6 +135,10 @@ impl WorkbenchStore {
                     .document_store
                     .update(|draft| draft.assign(&pid, &lid, 0, device_key_action));
             }
+            self.ensure_selected_profile_visible();
+            self.sync_modal_for_layer_protection();
+            self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
+            self.sync_lighting_preview_after_document_change();
         }
         snap
     }
@@ -378,6 +382,7 @@ impl WorkbenchStore {
             .as_ref()
             .is_some_and(|s| s.is_disconnected() || self.input_lost_session == Some(s.id))
         {
+            self.end_lighting_preview_blocking(LightingPreviewStopReason::DeviceDisconnected);
             if self
                 .device_session
                 .as_ref()
@@ -689,6 +694,7 @@ impl WorkbenchStore {
             self.commit_runtime_update();
             return Ok(true);
         }
+        self.end_lighting_preview_blocking(LightingPreviewStopReason::ExclusiveDeviceTransition);
         self.teardown_v070_session_sa_rgb();
         self.release_board_inputs(self.update_now);
         if let Some(session) = self.device_session.take() {
@@ -730,10 +736,27 @@ impl WorkbenchStore {
         now: Instant,
     ) -> Option<HostActionReceipt> {
         self.update_now = now;
+        let event = match event {
+            HardwareLoopEvent::LightingPreviewStarted { generation, result } => {
+                if self.handle_lighting_preview_started(now, generation, result) {
+                    self.commit_runtime_update();
+                }
+                return None;
+            }
+            HardwareLoopEvent::LightingPreviewEnded { generation } => {
+                if self.handle_lighting_preview_ended(generation) {
+                    self.commit_runtime_update();
+                }
+                return None;
+            }
+            other => other,
+        };
         if self.system_lifecycle != SystemLifecycle::Awake {
             return None;
         }
         match event {
+            HardwareLoopEvent::LightingPreviewStarted { .. }
+            | HardwareLoopEvent::LightingPreviewEnded { .. } => unreachable!(),
             HardwareLoopEvent::Input(input_event) => {
                 let session = self.device_session.as_ref()?;
                 if session.id != input_event.session_id
@@ -749,6 +772,9 @@ impl WorkbenchStore {
                     .as_ref()
                     .is_some_and(|s| s.id == session_id)
                 {
+                    self.end_lighting_preview_blocking(
+                        LightingPreviewStopReason::DeviceDisconnected,
+                    );
                     if let Some(running) = &self.six_layer_running {
                         running.receiver.invalidate("USB 会话已断开");
                     }
@@ -837,6 +863,9 @@ impl WorkbenchStore {
                     .as_ref()
                     .is_some_and(|s| s.is_disconnected() || old_path_missing)
                 {
+                    self.end_lighting_preview_blocking(
+                        LightingPreviewStopReason::DeviceDisconnected,
+                    );
                     if let Some(running) = &self.six_layer_running {
                         running.receiver.invalidate("USB 设备身份已变化");
                     }

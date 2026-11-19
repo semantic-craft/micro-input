@@ -127,6 +127,13 @@ impl Preview {
         session: Arc<DeviceSession>,
         lights: Lighting,
     ) -> Result<Arc<Self>, String> {
+        Self::begin_native_bounded(session, lights, Duration::from_secs(30)).await
+    }
+    pub async fn begin_native_bounded(
+        session: Arc<DeviceSession>,
+        lights: Lighting,
+        duration: Duration,
+    ) -> Result<Arc<Self>, String> {
         if session.backend_name() != "hidapi-2.6.7/macOS/numbered-0x06" {
             return Err("unsupported preview connection".into());
         }
@@ -141,11 +148,12 @@ impl Preview {
         {
             return Err("unsupported preview firmware".into());
         }
-        Self::begin_native_task(session, lights).await
+        Self::begin_native_task(session, lights, duration).await
     }
     async fn begin_native_task(
         session: Arc<DeviceSession>,
         lights: Lighting,
+        duration: Duration,
     ) -> Result<Arc<Self>, String> {
         Self::native_params(&lights)?;
         let (commands, mut rx) = watch::channel(Some(lights.clone()));
@@ -153,7 +161,7 @@ impl Preview {
             watch::channel(json!({"phase":"Starting","physical_visual":"NOT_RUN"}));
         let (ready_tx, ready_rx) = oneshot::channel();
         tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let deadline = tokio::time::Instant::now() + duration;
             let mut ready = Some(ready_tx);
             let mut failed = false;
             'preview: loop {
@@ -195,7 +203,7 @@ impl Preview {
                 tokio::select! { biased;
                     _ = session.wait_disconnected() => { failed = true; break; }
                     _ = tokio::time::sleep_until(deadline) => break,
-                    change = rx.changed() => if change.is_err() { break; }
+                    change = rx.changed() => if change.is_err() || rx.borrow().is_none() { break; }
                 }
                 // Coalesce pending edits without cancelling an exchange already in flight.
                 tokio::select! { biased;
@@ -240,6 +248,19 @@ impl Preview {
         desired.edit(zone, edit)?;
         *guard = Some(desired.clone());
         self.commands.send_replace(Some(desired));
+        Ok(())
+    }
+    pub fn replace(&self, lights: Lighting) -> Result<(), String> {
+        Self::native_params(&lights)?;
+        if self.status()["phase"] != "Active" {
+            return Err("preview has ended".into());
+        }
+        let mut guard = self.desired.lock().unwrap();
+        if guard.is_none() {
+            return Err("preview is ending".into());
+        }
+        *guard = Some(lights.clone());
+        self.commands.send_replace(Some(lights));
         Ok(())
     }
     pub async fn end(&self) -> Value {
@@ -591,7 +612,12 @@ mod native_tests {
         let queue = session.queue.lock().await;
         let other = session.clone();
         let begin = tokio::spawn(async move {
-            Preview::begin_native_task(other, Lighting::creator_micro_2_defaults()).await
+            Preview::begin_native_task(
+                other,
+                Lighting::creator_micro_2_defaults(),
+                Duration::from_secs(30),
+            )
+            .await
         });
         tokio::task::yield_now().await;
         begin.abort();
@@ -620,6 +646,84 @@ mod native_tests {
         drop(preview);
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(requests.lock().unwrap().len(), 2);
+        session.shutdown().await;
+    }
+    #[tokio::test]
+    async fn native_preview_replace_sends_updated_two_zone_lighting_and_rejects_after_end() {
+        let (session, requests, _) = setup().await;
+        let initial = Lighting::creator_micro_2_defaults();
+        let preview = Preview::begin_native(session.clone(), initial.clone())
+            .await
+            .unwrap();
+        let mut invalid = initial.clone();
+        invalid.backlight["color"] = json!(0x100_0000);
+        assert!(preview.replace(invalid).is_err());
+        assert_eq!(preview.lighting(), Some(initial));
+
+        let mut updated = Lighting::creator_micro_2_defaults();
+        updated.backlight["effect"] = json!("breath");
+        updated.backlight["brightness"] = json!(0.6);
+        updated.backlight["color"] = json!(0x112233);
+        updated.underglow["effect"] = json!("solid");
+        updated.underglow["brightness"] = json!(0.4);
+        updated.underglow["color"] = json!(0x445566);
+        preview.replace(updated.clone()).unwrap();
+        wait_for(&requests, 3).await;
+        {
+            let recorded = requests.lock().unwrap();
+            let last = &recorded[2];
+            assert_eq!(last["method"], "lights.preview");
+            assert_eq!(last["params"]["backlight"]["effect"], "breath");
+            assert_eq!(last["params"]["backlight"]["brightness"], 0.6);
+            assert_eq!(last["params"]["backlight"]["color"], 0x112233);
+            assert_eq!(last["params"]["underglow"]["effect"], "solid");
+            assert_eq!(last["params"]["underglow"]["brightness"], 0.4);
+            assert_eq!(last["params"]["underglow"]["color"], 0x445566);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let started = std::time::Instant::now();
+        assert_eq!(preview.end().await["phase"], "Stopped");
+        assert!(
+            started.elapsed() < Duration::from_millis(60),
+            "idle native preview end must bypass the 80ms coalescing delay"
+        );
+        assert!(preview.replace(updated).is_err());
+        session.shutdown().await;
+    }
+    #[tokio::test]
+    async fn native_preview_bounded_auto_stops_without_restore_claim() {
+        let (session, requests, _) = setup().await;
+        let preview = Preview::begin_native_bounded(
+            session.clone(),
+            Lighting::creator_micro_2_defaults(),
+            Duration::from_millis(120),
+        )
+        .await
+        .unwrap();
+        let count_after_begin = requests.lock().unwrap().len();
+        assert_eq!(count_after_begin, 2);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while preview.status()["phase"] == "Active" {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let status = preview.status();
+        assert_eq!(status["phase"], "Stopped");
+        assert_eq!(status["runtime_readback"], "NOT_AVAILABLE");
+        assert_eq!(status["physical_visual"], "NOT_RUN");
+        {
+            let recorded = requests.lock().unwrap();
+            assert_eq!(recorded.len(), count_after_begin);
+            assert_eq!(
+                recorded
+                    .iter()
+                    .filter(|r| r["method"] == "lights.preview")
+                    .count(),
+                1
+            );
+        }
         session.shutdown().await;
     }
 }

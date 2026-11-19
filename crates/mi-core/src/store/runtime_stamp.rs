@@ -163,6 +163,9 @@ pub(crate) struct RuntimeCommitStamp {
     navigation_history_hash: u64,
     slot_table_hash: u64,
     lighting_arbiter_hash: u64,
+    lighting_preview_active: bool,
+    lighting_preview_remaining_secs: u8,
+    lighting_modal_validation_error_hash: u64,
     board_config_hash: u64,
     slot_role_overrides_hash: u64,
 }
@@ -416,6 +419,18 @@ impl WorkbenchStore {
         h.finish()
     }
 
+    fn lighting_modal_validation_error_hash(&self) -> u64 {
+        let mut h = Fnv1a::new();
+        match &self.active_modal {
+            Some(EditorModalProjection::LightingEditor(modal)) => {
+                h.write_u8(1);
+                h.write_opt_str(modal.validation_error.as_deref());
+            }
+            _ => h.write_u8(0),
+        }
+        h.finish()
+    }
+
     pub(crate) fn current_runtime_stamp(&self) -> RuntimeCommitStamp {
         RuntimeCommitStamp {
             draft_revision: self.document_store.draft.revision,
@@ -461,6 +476,9 @@ impl WorkbenchStore {
             navigation_history_hash: self.navigation_history_hash(),
             slot_table_hash: self.slot_table_hash(),
             lighting_arbiter_hash: self.lighting_arbiter_hash(),
+            lighting_preview_active: self.lighting_preview_active,
+            lighting_preview_remaining_secs: self.lighting_preview_remaining_secs,
+            lighting_modal_validation_error_hash: self.lighting_modal_validation_error_hash(),
             board_config_hash: self.board_config_hash(),
             slot_role_overrides_hash: self.slot_role_overrides_hash(),
         }

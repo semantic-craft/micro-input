@@ -8,8 +8,17 @@ use tokio::sync::Notify;
 
 pub(super) const INPUT_CAPACITY: usize = 256;
 pub(super) const INPUT_BATCH: usize = 32;
-pub(super) const CONTROL_BATCH: usize = 8;
+pub(super) const CONTROL_BATCH: usize = 10;
 pub(super) const CHEAT_SHEET_NOTIF_CAPACITY: usize = 16;
+
+fn detach_if_preview_started(event: HardwareLoopEvent) {
+    if let HardwareLoopEvent::LightingPreviewStarted {
+        result: Ok(handle), ..
+    } = event
+    {
+        handle.detach_on_drop();
+    }
+}
 
 #[derive(Default)]
 struct Pending {
@@ -26,6 +35,8 @@ struct Pending {
     v070_capability: Option<HardwareLoopEvent>,
     v070_profile_layer: Option<HardwareLoopEvent>,
     encoder_hold_timer: Option<HardwareLoopEvent>,
+    lighting_preview_started: Option<HardwareLoopEvent>,
+    lighting_preview_ended: Option<HardwareLoopEvent>,
 }
 
 #[derive(Clone, Default)]
@@ -55,19 +66,29 @@ impl RuntimeInbox {
     }
 
     pub(super) fn close(&self) {
-        let mut pending = self.pending.lock().unwrap();
-        *pending = Pending {
-            closed: true,
-            ..Pending::default()
+        let stale_started = {
+            let mut pending = self.pending.lock().unwrap();
+            let stale = pending.lighting_preview_started.take();
+            *pending = Pending {
+                closed: true,
+                ..Pending::default()
+            };
+            stale
         };
+        if let Some(event) = stale_started {
+            detach_if_preview_started(event);
+        }
         self.ready.notify_waiters();
     }
 
     pub(crate) fn send(&self, event: HardwareLoopEvent) -> Result<(), ()> {
         let mut pending = self.pending.lock().unwrap();
         if pending.closed {
+            drop(pending);
+            detach_if_preview_started(event);
             return Err(());
         }
+        let mut discarded: Option<HardwareLoopEvent> = None;
         match event {
             HardwareLoopEvent::Input(mut input) => {
                 if pending.session != Some(input.session_id) || pending.source_closed {
@@ -141,8 +162,30 @@ impl RuntimeInbox {
                     pending.encoder_hold_timer = Some(event);
                 }
             }
+            event @ HardwareLoopEvent::LightingPreviewStarted { generation, .. } => {
+                let keep_existing = matches!(
+                    &pending.lighting_preview_started,
+                    Some(HardwareLoopEvent::LightingPreviewStarted { generation: old, .. }) if *old > generation
+                );
+                if keep_existing {
+                    discarded = Some(event);
+                } else {
+                    discarded = pending.lighting_preview_started.replace(event);
+                }
+            }
+            event @ HardwareLoopEvent::LightingPreviewEnded { generation } => {
+                if !matches!(
+                    &pending.lighting_preview_ended,
+                    Some(HardwareLoopEvent::LightingPreviewEnded { generation: old }) if *old > generation
+                ) {
+                    pending.lighting_preview_ended = Some(event);
+                }
+            }
         }
         drop(pending);
+        if let Some(stale) = discarded {
+            detach_if_preview_started(stale);
+        }
         self.ready.notify_one();
         Ok(())
     }
@@ -161,6 +204,8 @@ impl RuntimeInbox {
             pending.v070_capability.take(),
             pending.v070_profile_layer.take(),
             pending.encoder_hold_timer.take(),
+            pending.lighting_preview_ended.take(),
+            pending.lighting_preview_started.take(),
         ]
         .into_iter()
         .flatten()
@@ -192,6 +237,8 @@ impl RuntimeInbox {
                     .or_else(|| pending.v070_capability.take())
                     .or_else(|| pending.v070_profile_layer.take())
                     .or_else(|| pending.encoder_hold_timer.take())
+                    .or_else(|| pending.lighting_preview_ended.take())
+                    .or_else(|| pending.lighting_preview_started.take())
                     .or_else(|| pending.input.pop_front())
                     .or_else(|| pending.cheat_sheet_notifications.pop_front())
                 {
@@ -428,5 +475,104 @@ mod tests {
             .unwrap();
         inbox.open_source(2);
         assert!(inbox.take_batch().is_empty());
+    }
+
+    #[test]
+    fn lighting_preview_slots_preserve_latest_generation_and_detach_superseded_or_closed_handles() {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct CountingHandle(Arc<AtomicUsize>);
+
+        impl crate::store::LightingPreviewHandle for CountingHandle {
+            fn update(
+                &self,
+                _: mi_model::lighting::Zone,
+                _: mi_model::lighting::Edit,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn replace(&self, _: mi_model::lighting::Lighting) -> Result<(), String> {
+                Ok(())
+            }
+            fn phase(&self) -> crate::store::LightingPreviewPhase {
+                crate::store::LightingPreviewPhase::Active
+            }
+            fn end_future(
+                &self,
+            ) -> Pin<Box<dyn Future<Output = crate::store::LightingPreviewPhase> + Send + 'static>>
+            {
+                Box::pin(async { crate::store::LightingPreviewPhase::Stopped })
+            }
+            fn detach_on_drop(&self) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        let inbox = RuntimeInbox::default();
+        let d1 = Arc::new(AtomicUsize::new(0));
+        let d2 = Arc::new(AtomicUsize::new(0));
+        let d3 = Arc::new(AtomicUsize::new(0));
+        let d4 = Arc::new(AtomicUsize::new(0));
+
+        inbox
+            .send(HardwareLoopEvent::LightingPreviewStarted {
+                generation: 2,
+                result: Ok(Box::new(CountingHandle(Arc::clone(&d2)))),
+            })
+            .unwrap();
+        inbox
+            .send(HardwareLoopEvent::LightingPreviewStarted {
+                generation: 1,
+                result: Ok(Box::new(CountingHandle(Arc::clone(&d1)))),
+            })
+            .unwrap();
+        assert_eq!(d1.load(Ordering::Acquire), 1);
+        assert_eq!(d2.load(Ordering::Acquire), 0);
+
+        inbox
+            .send(HardwareLoopEvent::LightingPreviewEnded { generation: 2 })
+            .unwrap();
+        inbox
+            .send(HardwareLoopEvent::DiscoveryChanged { epoch: 5 })
+            .unwrap();
+        inbox.open_source(9);
+
+        let batch = inbox.take_batch();
+        assert_eq!(batch.len(), 3);
+        assert!(matches!(
+            batch[0],
+            HardwareLoopEvent::DiscoveryChanged { epoch: 5 }
+        ));
+        assert!(matches!(
+            batch[1],
+            HardwareLoopEvent::LightingPreviewEnded { generation: 2 }
+        ));
+        assert!(matches!(
+            batch[2],
+            HardwareLoopEvent::LightingPreviewStarted {
+                generation: 2,
+                result: Ok(_)
+            }
+        ));
+
+        inbox
+            .send(HardwareLoopEvent::LightingPreviewStarted {
+                generation: 3,
+                result: Ok(Box::new(CountingHandle(Arc::clone(&d3)))),
+            })
+            .unwrap();
+        inbox.close();
+        assert_eq!(d3.load(Ordering::Acquire), 1);
+
+        assert!(inbox
+            .send(HardwareLoopEvent::LightingPreviewStarted {
+                generation: 4,
+                result: Ok(Box::new(CountingHandle(Arc::clone(&d4)))),
+            })
+            .is_err());
+        assert_eq!(d4.load(Ordering::Acquire), 1);
     }
 }

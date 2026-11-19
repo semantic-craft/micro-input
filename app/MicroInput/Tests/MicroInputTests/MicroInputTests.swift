@@ -1592,6 +1592,63 @@ final class MicroInputTests: XCTestCase {
         XCTAssertFalse(store.header.canRetryHostCleanup)
         XCTAssertEqual(L10n.tr("重试清理", .en), "Retry Cleanup")
     }
+
+    @MainActor
+    func testLightingEditorPreviewRoundtripOfflineAndLocaleSwitch() throws {
+        let dir = try makeIsolatedTempDir("lighting-preview-roundtrip")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        defer { store.stopEventLoops() }
+
+        XCTAssertFalse(store.sidebar.isProtectedLayer)
+        store.dispatch("editor", "OpenLightingEditor")
+        guard case .lightingEditor(var lighting) = store.activeModal else {
+            return XCTFail("Expected lighting editor modal to open")
+        }
+
+        if !lighting.hasLighting {
+            store.dispatch("editor", "LightingAddDefault")
+            guard case .lightingEditor(let initialized) = store.activeModal else {
+                return XCTFail("Expected lighting editor modal after LightingAddDefault")
+            }
+            lighting = initialized
+        }
+        XCTAssertTrue(lighting.hasLighting)
+        XCTAssertFalse(lighting.previewActive)
+        XCTAssertEqual(lighting.previewRemainingSecs, 0)
+
+        store.dispatch("editor", "LightingBeginPreview")
+        guard case .lightingEditor(let afterBegin) = store.activeModal else {
+            return XCTFail("Expected lighting editor modal to stay open after LightingBeginPreview")
+        }
+        XCTAssertFalse(afterBegin.previewActive)
+        XCTAssertEqual(afterBegin.previewRemainingSecs, 0)
+        let zhError = try XCTUnwrap(afterBegin.validationError)
+        XCTAssertFalse(zhError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+        store.setUiLanguage(.en)
+        XCTAssertEqual(store.locale, .en)
+        XCTAssertEqual(store.tr("在键盘上预览"), "Preview on Pad")
+        guard case .lightingEditor(let enModal) = store.activeModal else {
+            return XCTFail("Expected lighting editor modal to remain open after switching to English")
+        }
+        XCTAssertFalse(enModal.previewActive)
+        XCTAssertEqual(enModal.previewRemainingSecs, 0)
+        let enError = try XCTUnwrap(enModal.validationError)
+        XCTAssertFalse(enError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertNotEqual(enError, zhError)
+        XCTAssertTrue(enError.allSatisfy(\.isASCII), "Expected English localized preview error, got \(enError)")
+        XCTAssertTrue(enError.localizedCaseInsensitiveContains("preview"))
+
+        store.dispatch("editor", "LightingEndPreview")
+        guard case .lightingEditor(let afterEnd) = store.activeModal else {
+            return XCTFail("Expected lighting editor modal to remain open after LightingEndPreview")
+        }
+        XCTAssertNil(afterEnd.validationError)
+        XCTAssertFalse(afterEnd.previewActive)
+        XCTAssertEqual(afterEnd.previewRemainingSecs, 0)
+    }
 }
 
 @MainActor

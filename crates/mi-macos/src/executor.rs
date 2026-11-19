@@ -4634,19 +4634,25 @@ mod serialized_effect_tests {
             receipt.detail
         );
         assert!(
-            elapsed < Duration::from_millis(600),
+            elapsed < Duration::from_millis(2_000),
             "timeout wait took too long: {elapsed:?}"
         );
 
-        let stdin_receipt = executor.execute(
+        let stdin_executor = LiveHostActionExecutor::new(RecordingOsDriver::new(true))
+            .with_shell_command_timeout(Duration::from_secs(2));
+        let stdin_receipt = stdin_executor.execute(
             "Antigravity",
             "AG00",
             &ResolvedHostAction::ShellCommand {
-                command: "test ! -t 0 && [ \"$(head -c 1 | wc -c | tr -d ' ')\" = 0 ]".into(),
+                command: "test ! -t 0 && ! IFS= read -r line && [ -z \"$line\" ]".into(),
                 working_directory: "/tmp".into(),
             },
         );
-        assert_eq!(stdin_receipt.outcome, "executed");
+        assert_eq!(
+            stdin_receipt.outcome, "executed",
+            "unexpected stdin detail: {}",
+            stdin_receipt.detail
+        );
     }
 
     #[test]

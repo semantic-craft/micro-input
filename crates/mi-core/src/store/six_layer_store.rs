@@ -297,6 +297,7 @@ impl WorkbenchStore {
     pub(super) fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
         self.cancel_session_navigation();
         self.cancel_encoder_model_picker();
+        self.end_lighting_preview_blocking(LightingPreviewStopReason::ExclusiveDeviceTransition);
         self.teardown_v070_session_sa_rgb();
         if let Some(running) = self.six_layer_running.take() {
             if let Err(error) = running.shutdown(&self.tokio_runtime) {
@@ -606,7 +607,7 @@ impl WorkbenchStore {
             && (self.status_message.starts_with("宿主动作清理未确认 · ")
                 || self.status_message.starts_with("原目标释放未确认 · ")
                 || self.status_message.starts_with("原目标听写停止未确认 · "));
-        let changed = lighting_changed
+        let mut changed = lighting_changed
             || v070_changed
             || observed_changed
             || self.projection.sidebar.board_layers.first_event_verified != first
@@ -624,6 +625,9 @@ impl WorkbenchStore {
             }
         }
         if needs_cleanup {
+            let preview_was_busy = self.is_lighting_preview_busy();
+            self.end_lighting_preview_blocking(LightingPreviewStopReason::DeviceDisconnected);
+            changed |= preview_was_busy;
             self.sa_rgb_coordinator.clear_on_disconnect();
             let stopped = self
                 .six_layer_running

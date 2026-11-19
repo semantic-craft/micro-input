@@ -577,7 +577,10 @@ impl WorkbenchStore {
     }
 
     pub(crate) fn sync_v070_session_sa_rgb(&mut self) {
-        if self.system_lifecycle != SystemLifecycle::Awake || self.firmware_update.reserved() {
+        if self.system_lifecycle != SystemLifecycle::Awake
+            || self.firmware_update.reserved()
+            || self.is_lighting_preview_busy()
+        {
             self.sa_rgb_coordinator
                 .sync(DesiredTarget::Inactive, None, &self.tokio_runtime);
             return;
@@ -858,6 +861,9 @@ impl WorkbenchStore {
     }
 
     pub(crate) fn maybe_sync_v070_active_profile_layer(&mut self) -> bool {
+        if self.is_lighting_preview_busy() {
+            return false;
+        }
         let Some(layer) = self.resolve_safe_auto_sync_board_layer() else {
             self.v070_hardware.pending_auto_layer_sync = None;
             return false;
@@ -942,12 +948,20 @@ impl WorkbenchStore {
                         "已开启 AI 会话状态自动映灯".into();
                     self.sync_v070_session_sa_rgb();
                 } else {
-                    let session = self.live_v070_session();
-                    self.sa_rgb_coordinator.sync(
-                        DesiredTarget::UrgentClear(UrgentClearReason::OptInDisabled),
-                        session,
-                        &self.tokio_runtime,
-                    );
+                    if self.is_lighting_preview_busy() {
+                        self.sa_rgb_coordinator.sync(
+                            DesiredTarget::Inactive,
+                            None,
+                            &self.tokio_runtime,
+                        );
+                    } else {
+                        let session = self.live_v070_session();
+                        self.sa_rgb_coordinator.sync(
+                            DesiredTarget::UrgentClear(UrgentClearReason::OptInDisabled),
+                            session,
+                            &self.tokio_runtime,
+                        );
+                    }
                     self.v070_hardware.projection.status_message =
                         "已关闭 AI 会话状态自动映灯".into();
                 }
@@ -956,6 +970,12 @@ impl WorkbenchStore {
             ParsedV070Action::DeviceCommand(command) => {
                 if self.v070_hardware.projection.busy {
                     return Err("上一条 0.7.0 硬件指令尚未完成".into());
+                }
+                let _ = self.resolve_v070_command_target()?;
+                if self.is_lighting_preview_busy() {
+                    self.end_lighting_preview_blocking(
+                        crate::store::lighting_preview_store::LightingPreviewStopReason::ExclusiveDeviceTransition,
+                    );
                 }
                 let document_dir = self.config.document_dir.clone();
                 let active_six_layer_backup = self

@@ -977,6 +977,117 @@ final class DesignSystemVerificationTests: XCTestCase {
     }
 
     @MainActor
+    func testLightingEditorSheetPreviewButtonLayoutAndMonochromeContract() throws {
+        let dir = try makeIsolatedTempDir("lighting-sheet-preview-ui")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        defer { store.stopEventLoops() }
+
+        let zoneBacklight = LightingZoneModel(
+            zone: "backlight",
+            zoneTitle: "按键背光 (Backlight)",
+            effect: "solid",
+            brightnessPercent: 70,
+            speedPercent: 50,
+            magicPercent: 30,
+            colorHex: "#3B82F6",
+            canEditColor: true,
+            canEditBrightness: true,
+            canEditSpeed: true,
+            canEditMagic: false
+        )
+        let zoneUnderglow = LightingZoneModel(
+            zone: "underglow",
+            zoneTitle: "底灯环绕 (Underglow)",
+            effect: "breath",
+            brightnessPercent: 55,
+            speedPercent: 40,
+            magicPercent: 45,
+            colorHex: "#FFFFFF",
+            canEditColor: true,
+            canEditBrightness: true,
+            canEditSpeed: true,
+            canEditMagic: true
+        )
+
+        let states: [LightingEditorModel] = [
+            LightingEditorModel(
+                profileId: "p1",
+                layerId: "l1",
+                layerName: "默认层",
+                applyToAllLayers: false,
+                canAddLighting: true,
+                hasLighting: true,
+                backlight: zoneBacklight,
+                underglow: zoneUnderglow,
+                previewActive: false,
+                previewRemainingSecs: 0,
+                validationError: nil
+            ),
+            LightingEditorModel(
+                profileId: "p1",
+                layerId: "l1",
+                layerName: "默认层",
+                applyToAllLayers: false,
+                canAddLighting: true,
+                hasLighting: true,
+                backlight: zoneBacklight,
+                underglow: zoneUnderglow,
+                previewActive: true,
+                previewRemainingSecs: 24,
+                validationError: nil
+            ),
+            LightingEditorModel(
+                profileId: "p1",
+                layerId: "l1",
+                layerName: "默认层",
+                applyToAllLayers: false,
+                canAddLighting: true,
+                hasLighting: false,
+                backlight: nil,
+                underglow: nil,
+                previewActive: false,
+                previewRemainingSecs: 0,
+                validationError: nil
+            ),
+        ]
+
+        for locale in [UiLanguagePreference.zhHans, UiLanguagePreference.en] {
+            store.setUiLanguage(locale)
+            for state in states {
+                let (win, host) = makeHostedWindow(
+                    LightingEditorSheet(store: store, model: state),
+                    width: 640
+                )
+                defer { win.orderOut(nil) }
+                XCTAssertEqual(host.bounds.width, 640, accuracy: 0.5)
+                XCTAssertLessThanOrEqual(host.fittingSize.width, 640.5)
+                XCTAssertGreaterThan(host.fittingSize.height, 140)
+            }
+        }
+
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let modalsSrc = try String(
+            contentsOf: repoRoot.appendingPathComponent("app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift"),
+            encoding: .utf8
+        )
+        let sheetStart = try XCTUnwrap(modalsSrc.range(of: "struct LightingEditorSheet: View"))
+        let sheetEnd = try XCTUnwrap(modalsSrc.range(of: "struct ReconnectComparisonSheet: View"))
+        let sheetSrc = String(modalsSrc[sheetStart.lowerBound..<sheetEnd.lowerBound])
+        XCTAssertTrue(sheetSrc.contains("LightingBeginPreview"))
+        XCTAssertTrue(sheetSrc.contains("LightingEndPreview"))
+        XCTAssertTrue(sheetSrc.contains("在键盘上预览"))
+        XCTAssertTrue(sheetSrc.contains(".surfaceButton(.secondary)"))
+        XCTAssertFalse(sheetSrc.contains(".tint("))
+    }
+
+    @MainActor
     private func saveSnapshot<V: View>(
         _ view: V,
         width: CGFloat,
