@@ -295,7 +295,26 @@ impl WorkbenchStore {
             running.set_execution_policy(enabled, self.command_execution_enabled, self.update_now);
         }
         if enabled {
-            if self.status_message == "已暂停软件按键映射" {
+            let retired_cleanup_fence = self.six_layer_running.as_ref().is_some_and(|running| {
+                running.is_retired()
+                    && running.receiver.failure().as_deref()
+                        == Some("宿主动作清理未确认，输入已暂停")
+            });
+            if self.can_retry_host_cleanup() {
+                let stopped = self.live_executor.stop_owned_actions();
+                let _ = self.finish_host_cleanup(stopped);
+                self.finalize_recovered_host_cleanup();
+            } else if retired_cleanup_fence {
+                self.finalize_recovered_host_cleanup();
+            }
+            if self.status_message == "已暂停软件按键映射"
+                || (!self.can_retry_host_cleanup()
+                    && (self.status_message.starts_with("原目标释放未确认 · ")
+                        || self.status_message.starts_with("宿主动作清理未确认")
+                        || self.status_message.starts_with("原目标听写停止未确认 · ")
+                        || self.status_message.starts_with("旧会话清理未确认")
+                        || self.status_message.starts_with("清理任务已中断")))
+            {
                 self.status_message = "已启用软件按键映射".to_string();
             }
             let _ = self.maybe_sync_v070_active_profile_layer();
@@ -553,6 +572,10 @@ impl WorkbenchStore {
             HeaderAction::Redo => self.undo_draft(true),
             HeaderAction::OpenAccessibilitySettings => {
                 self.open_accessibility_settings();
+                Ok(())
+            }
+            HeaderAction::RetryHostCleanup => {
+                self.retry_host_cleanup();
                 Ok(())
             }
             HeaderAction::OpenSettings => {
@@ -1499,6 +1522,7 @@ impl WorkbenchStore {
                     self.last_cursor_position,
                 );
                 let receipt = local_receipt("executed", "已显示当前宿主配置的按键速查");
+                self.update_host_caution_from_receipt(&receipt, self.update_now);
                 self.record_host_action_receipt(receipt.clone());
                 return receipt;
             }
@@ -1550,6 +1574,7 @@ impl WorkbenchStore {
                     let mut receipt = local_receipt("blocked", "没有可打开的历史目标");
                     receipt.action_type = "open_app".into();
                     receipt.target = "navigation".into();
+                    self.update_host_caution_from_receipt(&receipt, self.update_now);
                     self.record_host_action_receipt(receipt.clone());
                     return receipt;
                 };
@@ -1565,6 +1590,7 @@ impl WorkbenchStore {
         if !receipt.succeeded() {
             self.navigation_history = previous_history;
         }
+        self.update_host_caution_from_receipt(&receipt, self.update_now);
         self.record_host_action_receipt(receipt.clone());
         receipt
     }
@@ -1829,6 +1855,10 @@ impl WorkbenchStore {
             StatusMenuAction::SetProfileLocked(locked) => self.set_profile_locked(locked, false),
             StatusMenuAction::OpenAccessibilitySettings => {
                 self.open_accessibility_settings();
+                Ok(())
+            }
+            StatusMenuAction::RetryHostCleanup => {
+                self.retry_host_cleanup();
                 Ok(())
             }
             StatusMenuAction::SetRadialMenuEnabled(enabled) => {

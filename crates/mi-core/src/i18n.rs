@@ -375,6 +375,138 @@ pub const CORE_EN_TABLE: &[(&str, &str)] = &[
     ("目标排序位置不存在", "Target sort position does not exist"),
     ("未打开重连比较窗口", "Reconnect comparison modal is not open"),
     ("未打开配置应用预检窗口", "Apply preparation modal is not open"),
+    ("重试清理", "Retry Cleanup"),
+    ("已完成宿主动作清理", "Host action cleanup completed"),
+    ("动作读回未确认", "Action readback unconfirmed"),
+    ("已执行", "Executed"),
+    ("未执行", "Not executed"),
+    ("原目标释放未确认", "Original target release unconfirmed"),
+    ("原目标听写停止未确认", "Original dictation stop unconfirmed"),
+    ("宿主动作清理未确认", "Host action cleanup unconfirmed"),
+    ("旧会话清理未确认", "Previous session cleanup unconfirmed"),
+    (
+        "上次听写所在窗口或对话已切换，请先确认原录音已停止",
+        "Previous dictation window or chat changed; confirm recording stopped",
+    ),
+    (
+        "目标窗口或会话已变化，请回到原窗口后重试",
+        "Target window or session changed; return to the original window and retry",
+    ),
+    (
+        "听写状态回读未确认，请检查原窗口是否仍在录音",
+        "Dictation state unconfirmed; check whether recording is still active",
+    ),
+    (
+        "无法确定目标分屏，请点击目标会话区域",
+        "Unable to determine target pane; click inside the target session",
+    ),
+    ("未找到唯一可编辑输入框", "No unique editable input field found"),
+    (
+        "未找到可用的听写按钮，请先切到对话输入界面",
+        "Dictation control unavailable; switch to an active chat input",
+    ),
+    ("当前已在听写中", "Dictation is already recording"),
+    ("听写正在结束处理中，请稍候", "Dictation is still finishing; please wait"),
+    (
+        "苹果 Fn 听写键释放未确认，请点击「重试清理」",
+        "Apple Fn key release unconfirmed; click Retry Cleanup",
+    ),
+    (
+        "动作回读未确认，请检查目标应用状态",
+        "Action readback unconfirmed; check target app state",
+    ),
+    (
+        "目标应用当前无法执行该操作",
+        "Target app cannot perform this action right now",
+    ),
+    (
+        "当前目标应用暂不支持该动作",
+        "Current target app does not support this agent action",
+    ),
+    (
+        "当前目标应用暂不支持托管听写",
+        "Current target app does not support managed dictation",
+    ),
+    (
+        "当前目标应用不支持此指令",
+        "Current target app does not support this command",
+    ),
+    (
+        "当前无法执行会话切换",
+        "Session navigation is currently unavailable",
+    ),
+    (
+        "当前目标应用不支持 Subagent 选择",
+        "Subagent picker is unavailable in the current app",
+    ),
+    (
+        "按键输入已失效，未执行动作",
+        "Input event expired; action not executed",
+    ),
+    (
+        "粘贴内容为空，未执行粘贴",
+        "Paste text is empty; nothing pasted",
+    ),
+    (
+        "实时语音状态回读超时，请检查目标窗口",
+        "Live voice readback timed out; check target window",
+    ),
+    (
+        "会话切换已取消或失效",
+        "Session navigation cancelled or expired",
+    ),
+    ("已确认目标会话", "Target session confirmed"),
+    (
+        "目标会话当前不可用",
+        "Target session is currently unavailable",
+    ),
+    (
+        "会话列表已更新，请重新按键切换",
+        "Session list changed; press again to switch",
+    ),
+    (
+        "正在切换其他会话，请稍候",
+        "Another session switch is in progress; please wait",
+    ),
+    (
+        "目标会话已失效或暂不支持切换",
+        "Target session is stale or unsupported",
+    ),
+    (
+        "会话切换输入已失效，请重试",
+        "Session navigation input expired; retry",
+    ),
+    (
+        "会话切换状态未确认，请检查目标窗口",
+        "Session switch unconfirmed; check target window",
+    ),
+    (
+        "隔离模式下不执行实体会话切换",
+        "Session navigation is disabled in isolated mode",
+    ),
+    (
+        "未能读取会话列表，请确认目标应用已打开",
+        "Session list unavailable; check that target app is open",
+    ),
+    (
+        "目标应用窗口或工作区已变化",
+        "Target app window or workspace changed",
+    ),
+    (
+        "暂不支持切换到此目标会话",
+        "Switching to this session target is unsupported",
+    ),
+    ("原听写停止未确认", "Previous dictation stop unconfirmed"),
+    (
+        "旧设备操作清理未确认",
+        "Previous device operation cleanup unconfirmed",
+    ),
+    ("清理任务已中断", "Cleanup task interrupted"),
+    ("宿主动作清理失败", "Host action cleanup failed"),
+    ("设备监视清理失败", "Device monitor cleanup failed"),
+    ("会话未确认", "Session switch unconfirmed"),
+    ("已切换会话", "Switched session"),
+    ("会话未切换", "Session not switched"),
 ];
 
 pub fn en_lookup(zh: &str) -> Option<&'static str> {
@@ -402,9 +534,147 @@ pub fn tr(zh: &str, locale: ResolvedLocale) -> &str {
     }
 }
 
+fn localize_managed_error_segment(segment: &str, locale: ResolvedLocale) -> String {
+    let trimmed = segment.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let mut rest = trimmed;
+    let mut saw_prefix = false;
+    let mut saw_unconfirmed = false;
+    loop {
+        if let Some(next) = rest.strip_prefix("unconfirmed:") {
+            saw_prefix = true;
+            saw_unconfirmed = true;
+            rest = next;
+            continue;
+        }
+        if let Some(next) = rest.strip_prefix("blocked:") {
+            saw_prefix = true;
+            rest = next;
+            continue;
+        }
+        break;
+    }
+    let code = rest.trim();
+    let known_zh = match code {
+        "uncleared_dictation_target_changed" | "dictation_target_changed" => {
+            Some("上次听写所在窗口或对话已切换，请先确认原录音已停止")
+        }
+        "target_window_changed"
+        | "target_identity_changed"
+        | "target_scope_changed"
+        | "target_pid_mismatch"
+        | "target_window_lost" => Some("目标窗口或会话已变化，请回到原窗口后重试"),
+        "dictation_readback" => Some("听写状态回读未确认，请检查原窗口是否仍在录音"),
+        "ambiguous_or_missing_focused_pane" => Some("无法确定目标分屏，请点击目标会话区域"),
+        "ambiguous_or_missing_input" => Some("未找到唯一可编辑输入框"),
+        "ambiguous_or_missing_dictation_control" | "dictation_control_unavailable" => {
+            Some("未找到可用的听写按钮，请先切到对话输入界面")
+        }
+        "dictation_already_recording" => Some("当前已在听写中"),
+        "dictation_finishing" => Some("听写正在结束处理中，请稍候"),
+        "accessibility_untrusted" => {
+            Some("缺少 macOS 辅助功能权限，按键动作已被系统拦截，请打开辅助功能设置授权")
+        }
+        "unconfirmed_apple_fn_release" | "apple_fn_cleanup_unconfirmed" => {
+            Some("苹果 Fn 听写键释放未确认，请点击「重试清理」")
+        }
+        "unsupported_agent_adapter" => Some("当前目标应用暂不支持该动作"),
+        "unsupported_dictation_adapter" => Some("当前目标应用暂不支持托管听写"),
+        "unsupported_agent_command" => Some("当前目标应用不支持此指令"),
+        "session_navigation_unavailable" => Some("当前无法执行会话切换"),
+        "subagent_picker_unavailable" => Some("当前目标应用不支持 Subagent 选择"),
+        "input_retired" => Some("按键输入已失效，未执行动作"),
+        "empty_paste_text" => Some("粘贴内容为空，未执行粘贴"),
+        "live_voice_readback_timeout" => Some("实时语音状态回读超时，请检查目标窗口"),
+        "session_navigation_retired" => Some("会话切换已取消或失效"),
+        "session_selection_confirmed" => Some("已确认目标会话"),
+        "session_target_unavailable" => Some("目标会话当前不可用"),
+        "session_slots_changed" => Some("会话列表已更新，请重新按键切换"),
+        "session_navigation_busy" => Some("正在切换其他会话，请稍候"),
+        "session_target_stale_or_unsupported" => Some("目标会话已失效或暂不支持切换"),
+        "session_input_retired" => Some("会话切换输入已失效，请重试"),
+        "session_worker_ended" => Some("会话切换状态未确认，请检查目标窗口"),
+        "isolated_navigation_unavailable" => Some("隔离模式下不执行实体会话切换"),
+        "session_catalog_unavailable" => Some("未能读取会话列表，请确认目标应用已打开"),
+        code if code.starts_with("session_catalog_unavailable:") => {
+            Some("未能读取会话列表，请确认目标应用已打开")
+        }
+        "session_instance_or_workspace_changed" => Some("目标应用窗口或工作区已变化"),
+        "session_navigation_unsupported" => Some("暂不支持切换到此目标会话"),
+        _ => None,
+    };
+    if let Some(zh) = known_zh {
+        return tr(zh, locale).to_string();
+    }
+    if !saw_prefix {
+        return tr(trimmed, locale).to_string();
+    }
+    let zh = if saw_unconfirmed {
+        "动作回读未确认，请检查目标应用状态"
+    } else {
+        "目标应用当前无法执行该操作"
+    };
+    tr(zh, locale).to_string()
+}
+
+pub fn localize_managed_error_detail(raw: &str, locale: ResolvedLocale) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if locale == ResolvedLocale::En {
+        if let Some(en) = en_lookup(trimmed) {
+            return en.to_string();
+        }
+    }
+    let joiner = match locale {
+        ResolvedLocale::ZhHans => "；",
+        ResolvedLocale::En => "; ",
+    };
+    if trimmed.contains("; ") {
+        return trimmed
+            .split("; ")
+            .map(|seg| localize_managed_error_segment(seg, locale))
+            .filter(|seg| !seg.is_empty())
+            .collect::<Vec<_>>()
+            .join(joiner);
+    }
+    if locale == ResolvedLocale::En && trimmed.contains('；') {
+        return trimmed
+            .split('；')
+            .map(|seg| localize_managed_error_segment(seg, locale))
+            .filter(|seg| !seg.is_empty())
+            .collect::<Vec<_>>()
+            .join(joiner);
+    }
+    localize_managed_error_segment(trimmed, locale)
+}
+
 pub fn relocalize_status_message(msg: &str, next_locale: ResolvedLocale) -> String {
     match next_locale {
-        ResolvedLocale::ZhHans => msg.to_string(),
+        ResolvedLocale::ZhHans => {
+            if let Some(detail) = msg.strip_prefix("会话未确认 · ") {
+                return format!(
+                    "会话未确认 · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::ZhHans)
+                );
+            }
+            if let Some(detail) = msg.strip_prefix("已切换会话 · ") {
+                return format!(
+                    "已切换会话 · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::ZhHans)
+                );
+            }
+            if let Some(detail) = msg.strip_prefix("会话未切换 · ") {
+                return format!(
+                    "会话未切换 · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::ZhHans)
+                );
+            }
+            msg.to_string()
+        }
         ResolvedLocale::En => {
             if let Some(en) = en_lookup(msg) {
                 return en.to_string();
@@ -478,23 +748,77 @@ pub fn relocalize_status_message(msg: &str, next_locale: ResolvedLocale) -> Stri
             {
                 return format!("Pressed {key} (software key mapping paused)");
             }
+            if let Some(detail) = msg.strip_prefix("动作读回未确认 · ") {
+                return format!(
+                    "Action readback unconfirmed · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
+            }
+            if let Some(detail) = msg.strip_prefix("已执行 · ") {
+                return format!(
+                    "Executed · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
+            }
+            if let Some(detail) = msg.strip_prefix("未执行 · ") {
+                return format!(
+                    "Not executed · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
+            }
+            if let Some(detail) = msg.strip_prefix("原目标释放未确认 · ") {
+                return format!(
+                    "Original target release unconfirmed · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
+            }
+            if let Some(detail) = msg.strip_prefix("原目标听写停止未确认 · ") {
+                return format!(
+                    "Original dictation stop unconfirmed · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
+            }
+            if let Some(detail) = msg.strip_prefix("宿主动作清理未确认 · ") {
+                return format!(
+                    "Host action cleanup unconfirmed · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
+            }
+            if let Some(detail) = msg
+                .strip_prefix("旧会话清理未确认 · ")
+                .and_then(|s| s.strip_suffix("；宿主输入保持暂停"))
+            {
+                return format!(
+                    "Previous session cleanup unconfirmed · {}; host input remains paused",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
+            }
             if let Some((key, detail)) = msg
                 .strip_prefix("已触发 ")
                 .and_then(|s| s.split_once(" · "))
             {
-                return format!("Triggered {key} · {}", tr(detail, ResolvedLocale::En));
+                return format!(
+                    "Triggered {key} · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
             }
             if let Some((key, detail)) = msg
                 .strip_prefix("已释放 ")
                 .and_then(|s| s.split_once(" · "))
             {
-                return format!("Released {key} · {}", tr(detail, ResolvedLocale::En));
+                return format!(
+                    "Released {key} · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
             }
             if let Some((key, detail)) = msg
                 .strip_prefix("未执行 ")
                 .and_then(|s| s.split_once(" · "))
             {
-                return format!("Not executed {key} · {}", tr(detail, ResolvedLocale::En));
+                return format!(
+                    "Not executed {key} · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
             }
             if let Some(key) = msg
                 .strip_prefix("正在按住语音 (")
@@ -503,10 +827,28 @@ pub fn relocalize_status_message(msg: &str, next_locale: ResolvedLocale) -> Stri
                 return format!("Holding push-to-talk ({key})…");
             }
             if let Some(detail) = msg.strip_prefix("听写未启动 · ") {
-                return format!("Dictation not started · {}", tr(detail, ResolvedLocale::En));
+                return format!(
+                    "Dictation not started · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
             }
             if let Some(detail) = msg.strip_prefix("会话未切换 · ") {
-                return format!("Session not switched · {}", tr(detail, ResolvedLocale::En));
+                return format!(
+                    "Session not switched · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
+            }
+            if let Some(detail) = msg.strip_prefix("会话未确认 · ") {
+                return format!(
+                    "Session switch unconfirmed · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
+            }
+            if let Some(detail) = msg.strip_prefix("已切换会话 · ") {
+                return format!(
+                    "Switched session · {}",
+                    localize_managed_error_detail(detail, ResolvedLocale::En)
+                );
             }
             if let Some(err) = msg
                 .strip_prefix("打开辅助功能设置失败 (")
@@ -546,6 +888,10 @@ pub fn relocalize_status_message(msg: &str, next_locale: ResolvedLocale) -> Stri
             let v070 = localize_v070_status_message(msg, ResolvedLocale::En);
             if v070 != msg {
                 return v070;
+            }
+            let managed = localize_managed_error_detail(msg, ResolvedLocale::En);
+            if managed != msg {
+                return managed;
             }
             msg.to_string()
         }

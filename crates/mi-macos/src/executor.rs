@@ -3536,6 +3536,24 @@ impl LiveHostActionExecutor<MacOsSystemDriver> {
     pub fn inject_model_picker_mouse_delta(&self, dx: f64, dy: f64) {
         self.driver.inject_model_picker_mouse_delta(dx, dy);
     }
+
+    pub fn set_unconfirmed_apple_fn_release_for_test(&self, input: Option<HeldInputId>) {
+        if !self.driver.isolated.load(Ordering::Acquire) {
+            return;
+        }
+        let mut held = self.held_apple_fn_bindings.lock().unwrap();
+        held.clear();
+        if let Some(input) = input {
+            held.insert(
+                FnHoldKey::Input(input),
+                FnOwner {
+                    profile_id: "test".to_string(),
+                    target: "frontmost-editor".to_string(),
+                    release_failed: true,
+                },
+            );
+        }
+    }
 }
 
 impl<D: HostOsDriver> LiveHostActionExecutor<D> {

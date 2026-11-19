@@ -99,6 +99,9 @@ impl Provider {
     fn codex() -> Self {
         Self::with_target("com.openai.codex", "Dictate")
     }
+    fn antigravity() -> Self {
+        Self::with_target("com.google.antigravity", "Record voice memo")
+    }
     fn controls(&self) -> ManagedAxControls<Self> {
         ManagedAxControls::with_readback_timeout(self.clone(), Duration::ZERO)
     }
@@ -227,15 +230,21 @@ impl ManagedAxProvider for Provider {
                 PressEffect::Toggle | PressEffect::Replace
                     if control_role != "AXMenuItem" && control_role != "AXPopUpButton" =>
                 {
-                    control.label = match control.label.as_str() {
-                        "开始听写" => "停止听写",
-                        "Dictate" => "Stop dictation",
-                        "Stop dictation" => "Dictate",
-                        "Start Voice mode" => "End Voice mode",
-                        "End Voice mode" => "Start Voice mode",
-                        _ => "开始听写",
+                    if let Some(next_label) = match control.label.as_str() {
+                        "开始听写" => Some("停止听写"),
+                        "停止听写" | "停止并识别" | "Stop and transcribe" => {
+                            Some("开始听写")
+                        }
+                        "Dictate" => Some("Stop dictation"),
+                        "Stop dictation" => Some("Dictate"),
+                        "Record voice memo" => Some("Stop Recording"),
+                        "Stop Recording" => Some("Record voice memo"),
+                        "Start Voice mode" => Some("End Voice mode"),
+                        "End Voice mode" => Some("Start Voice mode"),
+                        _ => None,
+                    } {
+                        control.label = next_label.into();
                     }
-                    .into();
                     if matches!(effect, PressEffect::Replace) {
                         control.id += 10;
                     }
@@ -406,6 +415,7 @@ impl ManagedAxProvider for Provider {
             "停止并识别",
             "Stop and transcribe",
             "Stop dictation",
+            "Stop Recording",
             "Finishing dictation",
             "正在完成听写"
         ]
@@ -4935,4 +4945,476 @@ fn antigravity_browser_waits_through_transient_mid_animation_disable_on_already_
         new_tab_presses,
         vec!["press:New tab".to_string(), "press:Browser".to_string()]
     );
+}
+
+#[test]
+fn mouse_stopped_dictation_with_changed_window_title_recovers_on_toggle_submit_and_cleanup() {
+    let toggle_provider = Provider::antigravity();
+    toggle_provider.0.lock().unwrap().window.identity.title = "Conversation A".into();
+    let toggle_controls = toggle_provider.controls();
+    assert_eq!(
+        toggle_controls.toggle_dictation("antigravity"),
+        Ok(ObservedDictationState::Recording)
+    );
+    {
+        let mut state = toggle_provider.0.lock().unwrap();
+        state.window.controls[0].label = "Record voice memo".into();
+        state.window.identity.title = "Conversation B".into();
+    }
+    assert_eq!(
+        toggle_controls.toggle_dictation("antigravity"),
+        Ok(ObservedDictationState::Recording),
+        "foreground toggle must recover after mouse-stopped dictation and conversation title drift"
+    );
+    assert_eq!(
+        toggle_controls.toggle_dictation("antigravity"),
+        Ok(ObservedDictationState::Idle),
+        "subsequent toggle must stop dictation cleanly in the updated conversation"
+    );
+    assert!(
+        toggle_provider
+            .0
+            .lock()
+            .unwrap()
+            .retained_targets
+            .is_empty(),
+        "stopping after title-drift recovery must release all retained targets"
+    );
+    assert_eq!(
+        toggle_provider
+            .events()
+            .into_iter()
+            .filter(|e| e.starts_with("press:"))
+            .collect::<Vec<_>>(),
+        vec![
+            "press:Record voice memo".to_string(),
+            "press:Record voice memo".to_string(),
+            "press:Stop Recording".to_string(),
+        ]
+    );
+
+    let submit_provider = Provider::antigravity();
+    submit_provider.0.lock().unwrap().window.identity.title = "Conversation A".into();
+    let submit_controls = submit_provider.controls();
+    assert_eq!(
+        submit_controls.toggle_dictation("antigravity"),
+        Ok(ObservedDictationState::Recording)
+    );
+    {
+        let mut state = submit_provider.0.lock().unwrap();
+        state.window.controls[0].label = "Record voice memo".into();
+        state.window.identity.title = "Conversation B".into();
+    }
+    assert_eq!(
+        submit_controls.submit("antigravity", None),
+        Ok(()),
+        "foreground submit must recover after mouse-stopped dictation and conversation title drift"
+    );
+    assert!(
+        submit_provider
+            .0
+            .lock()
+            .unwrap()
+            .retained_targets
+            .is_empty(),
+        "submit recovery must release retained dictation targets"
+    );
+    let submit_events = submit_provider.events();
+    assert_eq!(
+        submit_events
+            .iter()
+            .filter(|e| e.starts_with("press:"))
+            .count(),
+        1,
+        "submit recovery after mouse stop must not press dictation again: {submit_events:?}"
+    );
+    assert_eq!(
+        submit_events.iter().filter(|e| *e == "submit").count(),
+        1,
+        "submit recovery must submit cleanly: {submit_events:?}"
+    );
+
+    let cleanup_provider = Provider::antigravity();
+    cleanup_provider.0.lock().unwrap().window.identity.title = "Conversation A".into();
+    let cleanup_controls = cleanup_provider.controls();
+    assert_eq!(
+        cleanup_controls.toggle_dictation("antigravity"),
+        Ok(ObservedDictationState::Recording)
+    );
+    {
+        let mut state = cleanup_provider.0.lock().unwrap();
+        state.window.controls[0].label = "Record voice memo".into();
+        state.window.identity.title = "Conversation B".into();
+    }
+    assert_eq!(
+        cleanup_controls.stop_owned_dictations(),
+        Ok(()),
+        "background cleanup must recover when the same window is idle after conversation title drift"
+    );
+    assert!(
+        cleanup_provider
+            .0
+            .lock()
+            .unwrap()
+            .retained_targets
+            .is_empty(),
+        "background cleanup recovery must release retained dictation targets"
+    );
+    assert_eq!(
+        cleanup_provider
+            .events()
+            .iter()
+            .filter(|e| e.starts_with("press:"))
+            .count(),
+        1,
+        "background cleanup recovery after mouse stop must not emit extra press events"
+    );
+}
+
+#[test]
+fn non_dictation_controls_ignore_uncleared_dictation_target_title_change() {
+    let provider = Provider::antigravity();
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.window.identity.title = "Conversation A".into();
+        state.window.controls.extend([
+            ManagedControl {
+                id: 40,
+                role: "AXPopUpButton".into(),
+                label: "Select model, current: Gemini 4 Carbon High".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(false),
+            },
+            ManagedControl {
+                id: 42,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(false),
+            },
+            ManagedControl {
+                id: 43,
+                role: "AXButton".into(),
+                label: "New tab".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ]);
+        state.after_press = Some(|fixture, label, id| match label {
+            "Toggle Side Panel" => {
+                if let Some(ctrl) = fixture.window.controls.iter_mut().find(|c| c.id == id) {
+                    ctrl.expanded = Some(!ctrl.expanded.unwrap_or(false));
+                }
+            }
+            "New tab" => {
+                fixture.window.controls.push(ManagedControl {
+                    id: 44,
+                    role: "AXButton".into(),
+                    label: "Browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+            "Browser" => {
+                fixture.window.controls.retain(|c| c.id != 44);
+                fixture.window.controls.push(ManagedControl {
+                    id: 45,
+                    role: "AXComboBox".into(),
+                    label: "Address bar".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+            _ => {}
+        });
+    }
+    let controls = provider.controls();
+    assert_eq!(
+        controls.toggle_dictation("antigravity"),
+        Ok(ObservedDictationState::Recording)
+    );
+    provider.0.lock().unwrap().window.identity.title = "Conversation B".into();
+
+    assert_eq!(
+        controls.step_model_picker("antigravity", 0x7D),
+        Ok(()),
+        "model picker stepping must not be blocked by uncleared dictation title drift"
+    );
+    assert_eq!(
+        controls.set_side_panel_open("antigravity", true),
+        Ok(()),
+        "side panel open must not be blocked by uncleared dictation title drift"
+    );
+    assert_eq!(
+        controls.open_browser("antigravity"),
+        Ok(()),
+        "browser open must not be blocked by uncleared dictation title drift"
+    );
+    let events = provider.events();
+    assert!(events.contains(&"window_key:arrow_down".to_string()));
+    assert!(events.contains(&"press:Toggle Side Panel".to_string()));
+    assert!(events.contains(&"press:Browser".to_string()));
+    assert!(
+        !events.contains(&"press:Stop Recording".to_string()),
+        "non-dictation controls must not press the active dictation control: {events:?}"
+    );
+}
+
+#[test]
+fn active_recording_with_changed_window_title_still_blocks_toggle_and_submit_without_press() {
+    let provider = Provider::antigravity();
+    provider.0.lock().unwrap().window.identity.title = "Conversation A".into();
+    let controls = provider.controls();
+    assert_eq!(
+        controls.toggle_dictation("antigravity"),
+        Ok(ObservedDictationState::Recording)
+    );
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[0].label,
+        "Stop Recording"
+    );
+
+    provider.0.lock().unwrap().window.identity.title = "Conversation B".into();
+
+    assert_eq!(
+        controls.toggle_dictation("antigravity"),
+        Err("blocked:uncleared_dictation_target_changed".into())
+    );
+    assert_eq!(
+        controls.submit("antigravity", None),
+        Err("blocked:uncleared_dictation_target_changed".into())
+    );
+    let cleanup_err = controls
+        .stop_owned_dictations()
+        .expect_err("cleanup must fail closed while dictation is still actively recording under a changed title");
+    assert!(
+        cleanup_err.contains("dictation_target_changed"),
+        "expected dictation_target_changed error, got {cleanup_err}"
+    );
+    let blocked_events = provider.events();
+    assert_eq!(
+        blocked_events
+            .iter()
+            .filter(|e| e.starts_with("press:"))
+            .count(),
+        1,
+        "active recording with changed title must not emit any new press events: {blocked_events:?}"
+    );
+    assert!(
+        !blocked_events.iter().any(|e| e == "submit"),
+        "active recording with changed title must never submit: {blocked_events:?}"
+    );
+    assert!(
+        !provider.0.lock().unwrap().retained_targets.is_empty(),
+        "active recording target must stay retained while still recording"
+    );
+
+    provider.0.lock().unwrap().window.controls[0].label = "Record voice memo".into();
+    assert_eq!(
+        controls.stop_owned_dictations(),
+        Ok(()),
+        "cleanup must succeed and clear the retained target once UI reports Idle"
+    );
+    assert!(
+        provider.0.lock().unwrap().retained_targets.is_empty(),
+        "cleanup after manual UI stop must release the retained target"
+    );
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|e| e.starts_with("press:"))
+            .count(),
+        1,
+        "cleanup after manual UI stop must not emit any new press events"
+    );
+}
+
+#[test]
+fn codex_finishing_or_missing_control_with_changed_title_stays_strictly_blocked() {
+    for pending in ["Finishing dictation", "正在完成听写", ""] {
+        let provider = Provider::codex();
+        provider.0.lock().unwrap().window.identity.title = "Thread A".into();
+        let controls = provider.controls();
+        controls.start_dictation("codex").unwrap();
+        {
+            let mut state = provider.0.lock().unwrap();
+            state.window.identity.title = "Thread B".into();
+            if pending.is_empty() {
+                state.window.controls.remove(0);
+            } else {
+                state.window.controls[0].label = pending.into();
+                state.window.controls[0].enabled = false;
+                state.window.controls[0].pressable = false;
+            }
+        }
+        assert_eq!(
+            controls.toggle_dictation("codex"),
+            Err("blocked:uncleared_dictation_target_changed".into())
+        );
+        assert_eq!(
+            controls.submit("codex", None),
+            Err("blocked:uncleared_dictation_target_changed".into())
+        );
+        let cleanup_err = controls.stop_owned_dictations().expect_err(
+            "cleanup must remain blocked while Codex dictation is finishing or missing",
+        );
+        assert!(
+            cleanup_err.contains("dictation_target_changed"),
+            "expected dictation_target_changed error, got {cleanup_err}"
+        );
+        let blocked_events = provider.events();
+        assert_eq!(
+            blocked_events
+                .iter()
+                .filter(|e| e.starts_with("press:"))
+                .count(),
+            1,
+            "finishing or missing Codex control under changed title must not emit extra presses: {blocked_events:?}"
+        );
+        assert!(
+            !blocked_events.iter().any(|e| e == "submit"),
+            "finishing or missing Codex control under changed title must never submit: {blocked_events:?}"
+        );
+        assert_eq!(
+            provider.0.lock().unwrap().retained_targets.len(),
+            1,
+            "retained dictation lease must remain held while state is not confirmed Idle"
+        );
+
+        {
+            let mut state = provider.0.lock().unwrap();
+            let idle_control = ManagedControl {
+                id: 2,
+                role: "AXCheckBox".into(),
+                label: "Dictate".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            };
+            if pending.is_empty() {
+                state.window.controls.insert(0, idle_control);
+            } else {
+                state.window.controls[0] = idle_control;
+            }
+        }
+        assert_eq!(
+            controls.stop_owned_dictations(),
+            Ok(()),
+            "cleanup must release the stale lease once Codex reports Idle"
+        );
+        assert!(provider.0.lock().unwrap().retained_targets.is_empty());
+        assert_eq!(
+            provider
+                .events()
+                .iter()
+                .filter(|e| e.starts_with("press:"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn active_model_picker_stays_active_when_window_title_changes_in_place() {
+    let ag_provider = Provider::antigravity();
+    {
+        let mut state = ag_provider.0.lock().unwrap();
+        state.window.identity.title = "Conversation A".into();
+        state.window.controls.push(ManagedControl {
+            id: 40,
+            role: "AXButton".into(),
+            label: "Select model".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: None,
+        });
+    }
+    let ag_controls = ag_provider.controls();
+    ag_controls.open_model_picker("antigravity").unwrap();
+    ag_provider.0.lock().unwrap().window.identity.title = "Conversation B".into();
+    ag_controls.step_model_picker("antigravity", 0x7D).unwrap();
+    assert_eq!(
+        ag_controls.confirm_model_picker("antigravity"),
+        Ok(ModelPickerConfirmResult::Confirmed)
+    );
+    let ag_events = ag_provider.events();
+    assert_eq!(
+        ag_events
+            .iter()
+            .filter(|e| *e == "press:Select model")
+            .count(),
+        1,
+        "in-place title drift must not re-open an already active Antigravity model picker: {ag_events:?}"
+    );
+    assert!(ag_events.contains(&"window_key:arrow_down".to_string()));
+    assert!(ag_events.contains(&"window_key:return".to_string()));
+
+    ag_controls.open_model_picker("antigravity").unwrap();
+    ag_provider.0.lock().unwrap().window.identity.window_id = 2;
+    ag_controls.step_model_picker("antigravity", 0x7D).unwrap();
+    assert_eq!(
+        ag_provider
+            .events()
+            .iter()
+            .filter(|e| *e == "press:Select model")
+            .count(),
+        3,
+        "switching to a different window container must not inherit the prior active picker target"
+    );
+
+    let codex_provider = Provider::codex();
+    {
+        let mut state = codex_provider.0.lock().unwrap();
+        state.window.identity.title = "Thread A".into();
+        state.window.controls.push(ManagedControl {
+            id: 41,
+            role: "AXPopUpButton".into(),
+            label: "GPT-5".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+    }
+    let codex_controls = codex_provider.controls();
+    codex_controls.open_model_picker("codex").unwrap();
+    codex_provider.0.lock().unwrap().window.identity.title = "Thread B".into();
+    codex_controls.step_model_picker("codex", 0x7D).unwrap();
+    assert_eq!(
+        codex_controls.confirm_model_picker("codex"),
+        Ok(ModelPickerConfirmResult::Confirmed),
+        "in-place title drift must keep an active Codex model picker confirmable"
+    );
+    let codex_events = codex_provider.events();
+    assert_eq!(
+        codex_events
+            .iter()
+            .filter(|e| *e == "window_key:control+shift:2e")
+            .count(),
+        1,
+        "in-place title drift must not re-send Ctrl+Shift+M on an active Codex picker: {codex_events:?}"
+    );
+    assert!(codex_events.contains(&"window_key:arrow_down".to_string()));
+    assert!(codex_events.contains(&"window_key:return".to_string()));
 }

@@ -300,7 +300,10 @@ impl WorkbenchStore {
         self.teardown_v070_session_sa_rgb();
         if let Some(running) = self.six_layer_running.take() {
             if let Err(error) = running.shutdown(&self.tokio_runtime) {
+                self.six_layer_view = None;
+                let _ = self.finish_host_cleanup(Err(error.clone()));
                 self.system_lifecycle = SystemLifecycle::CleanupFailed(error.clone());
+                self.commit_runtime_update();
                 return Err(WorkbenchError::Routing(error));
             }
         }
@@ -598,35 +601,27 @@ impl WorkbenchStore {
         let first = running.first_event_verified.load(Ordering::Acquire);
         let failure = running.receiver.failure();
         let needs_cleanup = failure.is_some() && !running.is_retired();
+        let preserve_specific_cleanup_status = running.is_retired()
+            && failure.as_deref() == Some("宿主动作清理未确认，输入已暂停")
+            && (self.status_message.starts_with("宿主动作清理未确认 · ")
+                || self.status_message.starts_with("原目标释放未确认 · ")
+                || self.status_message.starts_with("原目标听写停止未确认 · "));
         let changed = lighting_changed
             || v070_changed
             || observed_changed
             || self.projection.sidebar.board_layers.first_event_verified != first
-            || failure
-                .as_ref()
-                .is_some_and(|failure| &self.status_message != failure)
+            || failure.as_ref().is_some_and(|failure| {
+                !preserve_specific_cleanup_status && &self.status_message != failure
+            })
             || !receipts.is_empty();
+        let now = self.update_now;
         for receipt in receipts {
-            let detail = match receipt.detail.as_str() {
-                "blocked:ambiguous_or_missing_focused_pane" => {
-                    "无法确定目标分屏，请点击目标会话区域"
-                }
-                "blocked:ambiguous_or_missing_input" => "未找到唯一可编辑输入框",
-                detail => detail,
-            };
-            self.status_message = format!(
-                "{} · {}",
-                match receipt.outcome.as_str() {
-                    "unconfirmed" => "动作读回未确认",
-                    _ if receipt.succeeded() => "已执行",
-                    _ => "未执行",
-                },
-                detail
-            );
-            self.record_host_action_receipt(receipt);
+            self.apply_host_action_receipt(receipt, None, now);
         }
         if let Some(failure) = failure {
-            self.status_message = failure;
+            if !preserve_specific_cleanup_status {
+                self.status_message = failure;
+            }
         }
         if needs_cleanup {
             self.sa_rgb_coordinator.clear_on_disconnect();
@@ -637,7 +632,11 @@ impl WorkbenchStore {
                 .quiesce(&self.tokio_runtime)
                 .and(self.live_executor.stop_owned_actions());
             if let Err(error) = self.finish_host_cleanup(stopped) {
-                self.status_message = format!("宿主动作清理未确认 · {error}");
+                let localized = crate::i18n::localize_managed_error_detail(
+                    &error,
+                    mi_model::ResolvedLocale::ZhHans,
+                );
+                self.status_message = format!("宿主动作清理未确认 · {localized}");
             }
         } else if observed_changed || v070_changed {
             self.sync_v070_session_sa_rgb();
@@ -1782,7 +1781,13 @@ mod tests {
             .is_none());
         assert_eq!(
             store.status_message,
-            "动作读回未确认 · live_voice_readback_timeout"
+            "动作读回未确认 · 实时语音状态回读超时，请检查目标窗口"
+        );
+        assert_eq!(
+            store
+                .last_host_action_receipt()
+                .map(|receipt| receipt.detail.as_str()),
+            Some("live_voice_readback_timeout")
         );
 
         store.ptt_controller.cleanup_confirmed = false;
@@ -2248,5 +2253,86 @@ mod tests {
         if let Some(running) = store.six_layer_running.take() {
             running.shutdown(&store.tokio_runtime).unwrap();
         }
+    }
+
+    #[test]
+    fn retry_host_cleanup_after_six_layer_fence_clears_caution_banner_and_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        let session = mock_session(&store.tokio_runtime);
+        let mut running = six_layer_runtime::RunningSixLayer::isolated(session, dir.path());
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        running.set_executor_handle_for_test(std::thread::spawn(|| {
+            Err("unconfirmed:dictation_readback".to_string())
+        }));
+        store.six_layer_running = Some(running);
+
+        store.ptt_controller.cleanup_confirmed = false;
+        store.poll_six_layer_runtime();
+
+        assert!(store.six_layer_running.as_ref().unwrap().is_retired());
+        assert_eq!(
+            store.status_message,
+            "宿主动作清理未确认 · 听写状态回读未确认，请检查原窗口是否仍在录音"
+        );
+        assert!(store.projection().status_menu.can_retry_host_cleanup);
+        assert!(store.projection().header.can_retry_host_cleanup);
+        assert!(matches!(
+            &store.projection().header.banner,
+            OwnershipBannerState::Caution { reason }
+                if reason == "听写状态回读未确认，请检查原窗口是否仍在录音"
+        ));
+
+        store.poll_six_layer_runtime();
+        assert_eq!(
+            store.status_message,
+            "宿主动作清理未确认 · 听写状态回读未确认，请检查原窗口是否仍在录音"
+        );
+
+        store.retry_host_cleanup();
+        assert!(store.six_layer_running.is_none());
+        assert!(store.six_layer_view.is_none());
+        assert_eq!(store.status_message, "已完成宿主动作清理");
+        assert!(!store.projection().status_menu.can_retry_host_cleanup);
+        assert!(!store.projection().header.can_retry_host_cleanup);
+        assert!(store.projection().status_menu.host_caution_notice.is_none());
+        assert!(!store.projection().header.banner.is_caution());
+
+        store.poll_six_layer_runtime();
+        assert_eq!(store.status_message, "已完成宿主动作清理");
+        assert!(!store.projection().header.banner.is_caution());
+
+        let session2 = mock_session(&store.tokio_runtime);
+        let mut running2 = six_layer_runtime::RunningSixLayer::isolated(session2, dir.path());
+        running2.readiness.configuration_observed = true;
+        running2.readiness.keyboard_grabbed = true;
+        running2.set_executor_handle_for_test(std::thread::spawn(|| {
+            Err("apple_fn_cleanup_unconfirmed".to_string())
+        }));
+        store.six_layer_running = Some(running2);
+        assert!(store.suspend_for_six_layer_operation().is_err());
+        assert!(matches!(
+            store.system_lifecycle,
+            SystemLifecycle::CleanupFailed(_)
+        ));
+        assert!(!store.ptt_controller.cleanup_confirmed);
+        assert!(store.projection().status_menu.can_retry_host_cleanup);
+        assert_eq!(
+            store
+                .projection()
+                .status_menu
+                .host_caution_notice
+                .as_deref(),
+            Some("苹果 Fn 听写键释放未确认，请点击「重试清理」")
+        );
+
+        store.set_host_execution_enabled(true).unwrap();
+        assert_eq!(store.system_lifecycle, SystemLifecycle::Awake);
+        assert!(store.ptt_controller.cleanup_confirmed);
+        assert!(!store.projection().status_menu.can_retry_host_cleanup);
+        assert!(store.projection().status_menu.host_caution_notice.is_none());
+        assert!(!store.projection().header.banner.is_caution());
+        assert_eq!(store.status_message, "已启用软件按键映射");
     }
 }

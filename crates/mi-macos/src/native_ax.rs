@@ -1153,7 +1153,7 @@ mod macos {
             window.validate(None)?;
             Ok(window)
         }
-        fn validate(&self, expected_title: Option<&str>) -> Result<(), String> {
+        fn validate_container(&self) -> Result<String, String> {
             if !unsafe { AXIsProcessTrusted() } {
                 return Err(blocked("accessibility_untrusted"));
             }
@@ -1184,7 +1184,10 @@ mod macos {
             if bool_attribute(attrs.next().flatten())? == Some(true) {
                 return Err(blocked("target_window_changed"));
             }
-            let title = text_attribute(attrs.next().flatten())?.unwrap_or_default();
+            Ok(text_attribute(attrs.next().flatten())?.unwrap_or_default())
+        }
+        fn validate(&self, expected_title: Option<&str>) -> Result<(), String> {
+            let title = self.validate_container()?;
             if expected_title.is_some_and(|expected| expected != title) {
                 return Err(blocked("target_window_changed"));
             }
@@ -2424,6 +2427,17 @@ mod macos {
         }
     }
 
+    struct FilteredObservation {
+        controls: Vec<ManagedControl>,
+        control_paths: Vec<(u64, Vec<u64>)>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TargetValidationMode {
+        StrictWithTitle,
+        ContainerOnly,
+    }
+
     #[derive(Debug, Clone)]
     struct Target {
         identity: ManagedWindowIdentity,
@@ -2473,21 +2487,34 @@ mod macos {
                         .filter(|target| target.identity == *identity)
                 })
         }
-        fn validate(&self, identity: &ManagedWindowIdentity) -> Result<(Owned, Owned), String> {
+        fn validate_with_mode(
+            &self,
+            identity: &ManagedWindowIdentity,
+            mode: TargetValidationMode,
+        ) -> Result<(Owned, Owned, String), String> {
             let target = self
                 .target_for(identity)
                 .ok_or_else(|| blocked("ax_target_missing"))?;
             if target.identity != *identity || target.window.pid != identity.pid {
                 return Err(blocked("target_pid_mismatch"));
             }
-            target.window.validate(Some(&identity.title))?;
+            let live_title = target.window.validate_container()?;
+            if mode == TargetValidationMode::StrictWithTitle && live_title != identity.title {
+                return Err(blocked("target_window_changed"));
+            }
             if !self.is_descendant(&target.scope, &target.window.element) {
                 return Err(blocked("target_scope_changed"));
             }
             Ok((
                 target.window.application.clone(),
                 target.window.element.clone(),
+                live_title,
             ))
+        }
+        fn validate(&self, identity: &ManagedWindowIdentity) -> Result<(Owned, Owned), String> {
+            let (application, window, _) =
+                self.validate_with_mode(identity, TargetValidationMode::StrictWithTitle)?;
+            Ok((application, window))
         }
         fn is_descendant(&self, element: &Owned, ancestor: &Owned) -> bool {
             let deadline = Instant::now() + Duration::from_millis(300);
@@ -2507,18 +2534,20 @@ mod macos {
             false
         }
         fn control_from_node_data(&self, id: u64, data: NodeData) -> Option<ManagedControl> {
-            let is_antigravity = self
+            let bundle_id = self
                 .target
                 .as_ref()
-                .is_some_and(|target| target.identity.bundle_id == "com.google.antigravity");
-            let is_codex = self
-                .target
-                .as_ref()
-                .is_some_and(|target| target.identity.bundle_id == "com.openai.codex");
-            let is_dsh = self
-                .target
-                .as_ref()
-                .is_some_and(|target| target.identity.bundle_id == "com.deepseek.dsh");
+                .map(|target| target.identity.bundle_id.as_str());
+            Self::control_from_node_data_for_bundle(bundle_id, id, data)
+        }
+        fn control_from_node_data_for_bundle(
+            bundle_id: Option<&str>,
+            id: u64,
+            data: NodeData,
+        ) -> Option<ManagedControl> {
+            let is_antigravity = bundle_id == Some("com.google.antigravity");
+            let is_codex = bundle_id == Some("com.openai.codex");
+            let is_dsh = bundle_id == Some("com.deepseek.dsh");
             let antigravity_model_trigger = is_antigravity
                 && matches!(data.role.as_str(), "AXPopUpButton" | "AXButton")
                 && data.pressable
@@ -2742,7 +2771,6 @@ mod macos {
             Ok(Some(data))
         }
         fn ancestor_matches_container(
-            &self,
             observation: &WindowObservation,
             node_by_id: &std::collections::HashMap<u64, usize>,
             cache: &mut std::collections::HashMap<u64, bool>,
@@ -2753,27 +2781,20 @@ mod macos {
             if let Some(&cached) = cache.get(&ancestor_id) {
                 return cached;
             }
-            let node_opt = node_by_id
+            let matched = match node_by_id
                 .get(&ancestor_id)
-                .map(|&idx| &observation.nodes[idx]);
-            let role_opt: Option<std::borrow::Cow<'_, str>> = if let Some(n) = node_opt {
-                Some(std::borrow::Cow::Borrowed(n.data.role.as_str()))
-            } else if let Ok(elem) = self.element(ancestor_id) {
-                elem.attr("AXRole")
-                    .ok()
-                    .flatten()
-                    .and_then(|v| v.string())
-                    .map(std::borrow::Cow::Owned)
-            } else {
-                None
-            };
-            let matched = match role_opt.as_deref() {
-                Some(role) if allowed_roles.contains(&role) => {
-                    if let Some(n) = node_opt.filter(|n| !n.data.label.trim().is_empty()) {
-                        matches_role_and_label(role, n.data.label.trim())
-                    } else if let Ok(elem) = self.element(ancestor_id) {
+                .map(|&idx| &observation.nodes[idx])
+            {
+                Some(node) if allowed_roles.contains(&node.data.role.as_str()) => {
+                    let role = node.data.role.as_str();
+                    let label = node.data.label.trim();
+                    if !label.is_empty() {
+                        matches_role_and_label(role, label)
+                    } else {
                         let deadline = Instant::now() + Duration::from_millis(100);
-                        if let Ok(attrs) = elem.attributes(&["AXDescription", "AXTitle"], deadline)
+                        if let Ok(attrs) = node
+                            .element
+                            .attributes(&["AXDescription", "AXTitle"], deadline)
                         {
                             let mut iter = attrs.into_iter();
                             let desc = iter.next().flatten().and_then(|v| v.string());
@@ -2788,8 +2809,6 @@ mod macos {
                         } else {
                             false
                         }
-                    } else {
-                        false
                     }
                 }
                 _ => false,
@@ -2815,16 +2834,17 @@ mod macos {
                 || (matches!(control.role.as_str(), "AXComboBox" | "AXTextField")
                     && control.label.trim() == "Address bar")
         }
-        fn controls_from_observation(
-            &mut self,
-            observation: WindowObservation,
-        ) -> Result<Vec<ManagedControl>, String> {
+        fn filter_controls_from_observation(
+            observation: &WindowObservation,
+            bundle_id: Option<&str>,
+            mut assign_id: impl FnMut(usize, &Owned) -> Result<u64, String>,
+        ) -> Result<FilteredObservation, String> {
             let mut controls = Vec::new();
             let mut paths: Vec<Vec<u64>> = Vec::new();
+            let mut control_paths: Vec<(u64, Vec<u64>)> = Vec::new();
             let mut node_by_id = std::collections::HashMap::new();
-            self.control_paths.clear();
             for (node_idx, node) in observation.nodes.iter().enumerate() {
-                let id = self.register(&node.element)?;
+                let id = assign_id(node_idx, &node.element)?;
                 node_by_id.insert(id, node_idx);
                 let mut path = node
                     .parent
@@ -2832,16 +2852,15 @@ mod macos {
                     .unwrap_or_default();
                 path.push(id);
                 paths.push(path.clone());
-                let Some(control) = self.control_from_node_data(id, node.data.clone()) else {
+                let Some(control) =
+                    Self::control_from_node_data_for_bundle(bundle_id, id, node.data.clone())
+                else {
                     continue;
                 };
-                self.control_paths.push((id, path));
+                control_paths.push((id, path));
                 controls.push(control);
             }
-            let is_antigravity = self
-                .target
-                .as_ref()
-                .is_some_and(|target| target.identity.bundle_id == "com.google.antigravity");
+            let is_antigravity = bundle_id == Some("com.google.antigravity");
             if is_antigravity {
                 let multi_text_areas = controls
                     .iter()
@@ -2857,11 +2876,9 @@ mod macos {
                     .position(|c| c.label.trim() == "Toggle Side Panel")
                 {
                     let id = controls[toggle_idx].id;
-                    let expanded = node_by_id
-                        .get(&id)
-                        .and_then(|&idx| observation.nodes[idx].data.expanded)
-                        .or_else(|| {
-                            let elem = self.element(id).ok()?;
+                    let expanded = node_by_id.get(&id).and_then(|&idx| {
+                        observation.nodes[idx].data.expanded.or_else(|| {
+                            let elem = &observation.nodes[idx].element;
                             let deadline = Instant::now() + Duration::from_millis(100);
                             let val = elem
                                 .attributes(&["AXExpanded"], deadline)
@@ -2870,7 +2887,8 @@ mod macos {
                                 .next()
                                 .flatten();
                             bool_attribute(val).ok().flatten()
-                        });
+                        })
+                    });
                     controls[toggle_idx].expanded = expanded;
                     expanded
                 } else {
@@ -2885,14 +2903,12 @@ mod macos {
                         if matches!(control.role.as_str(), "AXTextArea" | "AXTextField")
                             && control.editable
                         {
-                            if let Some((_, path)) = self
-                                .control_paths
-                                .iter()
-                                .find(|(cid, _)| *cid == control.id)
+                            if let Some((_, path)) =
+                                control_paths.iter().find(|(cid, _)| *cid == control.id)
                             {
                                 for &ancestor_id in path.iter().rev().skip(1) {
-                                    if self.ancestor_matches_container(
-                                        &observation,
+                                    if Self::ancestor_matches_container(
+                                        observation,
                                         &node_by_id,
                                         &mut side_question_ancestors,
                                         ancestor_id,
@@ -2917,13 +2933,10 @@ mod macos {
                         })
                         .and_then(|c| {
                             let search_idx = *node_by_id.get(&c.id)?;
-                            let search_parent = self
-                                .control_paths
-                                .iter()
-                                .find(|(cid, _)| *cid == c.id)
-                                .and_then(|(_, path)| {
-                                    path.len().checked_sub(2).map(|idx| path[idx])
-                                });
+                            let search_parent =
+                                control_paths.iter().find(|(cid, _)| *cid == c.id).and_then(
+                                    |(_, path)| path.len().checked_sub(2).map(|idx| path[idx]),
+                                );
                             Some((search_idx, search_parent))
                         });
                     let chat_transcript_containers: std::collections::HashSet<usize> = observation
@@ -2955,8 +2968,7 @@ mod macos {
                     let mut retained_ids = std::collections::HashSet::with_capacity(controls.len());
                     controls.retain(|c| {
                         let keep = if Self::is_browser_filter_candidate(c) {
-                            let path_opt = self
-                                .control_paths
+                            let path_opt = control_paths
                                 .iter()
                                 .find(|(cid, _)| *cid == c.id)
                                 .map(|(_, p)| p);
@@ -2965,8 +2977,8 @@ mod macos {
                                     node_by_id
                                         .get(&ancestor_id)
                                         .is_some_and(|idx| chat_transcript_containers.contains(idx))
-                                        || self.ancestor_matches_container(
-                                            &observation,
+                                        || Self::ancestor_matches_container(
+                                            observation,
                                             &node_by_id,
                                             &mut excluded_ancestors,
                                             ancestor_id,
@@ -3030,11 +3042,40 @@ mod macos {
                         }
                         keep
                     });
-                    self.control_paths
-                        .retain(|(cid, _)| retained_ids.contains(cid));
+                    control_paths.retain(|(cid, _)| retained_ids.contains(cid));
                 }
             }
-            Ok(controls)
+            Ok(FilteredObservation {
+                controls,
+                control_paths,
+            })
+        }
+        fn controls_from_observation_for_bundle(
+            observation: &WindowObservation,
+            bundle_id: &str,
+        ) -> Vec<ManagedControl> {
+            Self::filter_controls_from_observation(observation, Some(bundle_id), |node_idx, _| {
+                Ok(node_idx as u64 + 1)
+            })
+            .expect("synthetic node index IDs never fail")
+            .controls
+        }
+        fn controls_from_observation(
+            &mut self,
+            observation: WindowObservation,
+        ) -> Result<Vec<ManagedControl>, String> {
+            let bundle_id = self
+                .target
+                .as_ref()
+                .map(|target| target.identity.bundle_id.clone());
+            self.control_paths.clear();
+            let filtered = Self::filter_controls_from_observation(
+                &observation,
+                bundle_id.as_deref(),
+                |_, element| self.register(element),
+            )?;
+            self.control_paths = filtered.control_paths;
+            Ok(filtered.controls)
         }
         fn checked_control(
             &mut self,
@@ -3486,6 +3527,38 @@ mod macos {
             self.validate(target)?;
             Ok(ManagedWindow {
                 identity: target.clone(),
+                controls,
+            })
+        }
+        fn read_container(
+            &mut self,
+            target: &ManagedWindowIdentity,
+        ) -> Result<ManagedWindow, String> {
+            let (_, _, title_before) =
+                self.validate_with_mode(target, TargetValidationMode::ContainerOnly)?;
+            let scope = self
+                .target_for(target)
+                .ok_or_else(|| blocked("ax_target_missing"))?
+                .scope
+                .clone();
+            let purpose = if target.bundle_id == "com.google.antigravity" {
+                ObservationPurpose::AntigravityControls
+            } else {
+                ObservationPurpose::Controls
+            };
+            let observation = observe_window(scope, purpose)?;
+            let controls =
+                Self::controls_from_observation_for_bundle(&observation, &target.bundle_id);
+            let (_, _, title_after) =
+                self.validate_with_mode(target, TargetValidationMode::ContainerOnly)?;
+            if title_before != title_after {
+                return Err(blocked("target_window_changed"));
+            }
+            Ok(ManagedWindow {
+                identity: ManagedWindowIdentity {
+                    title: title_after,
+                    ..target.clone()
+                },
                 controls,
             })
         }
@@ -7275,6 +7348,170 @@ mod macos {
                     .any(|c| c.role == "AXButton" && c.label == "Browser"),
                 "AXWebArea must never be treated as a chat transcript container: {guarded_controls:?}"
             );
+        }
+
+        #[test]
+        fn controls_from_observation_for_bundle_matches_antigravity_pruning_without_provider_state()
+        {
+            let ag_observation = WindowObservation {
+                nodes: vec![
+                    ObservedNode {
+                        element: Owned::text("ag-win").unwrap(),
+                        parent: None,
+                        data: NodeData {
+                            role: "AXWindow".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("chat-container").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("chat-heading").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXHeading".into(),
+                            label: "Conversation Log".into(),
+                            enabled: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("chat-browser").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("settings-dialog").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: "Settings".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("settings-browser").unwrap(),
+                        parent: Some(4),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("voice-idle").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Record voice memo".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("side-panel-browser").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            };
+
+            let pure_controls = NativeAxProvider::controls_from_observation_for_bundle(
+                &ag_observation,
+                "com.google.antigravity",
+            );
+            let pure_summary: Vec<(&str, &str)> = pure_controls
+                .iter()
+                .map(|c| (c.role.as_str(), c.label.as_str()))
+                .collect();
+            assert_eq!(
+                pure_summary,
+                vec![
+                    ("AXHeading", "Conversation Log"),
+                    ("AXButton", "Record voice memo"),
+                    ("AXButton", "Browser"),
+                ]
+            );
+
+            let mut ag_provider = NativeAxProvider {
+                target: Some(Target {
+                    identity: ManagedWindowIdentity {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        window_id: 1,
+                        scope_id: 0,
+                        title: "Antigravity".into(),
+                    },
+                    window: CapturedWindow {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        application: Owned::text("ag-app").unwrap(),
+                        element: Owned::text("ag-win").unwrap(),
+                        title: "Antigravity".into(),
+                    },
+                    scope: Owned::text("ag-win").unwrap(),
+                }),
+                ..Default::default()
+            };
+            let stateful_controls = ag_provider
+                .controls_from_observation(ag_observation)
+                .unwrap();
+            let stateful_summary: Vec<(&str, &str)> = stateful_controls
+                .iter()
+                .map(|c| (c.role.as_str(), c.label.as_str()))
+                .collect();
+            assert_eq!(pure_summary, stateful_summary);
+
+            let codex_observation = WindowObservation {
+                nodes: vec![
+                    ObservedNode {
+                        element: Owned::text("codex-win").unwrap(),
+                        parent: None,
+                        data: NodeData {
+                            role: "AXWindow".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("codex-finishing").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Finishing dictation".into(),
+                            enabled: false,
+                            pressable: false,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            };
+            let codex_controls = NativeAxProvider::controls_from_observation_for_bundle(
+                &codex_observation,
+                "com.openai.codex",
+            );
+            assert_eq!(codex_controls.len(), 1);
+            assert_eq!(codex_controls[0].label, "Finishing dictation");
         }
     }
 }

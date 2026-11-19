@@ -13,6 +13,15 @@ pub struct ManagedWindowIdentity {
     pub title: String,
 }
 
+impl ManagedWindowIdentity {
+    pub fn same_container(&self, other: &Self) -> bool {
+        self.bundle_id == other.bundle_id
+            && self.pid == other.pid
+            && self.window_id == other.window_id
+            && self.scope_id == other.scope_id
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedControl {
     pub id: u64,
@@ -35,6 +44,14 @@ pub struct ManagedWindow {
 pub enum ObservedDictationState {
     Idle,
     Recording,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservedContainerDictation {
+    Idle,
+    Recording,
+    Finishing,
+    Indeterminate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +83,9 @@ pub trait ManagedAxProvider: Send {
         self.capture(bundle_id)
     }
     fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String>;
+    fn read_container(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
+        self.read(target)
+    }
     fn read_control(
         &mut self,
         target: &ManagedWindowIdentity,
@@ -658,7 +678,7 @@ pub struct ManagedAxControls<P: 'static> {
     provider: Arc<Mutex<P>>,
     readback_timeout: Duration,
     auto_dismiss_delay: Duration,
-    uncleared_targets: Mutex<BTreeMap<String, ManagedWindowIdentity>>,
+    dictation_leases: Mutex<DictationLeaseRegistry>,
     active_picker_target: Mutex<Option<ActivePickerTarget>>,
     dismiss_state: Arc<DismissState>,
     worker_handle: Option<std::thread::JoinHandle<()>>,
@@ -794,7 +814,7 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             provider,
             readback_timeout,
             auto_dismiss_delay,
-            uncleared_targets: Mutex::new(BTreeMap::new()),
+            dictation_leases: Mutex::new(DictationLeaseRegistry::default()),
             active_picker_target: Mutex::new(None),
             dismiss_state,
             worker_handle: Some(worker_handle),
@@ -859,11 +879,11 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
         let window = capture(&mut *provider, adapter)?;
-        let mut targets = self
-            .uncleared_targets
+        let mut leases = self
+            .dictation_leases
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
-        validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
+        leases.reconcile_for_captured_window(&mut *provider, &window, adapter)?;
         let (state, control) = dictation_control(&window, adapter)?;
         let desired = match state {
             ObservedDictationState::Idle => ObservedDictationState::Recording,
@@ -878,15 +898,13 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             self.readback_timeout,
         );
         if result.is_ok() && desired == ObservedDictationState::Idle {
-            targets.remove(&window.identity.bundle_id);
-            provider.release_target(&window.identity);
+            leases.release_claim(&mut *provider, &window.identity.bundle_id);
         } else if result.is_ok()
             || result
                 .as_ref()
                 .is_err_and(|error| error.starts_with("unconfirmed:"))
         {
-            provider.retain_target(&window.identity)?;
-            targets.insert(window.identity.bundle_id.clone(), window.identity.clone());
+            leases.retain_claim(&mut *provider, &window.identity)?;
         }
         result?;
         Ok(desired)
@@ -934,11 +952,11 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
         let window = capture(&mut *provider, adapter)?;
-        let mut targets = self
-            .uncleared_targets
+        let mut leases = self
+            .dictation_leases
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
-        validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
+        leases.reconcile_for_captured_window(&mut *provider, &window, adapter)?;
         let (state, control) = dictation_control(&window, adapter)?;
         if state != ObservedDictationState::Idle {
             return Err(blocked("dictation_already_recording"));
@@ -956,8 +974,7 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                 .as_ref()
                 .is_err_and(|error| error.starts_with("unconfirmed:"))
         {
-            provider.retain_target(&window.identity)?;
-            targets.insert(window.identity.bundle_id.clone(), window.identity.clone());
+            leases.retain_claim(&mut *provider, &window.identity)?;
         }
         result
     }
@@ -967,52 +984,11 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             .provider
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
-        let mut targets = self
-            .uncleared_targets
+        let mut leases = self
+            .dictation_leases
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
-        let mut failures = Vec::new();
-        for target in targets.values().cloned().collect::<Vec<_>>() {
-            if provider.process_has_exited(target.pid) {
-                targets.remove(&target.bundle_id);
-                provider.release_target(&target);
-                continue;
-            }
-            let Some(adapter) = [
-                DictationAdapter::Antigravity,
-                DictationAdapter::Dsh,
-                DictationAdapter::Codex,
-            ]
-            .into_iter()
-            .find(|adapter| adapter_bundle(*adapter) == target.bundle_id) else {
-                failures.push(blocked("unsupported_dictation_target"));
-                continue;
-            };
-            let result = provider.read(&target).and_then(|window| {
-                if window.identity != target {
-                    return Err("unconfirmed:dictation_target_changed".into());
-                }
-                stop_in_window(
-                    &mut *provider,
-                    &window,
-                    adapter,
-                    self.readback_timeout,
-                    false,
-                )
-            });
-            match result {
-                Ok(_) => {
-                    targets.remove(&target.bundle_id);
-                    provider.release_target(&target);
-                }
-                Err(error) => failures.push(error),
-            }
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
+        leases.stop_all_owned(&mut *provider, self.readback_timeout)
     }
 
     fn stop_in_window(
@@ -1021,12 +997,12 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         window: &ManagedWindow,
         adapter: DictationAdapter,
     ) -> Result<bool, String> {
-        let mut targets = self
-            .uncleared_targets
+        let mut leases = self
+            .dictation_leases
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
-        validate_uncleared_target(provider, &mut targets, &window.identity)?;
-        let allow_absent = !targets.contains_key(&window.identity.bundle_id);
+        leases.reconcile_for_captured_window(provider, window, adapter)?;
+        let allow_absent = !leases.has_claim(&window.identity.bundle_id);
         let result = stop_in_window(
             provider,
             window,
@@ -1035,14 +1011,12 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             allow_absent,
         );
         if result.is_ok() {
-            targets.remove(&window.identity.bundle_id);
-            provider.release_target(&window.identity);
+            leases.release_claim(provider, &window.identity.bundle_id);
         } else if result
             .as_ref()
             .is_err_and(|error| error.starts_with("unconfirmed:"))
         {
-            provider.retain_target(&window.identity)?;
-            targets.insert(window.identity.bundle_id.clone(), window.identity.clone());
+            leases.retain_claim(provider, &window.identity)?;
         }
         result
     }
@@ -1575,8 +1549,10 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             *guard = None;
             return None;
         }
-        (active.kind == kind && active.adapter == adapter && &active.identity == identity)
-            .then_some(active.ax_open_confirmed)
+        (active.kind == kind
+            && active.adapter == adapter
+            && active.identity.same_container(identity))
+        .then_some(active.ax_open_confirmed)
     }
 
     fn effective_popup_state(
@@ -1634,11 +1610,6 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         let bundle = adapter_bundle(adapter);
         let window = provider.capture_for_window_key(bundle)?;
         validate_target(&window.identity, bundle)?;
-        let mut targets = self
-            .uncleared_targets
-            .lock()
-            .map_err(|_| blocked("ax_lock_poisoned"))?;
-        validate_uncleared_target(provider, &mut targets, &window.identity)?;
         Ok(window)
     }
 
@@ -1650,11 +1621,6 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         let bundle = adapter_bundle(adapter);
         let window = provider.capture_full_window(bundle)?;
         validate_target(&window.identity, bundle)?;
-        let mut targets = self
-            .uncleared_targets
-            .lock()
-            .map_err(|_| blocked("ax_lock_poisoned"))?;
-        validate_uncleared_target(provider, &mut targets, &window.identity)?;
         Ok(window)
     }
 
@@ -1822,13 +1788,6 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                     return Ok((window.identity, confirmed));
                 }
                 let fallback_window = capture(provider, adapter)?;
-                {
-                    let mut targets = self
-                        .uncleared_targets
-                        .lock()
-                        .map_err(|_| blocked("ax_lock_poisoned"))?;
-                    validate_uncleared_target(provider, &mut targets, &fallback_window.identity)?;
-                }
                 let control =
                     focus_in_window(provider, &fallback_window.identity, self.readback_timeout)?;
                 let cmd = vec!["command".to_string()];
@@ -2657,22 +2616,134 @@ pub(crate) fn insert_at_utf16_selection(
     Ok(format!("{before}{text}{after}"))
 }
 
-fn validate_uncleared_target<P: ManagedAxProvider>(
-    provider: &mut P,
-    targets: &mut BTreeMap<String, ManagedWindowIdentity>,
-    target: &ManagedWindowIdentity,
-) -> Result<(), String> {
-    if let Some(owned) = targets
-        .get(&target.bundle_id)
-        .filter(|owned| *owned != target)
+pub(crate) fn observe_container_dictation(
+    window: &ManagedWindow,
+    adapter: DictationAdapter,
+) -> ObservedContainerDictation {
+    if window
+        .controls
+        .iter()
+        .any(|control| adapter.matches_finishing_label(&control.label))
     {
-        if !provider.process_has_exited(owned.pid) {
-            return Err(blocked("uncleared_dictation_target_changed"));
-        }
-        provider.release_target(owned);
-        targets.remove(&target.bundle_id);
+        return ObservedContainerDictation::Finishing;
     }
-    Ok(())
+    match dictation_control(window, adapter) {
+        Ok((ObservedDictationState::Idle, _)) => ObservedContainerDictation::Idle,
+        Ok((ObservedDictationState::Recording, _)) => ObservedContainerDictation::Recording,
+        Err(_) => ObservedContainerDictation::Indeterminate,
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DictationLeaseRegistry {
+    claims: BTreeMap<String, ManagedWindowIdentity>,
+}
+
+impl DictationLeaseRegistry {
+    pub(crate) fn reconcile_for_captured_window<P: ManagedAxProvider>(
+        &mut self,
+        provider: &mut P,
+        captured: &ManagedWindow,
+        adapter: DictationAdapter,
+    ) -> Result<(), String> {
+        let Some(owned) = self.claims.get(&captured.identity.bundle_id).cloned() else {
+            return Ok(());
+        };
+        if owned == captured.identity {
+            return Ok(());
+        }
+        if provider.process_has_exited(owned.pid) {
+            self.release_claim(provider, &owned.bundle_id);
+            return Ok(());
+        }
+        if owned.same_container(&captured.identity)
+            && observe_container_dictation(captured, adapter) == ObservedContainerDictation::Idle
+        {
+            self.release_claim(provider, &owned.bundle_id);
+            return Ok(());
+        }
+        Err(blocked("uncleared_dictation_target_changed"))
+    }
+
+    pub(crate) fn retain_claim<P: ManagedAxProvider>(
+        &mut self,
+        provider: &mut P,
+        identity: &ManagedWindowIdentity,
+    ) -> Result<(), String> {
+        provider.retain_target(identity)?;
+        if let Some(prev) = self
+            .claims
+            .insert(identity.bundle_id.clone(), identity.clone())
+        {
+            if prev != *identity {
+                provider.release_target(&prev);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn release_claim<P: ManagedAxProvider>(
+        &mut self,
+        provider: &mut P,
+        bundle_id: &str,
+    ) {
+        if let Some(prev) = self.claims.remove(bundle_id) {
+            provider.release_target(&prev);
+        }
+    }
+
+    pub(crate) fn has_claim(&self, bundle_id: &str) -> bool {
+        self.claims.contains_key(bundle_id)
+    }
+
+    pub(crate) fn stop_all_owned<P: ManagedAxProvider>(
+        &mut self,
+        provider: &mut P,
+        readback_timeout: Duration,
+    ) -> Result<(), String> {
+        let mut failures = Vec::new();
+        for owned in self.claims.values().cloned().collect::<Vec<_>>() {
+            if provider.process_has_exited(owned.pid) {
+                self.release_claim(provider, &owned.bundle_id);
+                continue;
+            }
+            let Some(adapter) = [
+                DictationAdapter::Antigravity,
+                DictationAdapter::Dsh,
+                DictationAdapter::Codex,
+            ]
+            .into_iter()
+            .find(|adapter| adapter_bundle(*adapter) == owned.bundle_id) else {
+                failures.push(blocked("unsupported_dictation_target"));
+                continue;
+            };
+            let result = provider.read_container(&owned).and_then(|live| {
+                if !live.identity.same_container(&owned) {
+                    return Err("unconfirmed:dictation_target_changed".into());
+                }
+                if live.identity.title != owned.title {
+                    if observe_container_dictation(&live, adapter)
+                        == ObservedContainerDictation::Idle
+                    {
+                        Ok(false)
+                    } else {
+                        Err("unconfirmed:dictation_target_changed".into())
+                    }
+                } else {
+                    stop_in_window(provider, &live, adapter, readback_timeout, false)
+                }
+            });
+            match result {
+                Ok(_) => self.release_claim(provider, &owned.bundle_id),
+                Err(error) => failures.push(error),
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
 }
 
 #[cfg(test)]

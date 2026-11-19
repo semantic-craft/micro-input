@@ -36,6 +36,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub board_routing: BoardRouting,
     pub bottom_row_layout: BottomRowLayout,
     pub busy: bool,
+    pub can_retry_host_cleanup: bool,
     pub command_execution_enabled: bool,
     pub competing_input_app_running: bool,
     pub connected_candidate: &'a Option<mi_transport::HidCandidate>,
@@ -44,6 +45,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub favorite_action_ids: &'a BTreeSet<String>,
     pub favorites_only: bool,
     pub hardware_rpc_verified: bool,
+    pub host_caution: &'a Option<HostActionCaution>,
     pub isolated: bool,
     pub keycap_overrides: &'a BTreeMap<(String, u32), CodexKeycapId>,
     pub keycap_search_query: &'a String,
@@ -1574,11 +1576,25 @@ impl ProjectionInputs<'_> {
         }
     }
 
+    fn localized_host_caution_notice(&self) -> Option<String> {
+        let locale = self.resolved_locale;
+        if let Some(caution) = self.host_caution {
+            let localized =
+                crate::i18n::localize_managed_error_detail(&caution.detail_code, locale);
+            if !localized.trim().is_empty() {
+                return Some(localized);
+            }
+        }
+        self.can_retry_host_cleanup
+            .then(|| crate::i18n::tr("宿主动作清理未确认，输入已暂停", locale).to_string())
+    }
+
     pub(super) fn build_status_menu_projection(
         &self,
         can_edit_draft: bool,
         power_status: Option<PowerStatusBadgeProjection>,
         candidate_devices: Vec<CandidateDevice>,
+        host_caution_notice: Option<String>,
     ) -> StatusMenuProjection {
         let locale = self.resolved_locale;
         let profiles = &self
@@ -1639,6 +1655,8 @@ impl ProjectionInputs<'_> {
             locked_profile_id,
             accessibility_trusted: self.accessibility_trusted,
             competing_host_notice,
+            host_caution_notice,
+            can_retry_host_cleanup: self.can_retry_host_cleanup,
             radial_menu_enabled: self.radial_state.enabled(),
             radial_confirm_mode: self.radial_state.confirm_mode(),
             lighting_enabled: self.lighting_popover.lighting_enabled,
@@ -1862,6 +1880,8 @@ impl ProjectionInputs<'_> {
         let is_profile_locked = locked_profile_id.is_some();
         let host_execution_enabled = self.document_store.host_execution_enabled();
         let untrusted_exec = !self.accessibility_trusted && host_execution_enabled;
+        let can_retry_host_cleanup = self.can_retry_host_cleanup;
+        let host_caution_notice = self.localized_host_caution_notice();
 
         let ownership_banner = if untrusted_exec {
             OwnershipBannerState::Caution {
@@ -1870,6 +1890,12 @@ impl ProjectionInputs<'_> {
                     locale,
                 )
                 .to_string(),
+            }
+        } else if can_retry_host_cleanup {
+            OwnershipBannerState::Caution {
+                reason: host_caution_notice.clone().unwrap_or_else(|| {
+                    crate::i18n::tr("宿主动作清理未确认，输入已暂停", locale).to_string()
+                }),
             }
         } else if self.six_layer_state.installation.is_some() || self.six_layer_view.is_some() {
             if let Some(reason) = self
@@ -1972,6 +1998,7 @@ impl ProjectionInputs<'_> {
             show_return_to_host_button: editing_device,
             host_execution_enabled,
             accessibility_trusted: self.accessibility_trusted,
+            can_retry_host_cleanup,
             can_edit_draft,
             can_undo: self.document_store.draft.can_undo,
             can_redo: self.document_store.draft.can_redo,
@@ -2029,8 +2056,12 @@ impl ProjectionInputs<'_> {
 
         let radial = self.build_radial_projection();
 
-        let status_menu =
-            self.build_status_menu_projection(can_edit_draft, power_status, candidate_devices);
+        let status_menu = self.build_status_menu_projection(
+            can_edit_draft,
+            power_status,
+            candidate_devices,
+            host_caution_notice,
+        );
         let (device_connected, device_summary) = if let Some(cand) = &self.connected_candidate {
             (
                 self.device_connected,

@@ -124,6 +124,10 @@ pub struct StatusMenuProjection {
     pub accessibility_trusted: bool,
     #[serde(default)]
     pub competing_host_notice: Option<String>,
+    #[serde(default)]
+    pub host_caution_notice: Option<String>,
+    #[serde(default)]
+    pub can_retry_host_cleanup: bool,
     pub favorites_2x2: [FavoriteSlotCardProjection; FAVORITE_SLOT_COUNT],
     pub host_execution_enabled: bool,
     pub radial_menu_enabled: bool,
@@ -155,6 +159,8 @@ impl Default for StatusMenuProjection {
             locked_profile_id: None,
             accessibility_trusted: true,
             competing_host_notice: None,
+            host_caution_notice: None,
+            can_retry_host_cleanup: false,
             favorites_2x2: std::array::from_fn(|idx| FavoriteSlotCardProjection {
                 slot: FavoriteSlotIndex::ALL[idx],
                 profile_id: None,
@@ -193,6 +199,7 @@ pub enum StatusMenuAction {
     SetProfileLocked(bool),
     SetHostExecutionEnabled(bool),
     OpenAccessibilitySettings,
+    RetryHostCleanup,
     SetRadialMenuEnabled(bool),
     SetRadialConfirmMode(RadialConfirmMode),
     ApplyRadialPreset(RadialPresetKind),

@@ -564,6 +564,7 @@ public struct HeaderSliceModel: Equatable {
     public var showReturnToHostButton: Bool = false
     public var hostExecutionEnabled: Bool = false
     public var accessibilityTrusted: Bool = true
+    public var canRetryHostCleanup: Bool = false
     public var canEditDraft: Bool = true
     public var canUndo: Bool = false
     public var canRedo: Bool = false
@@ -591,6 +592,7 @@ public struct HeaderSliceModel: Equatable {
         self.showReturnToHostButton = m.showReturnToHostButton
         self.hostExecutionEnabled = m.hostExecutionEnabled
         self.accessibilityTrusted = m.accessibilityTrusted
+        self.canRetryHostCleanup = m.canRetryHostCleanup
         self.canEditDraft = m.canEditDraft
         self.canUndo = m.canUndo
         self.canRedo = m.canRedo
@@ -789,6 +791,8 @@ public struct StatusMenuSliceModel: Equatable {
     public var lockedProfileId: String? = nil
     public var accessibilityTrusted: Bool = true
     public var competingHostNotice: String? = nil
+    public var hostCautionNotice: String? = nil
+    public var canRetryHostCleanup: Bool = false
     public var radialMenuEnabled: Bool = false
     public var radialConfirmMode: String = "encoder_press"
     public var radialReadiness: String = "Ready"
@@ -811,6 +815,8 @@ public struct StatusMenuSliceModel: Equatable {
         self.lockedProfileId = m.lockedProfileId
         self.accessibilityTrusted = m.accessibilityTrusted
         self.competingHostNotice = m.competingHostNotice
+        self.hostCautionNotice = m.hostCautionNotice
+        self.canRetryHostCleanup = m.canRetryHostCleanup
         self.radialMenuEnabled = m.radialMenuEnabled
         self.radialConfirmMode = m.radialConfirmMode
         self.radialReadiness = m.radialReadiness
@@ -859,6 +865,7 @@ public struct ProjectionModel: Equatable {
     public var showReturnToHostButton: Bool = false
     public var hostExecutionEnabled: Bool = false
     public var accessibilityTrusted: Bool = true
+    public var canRetryHostCleanup: Bool = false
     public var canEditDraft: Bool = true
     public var canUndo: Bool = false
     public var canRedo: Bool = false
@@ -872,6 +879,7 @@ public struct ProjectionModel: Equatable {
     public var isProfileLocked: Bool = false
     public var lockedProfileId: String? = nil
     public var competingHostNotice: String? = nil
+    public var hostCautionNotice: String? = nil
     public var showOtherProfiles: Bool = false
     public var editingDevice: Bool = false
     public var canMoveUp: Bool = false

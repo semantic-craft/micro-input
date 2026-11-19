@@ -91,6 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var mainWindow: NSWindow?
     private var notificationObservers: [NSObjectProtocol] = []
     private var lastRenderedLocale: ResolvedLocale = .zhHans
+    private var lastRenderedHostCaution: String? = nil
+    private var lastRenderedCanRetryHostCleanup: Bool = false
     let store: CoreStore
     let navigation = WorkbenchNavigationModel()
     let launchAtLogin: LaunchAtLoginController
@@ -140,11 +142,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.setActivationPolicy(silentBoot ? .accessory : .regular)
         NSApp.applicationIconImage = NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
         lastRenderedLocale = store.locale
+        lastRenderedHostCaution = store.statusMenu.hostCautionNotice
+        lastRenderedCanRetryHostCleanup = store.statusMenu.canRetryHostCleanup
         setupMainMenu()
         setupStatusItem()
         updater.startIfPermitted()
         installHostObservers(isVerifyMode: isVerifyMode)
         observeStoreLocale()
+        observeStoreHostCaution()
         if !silentBoot {
             openMainWindow()
         }
@@ -279,12 +284,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    private func observeStoreHostCaution() {
+        withObservationTracking {
+            _ = store.statusMenu.hostCautionNotice
+            _ = store.statusMenu.canRetryHostCleanup
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let nextNotice = self.store.statusMenu.hostCautionNotice
+                let nextCanRetry = self.store.statusMenu.canRetryHostCleanup
+                if self.lastRenderedHostCaution != nextNotice
+                    || self.lastRenderedCanRetryHostCleanup != nextCanRetry
+                {
+                    self.lastRenderedHostCaution = nextNotice
+                    self.lastRenderedCanRetryHostCleanup = nextCanRetry
+                    self.refreshStatusItemAppearance()
+                    if self.popover.isShown {
+                        self.syncPopoverContentSize()
+                    }
+                }
+                self.observeStoreHostCaution()
+            }
+        }
+    }
+
+    private func refreshStatusItemAppearance() {
+        guard let button = statusItem?.button else { return }
+        let notice = store.statusMenu.hostCautionNotice
+        button.image = StatusItemIcon.make(locale: store.locale, hasCaution: notice != nil)
+        button.toolTip = notice ?? store.tr("Micro Input 按键与会话控制")
+    }
+
     private func refreshLocalizedAppKitChrome() {
         setupMainMenu()
-        if let button = statusItem?.button {
-            button.image = StatusItemIcon.make(locale: store.locale)
-            button.toolTip = store.tr("Micro Input 按键与会话控制")
-        }
+        refreshStatusItemAppearance()
         if popover.isShown {
             syncPopoverContentSize()
         }
@@ -420,13 +453,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            button.image = StatusItemIcon.make(locale: store.locale)
-            button.toolTip = store.tr("Micro Input 按键与会话控制")
             button.imagePosition = .imageOnly
             button.target = self
             button.action = #selector(toggleStatusPopover(_:))
         }
         self.statusItem = item
+        refreshStatusItemAppearance()
 
         let hosting = NSHostingController(
             rootView: StatusMenuPopoverView(

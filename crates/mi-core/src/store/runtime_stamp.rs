@@ -141,6 +141,8 @@ pub(crate) struct RuntimeCommitStamp {
     last_cursor_position: ScreenPoint,
     accessibility_trusted: bool,
     competing_input_app_running: bool,
+    can_retry_host_cleanup: bool,
+    host_caution_hash: u64,
     busy: bool,
     status_menu_open: bool,
     banner_flash_count: u64,
@@ -401,6 +403,19 @@ impl WorkbenchStore {
         h.finish()
     }
 
+    fn host_caution_hash(&self) -> u64 {
+        let mut h = Fnv1a::new();
+        match &self.host_caution {
+            None => h.write_u8(0),
+            Some(caution) => {
+                h.write_u8(1);
+                h.write_str(&caution.detail_code);
+                h.write_bool(caution.is_sticky_cleanup);
+            }
+        }
+        h.finish()
+    }
+
     pub(crate) fn current_runtime_stamp(&self) -> RuntimeCommitStamp {
         RuntimeCommitStamp {
             draft_revision: self.document_store.draft.revision,
@@ -424,6 +439,8 @@ impl WorkbenchStore {
                 .get("com.worklouder.input")
                 .copied()
                 .unwrap_or(false),
+            can_retry_host_cleanup: self.can_retry_host_cleanup(),
+            host_caution_hash: self.host_caution_hash(),
             busy: self.busy,
             status_menu_open: self.status_menu_open,
             banner_flash_count: self.banner_flash_count as u64,

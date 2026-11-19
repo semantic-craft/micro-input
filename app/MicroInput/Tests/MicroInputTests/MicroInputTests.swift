@@ -1466,6 +1466,132 @@ final class MicroInputTests: XCTestCase {
         store.dispatch("status_menu", "ConfirmStagedPresetImport")
         XCTAssertNil(store.statusMenu.pendingImport)
     }
+
+    @MainActor
+    func testStatusItemIconCautionCachingAndHostCautionSliceIsolation() throws {
+        let zhNormal = StatusItemIcon.make(locale: .zhHans, hasCaution: false)
+        let zhNormalAgain = StatusItemIcon.make(locale: .zhHans)
+        let zhCaution = StatusItemIcon.make(locale: .zhHans, hasCaution: true)
+        let zhCautionAgain = StatusItemIcon.make(locale: .zhHans, hasCaution: true)
+        let enNormal = StatusItemIcon.make(locale: .en, hasCaution: false)
+        let enCaution = StatusItemIcon.make(locale: .en, hasCaution: true)
+
+        XCTAssertTrue(zhNormal === zhNormalAgain)
+        XCTAssertTrue(zhCaution === zhCautionAgain)
+        XCTAssertTrue(enNormal === StatusItemIcon.make(locale: .en))
+        XCTAssertTrue(enCaution === StatusItemIcon.make(locale: .en, hasCaution: true))
+        XCTAssertFalse(zhNormal === zhCaution)
+        XCTAssertFalse(enNormal === enCaution)
+        XCTAssertFalse(zhNormal === enNormal)
+
+        for icon in [zhNormal, zhCaution, enNormal, enCaution] {
+            XCTAssertTrue(icon.isTemplate)
+            XCTAssertFalse((icon.accessibilityDescription ?? "").isEmpty)
+        }
+        XCTAssertNotEqual(zhNormal.tiffRepresentation, zhCaution.tiffRepresentation)
+        XCTAssertNotEqual(enNormal.tiffRepresentation, enCaution.tiffRepresentation)
+
+        let baseParsed = CoreStore.parseProjection([
+            "header": [
+                "engine_version": "0.2.0",
+                "can_retry_host_cleanup": false,
+            ],
+            "status_menu": [
+                "active_profile_name": "Antigravity",
+                "can_retry_host_cleanup": false,
+            ],
+        ])
+        let baseHeader = HeaderSliceModel(from: baseParsed)
+        let baseSidebar = SidebarSliceModel(from: baseParsed)
+        let baseCanvas = CanvasSliceModel(from: baseParsed)
+        let baseSession = SessionStripSliceModel(from: baseParsed)
+        let baseInspector = InspectorSliceModel(from: baseParsed)
+        let baseStatusMenu = StatusMenuSliceModel(from: baseParsed)
+        let baseOverlay = OverlaySliceModel(from: baseParsed)
+        let baseFooter = FooterSliceModel(from: baseParsed)
+
+        let transientParsed = CoreStore.parseProjection([
+            "header": [
+                "engine_version": "0.2.0",
+                "can_retry_host_cleanup": false,
+            ],
+            "status_menu": [
+                "active_profile_name": "Antigravity",
+                "host_caution_notice": "上次听写所在窗口或对话已切换，请先确认原录音已停止",
+                "can_retry_host_cleanup": false,
+            ],
+        ])
+        let transientStatusMenu = StatusMenuSliceModel(from: transientParsed)
+        XCTAssertEqual(transientStatusMenu.hostCautionNotice, "上次听写所在窗口或对话已切换，请先确认原录音已停止")
+        XCTAssertFalse(transientStatusMenu.canRetryHostCleanup)
+        XCTAssertNotEqual(transientStatusMenu, baseStatusMenu)
+        XCTAssertEqual(HeaderSliceModel(from: transientParsed), baseHeader)
+        XCTAssertEqual(SidebarSliceModel(from: transientParsed), baseSidebar)
+        XCTAssertEqual(CanvasSliceModel(from: transientParsed), baseCanvas)
+        XCTAssertEqual(SessionStripSliceModel(from: transientParsed), baseSession)
+        XCTAssertEqual(InspectorSliceModel(from: transientParsed), baseInspector)
+        XCTAssertEqual(OverlaySliceModel(from: transientParsed), baseOverlay)
+        XCTAssertEqual(FooterSliceModel(from: transientParsed), baseFooter)
+
+        let stickyParsed = CoreStore.parseProjection([
+            "header": [
+                "engine_version": "0.2.0",
+                "can_retry_host_cleanup": true,
+            ],
+            "status_menu": [
+                "active_profile_name": "Antigravity",
+                "host_caution_notice": "Previous dictation window or chat changed; confirm recording stopped",
+                "can_retry_host_cleanup": true,
+            ],
+        ])
+        XCTAssertTrue(HeaderSliceModel(from: stickyParsed).canRetryHostCleanup)
+        XCTAssertTrue(StatusMenuSliceModel(from: stickyParsed).canRetryHostCleanup)
+        XCTAssertEqual(
+            StatusMenuSliceModel(from: stickyParsed).hostCautionNotice,
+            "Previous dictation window or chat changed; confirm recording stopped"
+        )
+        XCTAssertEqual(SidebarSliceModel(from: stickyParsed), baseSidebar)
+        XCTAssertEqual(CanvasSliceModel(from: stickyParsed), baseCanvas)
+        XCTAssertEqual(SessionStripSliceModel(from: stickyParsed), baseSession)
+        XCTAssertEqual(InspectorSliceModel(from: stickyParsed), baseInspector)
+        XCTAssertEqual(OverlaySliceModel(from: stickyParsed), baseOverlay)
+        XCTAssertEqual(FooterSliceModel(from: stickyParsed), baseFooter)
+
+        let statusOnlyParsed = CoreStore.parseProjection([
+            "status_menu": [
+                "host_caution_notice": "听写状态回读未确认，请检查原窗口是否仍在录音",
+                "can_retry_host_cleanup": true,
+            ],
+        ])
+        XCTAssertTrue(StatusMenuSliceModel(from: statusOnlyParsed).canRetryHostCleanup)
+        XCTAssertEqual(
+            StatusMenuSliceModel(from: statusOnlyParsed).hostCautionNotice,
+            "听写状态回读未确认，请检查原窗口是否仍在录音"
+        )
+
+        let dir = try makeIsolatedTempDir("retry-cleanup-dispatch")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = CoreStore(isolatedDirectory: dir.path)
+        defer { store.stopEventLoops() }
+
+        store.commitDomainSlices(from: stickyParsed)
+        XCTAssertTrue(store.statusMenu.canRetryHostCleanup)
+        XCTAssertTrue(store.header.canRetryHostCleanup)
+
+        let popoverHost = NSHostingView(
+            rootView: StatusMenuPopoverView(store: store, onOpenMainWindow: {}).frame(width: 348)
+        )
+        popoverHost.layoutSubtreeIfNeeded()
+        XCTAssertLessThanOrEqual(popoverHost.fittingSize.width, 348.5)
+        XCTAssertGreaterThan(popoverHost.fittingSize.height, 260)
+
+        store.dispatch("status_menu", "RetryHostCleanup")
+        XCTAssertFalse(store.statusMenu.canRetryHostCleanup)
+        XCTAssertNil(store.statusMenu.hostCautionNotice)
+        store.dispatch("header", "RetryHostCleanup")
+        XCTAssertFalse(store.header.canRetryHostCleanup)
+        XCTAssertEqual(L10n.tr("重试清理", .en), "Retry Cleanup")
+    }
 }
 
 @MainActor
