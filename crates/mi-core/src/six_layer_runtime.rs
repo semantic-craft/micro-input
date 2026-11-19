@@ -19,7 +19,7 @@ pub(crate) use state::{ExecutionAdmission, ExecutionPolicy};
 #[cfg(test)]
 pub(crate) use tests::{test_b64_decode, test_b64_encode};
 pub use vendor_bridge::activation_to_input_event;
-pub(crate) use vendor_bridge::{VendorBridge, WireSyncState};
+pub(crate) use vendor_bridge::{VendorBridge, VendorBridgePreviewLease, WireSyncState};
 
 #[cfg(test)]
 use crate::karabiner::ConfigPatch;
@@ -530,6 +530,15 @@ impl RunningSixLayer {
             .as_ref()
             .filter(|session| !session.is_disconnected() && session.has_exclusive_vendor_link())
             .cloned()
+    }
+
+    pub(crate) fn acquire_preview_session(
+        &self,
+    ) -> Result<(Arc<DeviceSession>, VendorBridgePreviewLease), String> {
+        if self.is_retired() || self.receiver.failure().is_some() {
+            return Err("六层运行代次已失效，无法启动灯光预览".to_string());
+        }
+        self.vendor_bridge.acquire_preview_lease()
     }
 
     pub(crate) fn set_v070_inbox(&self, inbox: crate::store::runtime_inbox::RuntimeInbox) {

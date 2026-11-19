@@ -1,16 +1,22 @@
 use mi_core::{
-    CanonicalAgent, CodexKeycapId, EditorAction, EditorModalProjection, InspectorAction,
-    InspectorBodyProjection, InspectorDrawer, KeycapRole, MultiBranchKind, MultiBranchTarget,
-    ShortcutModifier, SidebarAction, WorkbenchError, WorkbenchStore, INSPECTOR_WIDTH,
+    CanonicalAgent, CanvasAction, CodexKeycapId, EditorAction, EditorModalProjection, HeaderAction,
+    InspectorAction, InspectorBodyProjection, InspectorDrawer, KeycapRole, LightingPreviewHandle,
+    LightingPreviewPhase, LightingPreviewStarter, LightingUpdateResult, MultiBranchKind,
+    MultiBranchTarget, ShortcutModifier, SidebarAction, UiLanguagePreference, WorkbenchCommand,
+    WorkbenchError, WorkbenchStore, WorkbenchStoreConfig, INSPECTOR_WIDTH,
 };
 use mi_model::{
     comparison::Choice as ComparisonChoice,
-    lighting::{Effect as LightingEffect, Zone as LightingZone},
+    lighting::{Edit as LightingEdit, Effect as LightingEffect, Lighting, Zone as LightingZone},
     macro_sequence::MacroEvent,
 };
 use serde_json::{json, Value};
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -468,13 +474,24 @@ fn lighting_editor_dual_zone_all_layers_preview_and_protected_layer_isolation() 
         })
         .expect("set underglow color to #FF8800");
 
-    store
+    let before_gen = store.projection_generation();
+    let offline_err = store
         .dispatch_editor_action(EditorAction::LightingBeginPreview)
-        .expect("begin 30s hardware lighting preview");
+        .expect_err("offline default starter must reject hardware lighting preview");
+    assert!(matches!(offline_err, WorkbenchError::Routing(_)));
+    assert!(
+        store.projection_generation() > before_gen,
+        "offline preview rejection must bump projection_generation so FFI publishes validation_error"
+    );
     if let Some(EditorModalProjection::LightingEditor(modal)) = store.active_modal() {
         assert!(modal.has_lighting);
-        assert!(modal.preview_active);
-        assert_eq!(modal.preview_remaining_secs, 30);
+        assert!(!modal.preview_active);
+        assert_eq!(modal.preview_remaining_secs, 0);
+        let err = modal
+            .validation_error
+            .as_deref()
+            .expect("offline rejection must populate modal validation_error");
+        assert!(err.contains("USB"));
         let bl = modal.backlight.as_ref().expect("backlight projection");
         assert_eq!(bl.effect, Some(LightingEffect::Breath));
         assert_eq!(bl.color_hex, "#33AAFF");
@@ -489,16 +506,51 @@ fn lighting_editor_dual_zone_all_layers_preview_and_protected_layer_isolation() 
     }
 
     store
-        .dispatch_editor_action(EditorAction::LightingEndPreview)
-        .expect("end lighting preview");
+        .dispatch_header_action(HeaderAction::SetUiLanguage {
+            language: UiLanguagePreference::En,
+        })
+        .expect("switch UI locale to English");
     if let Some(EditorModalProjection::LightingEditor(modal)) = store.active_modal() {
-        assert!(!modal.preview_active);
-        assert_eq!(modal.preview_remaining_secs, 0);
+        let err_en = modal
+            .validation_error
+            .as_deref()
+            .expect("English localized validation_error");
+        assert!(
+            err_en.contains("No verified USB exclusive keypad connected"),
+            "unexpected English validation_error: {err_en}"
+        );
+    } else {
+        panic!("expected LightingEditor modal after locale switch");
+    }
+
+    let before_bad_hex = store.projection_generation();
+    assert!(store
+        .dispatch_editor_action(EditorAction::LightingEditColorHex {
+            zone: LightingZone::Backlight,
+            color_hex: "#ZZZZZZ".into(),
+            all_layers: false,
+        })
+        .is_err());
+    assert!(store.projection_generation() > before_bad_hex);
+    if let Some(EditorModalProjection::LightingEditor(modal)) = store.active_modal() {
+        let hex_err = modal
+            .validation_error
+            .as_deref()
+            .expect("invalid hex must populate validation_error");
+        assert!(hex_err.contains("Invalid hex color"), "got: {hex_err}");
+    } else {
+        panic!("expected LightingEditor modal after invalid hex");
     }
 
     store
-        .dispatch_editor_action(EditorAction::LightingBeginPreview)
-        .expect("restart lighting preview before switching to protected profile");
+        .dispatch_editor_action(EditorAction::LightingEndPreview)
+        .expect("end lighting preview is idempotent when idle");
+    if let Some(EditorModalProjection::LightingEditor(modal)) = store.active_modal() {
+        assert!(!modal.preview_active);
+        assert_eq!(modal.preview_remaining_secs, 0);
+        assert!(modal.validation_error.is_none());
+    }
+
     store
         .dispatch_inspector_action(InspectorAction::StartShortcutRecording)
         .expect("start shortcut recording before switching to protected profile");
@@ -551,10 +603,483 @@ fn lighting_editor_dual_zone_all_layers_preview_and_protected_layer_isolation() 
     }
 
     store
+        .dispatch_editor_action(EditorAction::LightingEndPreview)
+        .expect("stopping preview must remain allowed on protected layers");
+
+    store
         .dispatch_inspector_action(InspectorAction::UnlockProtectedLayer)
         .expect("unlock by creating and switching to custom layer");
     assert!(!store.is_selected_layer_protected());
     assert!(store.projection().inspector.editable().is_some());
+}
+
+#[derive(Debug)]
+struct FakeHandleRecord {
+    updates: Mutex<Vec<(String, String)>>,
+    replaces: Mutex<Vec<Lighting>>,
+    phase: Mutex<LightingPreviewPhase>,
+    end_calls: AtomicUsize,
+    detach_calls: AtomicUsize,
+    end_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+}
+
+impl FakeHandleRecord {
+    fn active() -> Arc<Self> {
+        Arc::new(Self {
+            updates: Mutex::new(Vec::new()),
+            replaces: Mutex::new(Vec::new()),
+            phase: Mutex::new(LightingPreviewPhase::Active),
+            end_calls: AtomicUsize::new(0),
+            detach_calls: AtomicUsize::new(0),
+            end_gate: Mutex::new(None),
+        })
+    }
+
+    fn set_phase(&self, phase: LightingPreviewPhase) {
+        *self.phase.lock().unwrap() = phase;
+    }
+
+    fn set_end_gate(&self, gate: Option<Arc<tokio::sync::Notify>>) {
+        *self.end_gate.lock().unwrap() = gate;
+    }
+}
+
+#[derive(Debug)]
+struct FakePreviewHandle {
+    record: Arc<FakeHandleRecord>,
+}
+
+impl LightingPreviewHandle for FakePreviewHandle {
+    fn update(&self, zone: LightingZone, edit: LightingEdit) -> Result<(), String> {
+        let phase = self.record.phase.lock().unwrap().clone();
+        if phase != LightingPreviewPhase::Active {
+            return Err("preview has ended".into());
+        }
+        self.record
+            .updates
+            .lock()
+            .unwrap()
+            .push((zone.name().to_string(), format!("{edit:?}")));
+        Ok(())
+    }
+
+    fn replace(&self, lights: Lighting) -> Result<(), String> {
+        let phase = self.record.phase.lock().unwrap().clone();
+        if phase != LightingPreviewPhase::Active {
+            return Err("preview has ended".into());
+        }
+        self.record.replaces.lock().unwrap().push(lights);
+        Ok(())
+    }
+
+    fn phase(&self) -> LightingPreviewPhase {
+        self.record.phase.lock().unwrap().clone()
+    }
+
+    fn end_future(&self) -> Pin<Box<dyn Future<Output = LightingPreviewPhase> + Send + 'static>> {
+        let record = Arc::clone(&self.record);
+        Box::pin(async move {
+            let gate = record.end_gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            record.end_calls.fetch_add(1, Ordering::AcqRel);
+            *record.phase.lock().unwrap() = LightingPreviewPhase::Stopped;
+            LightingPreviewPhase::Stopped
+        })
+    }
+
+    fn detach_on_drop(&self) {
+        self.record.detach_calls.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+struct FakePreviewStarter {
+    duration: Duration,
+    start_count: AtomicUsize,
+    started_lights: Mutex<Vec<Lighting>>,
+    handles: Mutex<Vec<Arc<FakeHandleRecord>>>,
+    next_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    next_error: Mutex<Option<String>>,
+}
+
+impl FakePreviewStarter {
+    fn new(duration: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            duration,
+            start_count: AtomicUsize::new(0),
+            started_lights: Mutex::new(Vec::new()),
+            handles: Mutex::new(Vec::new()),
+            next_gate: Mutex::new(None),
+            next_error: Mutex::new(None),
+        })
+    }
+
+    fn arm_gate(&self) -> Arc<tokio::sync::Notify> {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        *self.next_gate.lock().unwrap() = Some(Arc::clone(&notify));
+        notify
+    }
+
+    fn last_handle(&self) -> Arc<FakeHandleRecord> {
+        self.handles
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("fake preview handle")
+    }
+}
+
+impl LightingPreviewStarter for FakePreviewStarter {
+    fn requires_verified_session(&self) -> bool {
+        false
+    }
+
+    fn preview_duration(&self) -> Duration {
+        self.duration
+    }
+
+    fn begin_future(
+        &self,
+        _session: Option<Arc<mi_session::DeviceSession>>,
+        lights: Lighting,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Box<dyn LightingPreviewHandle>, String>> + Send + 'static>,
+    > {
+        self.start_count.fetch_add(1, Ordering::AcqRel);
+        self.started_lights.lock().unwrap().push(lights);
+        let gate = self.next_gate.lock().unwrap().take();
+        let next_err = self.next_error.lock().unwrap().take();
+        let handle_record = FakeHandleRecord::active();
+        if next_err.is_none() {
+            self.handles
+                .lock()
+                .unwrap()
+                .push(Arc::clone(&handle_record));
+        }
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            if let Some(err) = next_err {
+                return Err(err);
+            }
+            Ok(Box::new(FakePreviewHandle {
+                record: handle_record,
+            }) as Box<dyn LightingPreviewHandle>)
+        })
+    }
+}
+
+fn wait_until(mut predicate: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !predicate() {
+        assert!(Instant::now() < deadline, "condition timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn lighting_modal(store: &WorkbenchStore) -> mi_core::LightingEditorModalProjection {
+    match store.active_modal() {
+        Some(EditorModalProjection::LightingEditor(modal)) => modal.clone(),
+        other => panic!("expected LightingEditor modal, got {other:?}"),
+    }
+}
+
+#[test]
+fn lighting_preview_fake_starter_lifecycle_edits_countdown_errors_and_teardowns() {
+    let ws = TempWorkspace::new("lighting-fake-starter");
+    let starter = FakePreviewStarter::new(Duration::from_secs(30));
+    let mut cfg = WorkbenchStoreConfig::isolated(&ws.dir);
+    cfg.lighting_preview_starter = Arc::clone(&starter) as Arc<dyn LightingPreviewStarter>;
+    let mut store = WorkbenchStore::open(cfg).expect("open store with fake preview starter");
+
+    store
+        .dispatch_inspector_action(InspectorAction::CreateCustomLayer {
+            name: "测试层 2".into(),
+        })
+        .expect("create second layer");
+    let second_layer_id = store.selected_layer_id().unwrap().to_string();
+    let first_layer_id = store.projection().canvas.layer_tabs[0].layer_id.clone();
+
+    store
+        .dispatch_editor_action(EditorAction::OpenLightingEditor)
+        .expect("open lighting editor");
+    store
+        .dispatch_editor_action(EditorAction::LightingAddDefault)
+        .expect("add default lighting");
+
+    let gate = starter.arm_gate();
+    let t0 = Instant::now();
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t0,
+        )
+        .expect("async start returns immediately while gated");
+    assert!(
+        !lighting_modal(&store).preview_active,
+        "Starting state must not falsely report preview_active before device ACK"
+    );
+    store.refresh_four_app_lighting();
+    assert_eq!(
+        store.lighting_arbiter.last_update_result,
+        LightingUpdateResult::DeviceBusy
+    );
+
+    store
+        .dispatch_editor_action(EditorAction::LightingEditColorHex {
+            zone: LightingZone::Backlight,
+            color_hex: "#123456".into(),
+            all_layers: false,
+        })
+        .expect("edit arriving during Starting must be retained");
+    gate.notify_one();
+    wait_until(|| {
+        store.poll_at(t0);
+        lighting_modal(&store).preview_active
+    });
+    let h1 = starter.last_handle();
+    assert_eq!(lighting_modal(&store).preview_remaining_secs, 30);
+    assert_eq!(
+        h1.replaces.lock().unwrap().len(),
+        1,
+        "dirty edit made during Starting must flush via replace upon Active"
+    );
+    assert_eq!(
+        h1.replaces.lock().unwrap()[0].backlight["color"],
+        json!(0x123456)
+    );
+
+    store
+        .dispatch_editor_action(EditorAction::LightingEditBrightness {
+            zone: LightingZone::Underglow,
+            brightness_percent: 45,
+            all_layers: false,
+        })
+        .expect("live edit while Active pushes update");
+    assert_eq!(h1.updates.lock().unwrap().len(), 1);
+    assert_eq!(h1.updates.lock().unwrap()[0].0, "underglow");
+
+    let gen_before_tick = store.projection_generation();
+    assert!(store.poll_at(t0 + Duration::from_secs(1)));
+    assert!(store.projection_generation() > gen_before_tick);
+    assert_eq!(lighting_modal(&store).preview_remaining_secs, 29);
+
+    assert!(store.poll_at(t0 + Duration::from_millis(29_500)));
+    assert_eq!(lighting_modal(&store).preview_remaining_secs, 1);
+
+    assert!(store.poll_at(t0 + Duration::from_secs(30)));
+    assert!(!lighting_modal(&store).preview_active);
+    assert_eq!(lighting_modal(&store).preview_remaining_secs, 0);
+    assert!(
+        store.status_message().contains("未自动恢复"),
+        "expiry status must remain honest about no automatic restoration"
+    );
+    wait_until(|| {
+        store.poll_at(t0 + Duration::from_secs(30));
+        h1.end_calls.load(Ordering::Acquire) == 1
+    });
+    wait_until(|| {
+        store.poll_at(t0 + Duration::from_secs(30));
+        store.refresh_four_app_lighting();
+        store.lighting_arbiter.last_update_result == LightingUpdateResult::Applied
+    });
+
+    let cancel_gate = starter.arm_gate();
+    let t1 = t0 + Duration::from_secs(31);
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t1,
+        )
+        .expect("start second preview to test early cancel during Starting");
+    cancel_gate.notify_one();
+    std::thread::sleep(Duration::from_millis(40));
+    let h_stale = starter.last_handle();
+    store
+        .dispatch_editor_action(EditorAction::LightingEndPreview)
+        .expect("cancel while Starting before inbox event is drained");
+    store.poll_at(t1 + Duration::from_millis(50));
+    assert!(!lighting_modal(&store).preview_active);
+    assert_eq!(
+        h_stale.detach_calls.load(Ordering::Acquire),
+        1,
+        "stale handle arriving after early stop during Starting must be detached"
+    );
+
+    let t2 = t1 + Duration::from_secs(1);
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t2,
+        )
+        .expect("start preview for Unknown error test");
+    wait_until(|| {
+        store.poll_at(t2);
+        lighting_modal(&store).preview_active
+    });
+    let h_err = starter.last_handle();
+    let starts_before_err = starter.start_count.load(Ordering::Acquire);
+    h_err.set_phase(LightingPreviewPhase::Unknown("transport timeout".into()));
+    assert!(store.poll_at(t2 + Duration::from_millis(50)));
+    let err_modal = lighting_modal(&store);
+    assert!(!err_modal.preview_active);
+    assert_eq!(err_modal.preview_remaining_secs, 0);
+    assert!(err_modal
+        .validation_error
+        .as_deref()
+        .is_some_and(|e| e.contains("未自动恢复") && e.contains("transport timeout")));
+    assert_eq!(h_err.detach_calls.load(Ordering::Acquire), 1);
+    assert_eq!(
+        starter.start_count.load(Ordering::Acquire),
+        starts_before_err,
+        "Unknown preview failure must never auto-retry"
+    );
+
+    let t3 = t2 + Duration::from_secs(1);
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t3,
+        )
+        .expect("start preview before CloseModal");
+    wait_until(|| {
+        store.poll_at(t3);
+        lighting_modal(&store).preview_active
+    });
+    let h_close = starter.last_handle();
+    store
+        .dispatch_editor_action(EditorAction::CloseModal)
+        .expect("close modal stops preview");
+    wait_until(|| {
+        store.poll_at(t3);
+        h_close.end_calls.load(Ordering::Acquire) == 1
+    });
+    wait_until(|| {
+        store.poll_at(t3);
+        store.refresh_four_app_lighting();
+        store.lighting_arbiter.last_update_result == LightingUpdateResult::Applied
+    });
+
+    store
+        .dispatch_editor_action(EditorAction::OpenLightingEditor)
+        .expect("reopen lighting editor");
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t3,
+        )
+        .expect("start preview before SelectLayer");
+    wait_until(|| {
+        store.poll_at(t3);
+        lighting_modal(&store).preview_active
+    });
+    let h_layer = starter.last_handle();
+    store
+        .dispatch_canvas_action(CanvasAction::SelectLayer(first_layer_id))
+        .expect("switching layers must stop active preview");
+    wait_until(|| {
+        store.poll_at(t3);
+        h_layer.end_calls.load(Ordering::Acquire) == 1
+    });
+    wait_until(|| {
+        store.poll_at(t3);
+        store.refresh_four_app_lighting();
+        store.lighting_arbiter.last_update_result == LightingUpdateResult::Applied
+    });
+
+    store
+        .dispatch_canvas_action(CanvasAction::SelectLayer(second_layer_id))
+        .expect("return to layer with lighting");
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t3,
+        )
+        .expect("start preview before SelectProfile");
+    wait_until(|| {
+        store.poll_at(t3);
+        lighting_modal(&store).preview_active
+    });
+    let h_profile = starter.last_handle();
+    let dsh_id = store
+        .find_canonical_profile_id(CanonicalAgent::DeepseekHarness)
+        .expect("DSH profile");
+    store
+        .dispatch_sidebar_action(SidebarAction::SelectProfile(dsh_id))
+        .expect("switching profile must stop active preview");
+    wait_until(|| {
+        store.poll_at(t3);
+        h_profile.end_calls.load(Ordering::Acquire) == 1
+    });
+    wait_until(|| {
+        store.poll_at(t3);
+        store.refresh_four_app_lighting();
+        store.lighting_arbiter.last_update_result == LightingUpdateResult::Applied
+    });
+
+    store
+        .dispatch_editor_action(EditorAction::OpenLightingEditor)
+        .expect("open lighting editor on DSH");
+    store
+        .dispatch_editor_action(EditorAction::LightingAddDefault)
+        .expect("add lighting on DSH");
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t3,
+        )
+        .expect("start preview before LightingResetLayer removes lighting");
+    wait_until(|| {
+        store.poll_at(t3);
+        lighting_modal(&store).preview_active
+    });
+    let h_reset = starter.last_handle();
+    store
+        .dispatch_editor_action(EditorAction::LightingResetLayer)
+        .expect("resetting unsourced layer removes lighting and stops preview");
+    assert!(!lighting_modal(&store).has_lighting);
+    assert!(!lighting_modal(&store).preview_active);
+    wait_until(|| {
+        store.poll_at(t3);
+        h_reset.end_calls.load(Ordering::Acquire) == 1
+    });
+    wait_until(|| {
+        store.poll_at(t3);
+        store.refresh_four_app_lighting();
+        store.lighting_arbiter.last_update_result == LightingUpdateResult::Applied
+    });
+
+    store
+        .dispatch_editor_action(EditorAction::LightingAddDefault)
+        .expect("re-add lighting before SystemWillSleep");
+    store
+        .dispatch_at(
+            WorkbenchCommand::Editor(EditorAction::LightingBeginPreview),
+            t3,
+        )
+        .expect("start preview before sleep");
+    wait_until(|| {
+        store.poll_at(t3);
+        lighting_modal(&store).preview_active
+    });
+    let h_sleep = starter.last_handle();
+    let end_gate = Arc::new(tokio::sync::Notify::new());
+    h_sleep.set_end_gate(Some(Arc::clone(&end_gate)));
+    let releaser = Arc::clone(&end_gate);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        releaser.notify_one();
+    });
+    store.system_will_sleep();
+    assert_eq!(
+        h_sleep.end_calls.load(Ordering::Acquire),
+        1,
+        "system_will_sleep must drain preview end_future synchronously before returning"
+    );
+    assert!(!lighting_modal(&store).preview_active);
 }
 
 #[test]

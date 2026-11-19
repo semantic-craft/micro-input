@@ -114,6 +114,7 @@ mod antigravity_daemon;
 mod device_sync;
 mod host_execution;
 mod inspector_editor_actions;
+pub(crate) mod lighting_preview_store;
 #[cfg(test)]
 mod runtime_consistency_tests;
 #[cfg(test)]
@@ -125,6 +126,11 @@ pub use antigravity_daemon::codex_observations_to_catalog;
 use antigravity_daemon::ensure_private_document_dir;
 pub(crate) use antigravity_daemon::poll_antigravity_daemon_candidates_with_frontmost;
 use inspector_editor_actions::resolve_merged_bottom_slot;
+pub use lighting_preview_store::{
+    LightingPreviewBeginFuture, LightingPreviewEndFuture, LightingPreviewHandle,
+    LightingPreviewPhase, LightingPreviewStarter, NativeLightingPreviewStarter,
+};
+use lighting_preview_store::{LightingPreviewState, LightingPreviewStopReason};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HardwareAutoAcceptanceReceipt {
@@ -173,7 +179,7 @@ struct LiveSessionSourceState {
     generation: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum HardwareLoopEvent {
     Input(InputEvent),
     Disconnected {
@@ -210,6 +216,13 @@ pub enum HardwareLoopEvent {
         session_id: u64,
         hold_generation: u64,
     },
+    LightingPreviewStarted {
+        generation: u64,
+        result: Result<Box<dyn LightingPreviewHandle>, String>,
+    },
+    LightingPreviewEnded {
+        generation: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,6 +255,7 @@ pub struct WorkbenchStoreConfig {
     pub app_cache: Arc<AppBundleCache>,
     pub panel_host: Arc<dyn PassivePanelHost>,
     pub status_item_host: Arc<dyn StatusItemHost>,
+    pub lighting_preview_starter: Arc<dyn LightingPreviewStarter>,
 }
 
 impl WorkbenchStoreConfig {
@@ -268,6 +282,7 @@ impl WorkbenchStoreConfig {
             app_cache: Arc::new(AppBundleCache::new()),
             panel_host: Arc::new(NoopPassivePanelHost::new()),
             status_item_host: Arc::new(NoopStatusItemHost::new()),
+            lighting_preview_starter: Arc::new(NativeLightingPreviewStarter),
         }
     }
 
@@ -292,6 +307,7 @@ impl WorkbenchStoreConfig {
             app_cache,
             panel_host: Arc::new(NoopPassivePanelHost::new()),
             status_item_host: Arc::new(NoopStatusItemHost::new()),
+            lighting_preview_starter: Arc::new(NativeLightingPreviewStarter),
         }
     }
 
@@ -567,6 +583,8 @@ pub struct WorkbenchStore {
     lighting_apply_to_all_layers: bool,
     lighting_preview_active: bool,
     lighting_preview_remaining_secs: u8,
+    lighting_preview_state: LightingPreviewState,
+    lighting_preview_generation: u64,
     status_menu_open: bool,
     active_modal: Option<EditorModalProjection>,
     last_status_item_snapshot: Option<StatusItemSnapshot>,
@@ -734,6 +752,8 @@ impl WorkbenchStore {
             lighting_apply_to_all_layers: false,
             lighting_preview_active: false,
             lighting_preview_remaining_secs: 0,
+            lighting_preview_state: LightingPreviewState::Idle,
+            lighting_preview_generation: 0,
             status_menu_open: false,
             active_modal: None,
             last_status_item_snapshot: None,
@@ -913,6 +933,11 @@ impl WorkbenchStore {
                 profile_id: Some(target_pid.clone()),
             })?;
             if prefer_selected || self.selected_profile_id.is_none() {
+                if self.selected_profile_id.as_deref() != Some(target_pid.as_str())
+                    || self.selected_layer_id != first_layer_id
+                {
+                    self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
+                }
                 self.selected_profile_id = Some(target_pid);
                 self.selected_layer_id = first_layer_id;
                 self.normalize_surface_for_current_layer();
@@ -958,6 +983,7 @@ impl WorkbenchStore {
         }
         let _ = self.sync_live_session_source();
         let _ = self.drain_pending_hardware_events(now);
+        dirty |= self.poll_lighting_preview(now);
         dirty |= self.poll_encoder_model_picker(now);
         dirty |= self.poll_session_navigation_with_commit(false);
         dirty |= self.overlay_controller.expire_notice_if_due(now);
@@ -1988,6 +2014,7 @@ impl WorkbenchStore {
     }
 
     pub fn system_will_terminate(&mut self) {
+        self.end_lighting_preview_blocking(LightingPreviewStopReason::SystemTerminate);
         self.teardown_v070_session_sa_rgb();
         self.hardware_event_tx.close();
         if let Some(session) = &self.device_session {
@@ -2006,6 +2033,7 @@ impl WorkbenchStore {
 
 impl Drop for WorkbenchStore {
     fn drop(&mut self) {
+        self.detach_lighting_preview_on_drop();
         self.teardown_v070_session_sa_rgb();
         self.hardware_event_tx.close();
         if let Some(session) = &self.device_session {

@@ -256,10 +256,25 @@ pub(super) fn record_v070_bridge_observation(
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct VendorBridgePreviewLease {
+    active: Arc<AtomicBool>,
+    lease_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for VendorBridgePreviewLease {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+        let _ = self.lease_tx.send(false);
+    }
+}
+
 pub(crate) struct VendorBridge {
     pub(super) led_tx: tokio::sync::watch::Sender<Option<(String, Vec<OaiKeyStatusEntry>)>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
     pub(super) connected: Arc<AtomicBool>,
+    pub(super) preview_lease_active: Arc<AtomicBool>,
+    pub(super) preview_lease_tx: tokio::sync::watch::Sender<bool>,
     pub(super) sync_state: Arc<Mutex<WireSyncState>>,
     pub(super) retry_not_before: Arc<Mutex<Option<Instant>>>,
     pub(super) active_session: Arc<Mutex<Option<Arc<DeviceSession>>>>,
@@ -289,10 +304,13 @@ impl VendorBridge {
     pub(super) fn new(initial_session: Option<Arc<DeviceSession>>) -> Self {
         let (led_tx, _) = tokio::sync::watch::channel(None);
         let (stop_tx, _) = tokio::sync::watch::channel(false);
+        let (preview_lease_tx, _) = tokio::sync::watch::channel(false);
         Self {
             led_tx,
             stop_tx,
             connected: Arc::new(AtomicBool::new(false)),
+            preview_lease_active: Arc::new(AtomicBool::new(false)),
+            preview_lease_tx,
             sync_state: Arc::new(Mutex::new(WireSyncState::Unsynced)),
             retry_not_before: Arc::new(Mutex::new(None)),
             active_session: Arc::new(Mutex::new(initial_session)),
@@ -303,6 +321,57 @@ impl VendorBridge {
             v070_observed_profile_layer: Arc::new(Mutex::new(None)),
             task: None,
         }
+    }
+
+    pub(crate) fn acquire_preview_lease(
+        &self,
+    ) -> Result<(Arc<DeviceSession>, VendorBridgePreviewLease), String> {
+        if !self.connected.load(Ordering::Acquire) {
+            return Err("USB 专用桥接当前未连接".to_string());
+        }
+        let session = {
+            let guard = self.active_session.lock().unwrap();
+            guard
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| "USB 专用桥接当前未连接".to_string())?
+        };
+        if session.is_disconnected() || !session.has_exclusive_vendor_link() {
+            return Err("需要已连接的 USB 专用独占会话".to_string());
+        }
+        if session.request_count() >= 900 {
+            return Err("当前 USB 会话请求配额即将耗尽，请稍后重试预览".to_string());
+        }
+        if self
+            .preview_lease_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err("当前已有灯光预览正在进行".to_string());
+        }
+        let lease = VendorBridgePreviewLease {
+            active: Arc::clone(&self.preview_lease_active),
+            lease_tx: self.preview_lease_tx.clone(),
+        };
+        let _ = self.preview_lease_tx.send(true);
+        let still_valid = self.connected.load(Ordering::Acquire)
+            && self
+                .active_session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|s| {
+                    s.id == session.id
+                        && !s.is_disconnected()
+                        && s.has_exclusive_vendor_link()
+                        && s.request_count() < 900
+                });
+        if !still_valid {
+            drop(lease);
+            return Err("USB 专用桥接当前未连接".to_string());
+        }
+        *self.sync_state.lock().unwrap() = WireSyncState::Unsynced;
+        Ok((session, lease))
     }
 
     pub(super) fn confirmed_digest(&self) -> Option<String> {
@@ -320,7 +389,9 @@ impl VendorBridge {
     }
 
     pub(super) fn needs_lighting_sync(&self) -> bool {
-        if !self.connected.load(Ordering::Acquire) {
+        if !self.connected.load(Ordering::Acquire)
+            || self.preview_lease_active.load(Ordering::Acquire)
+        {
             return false;
         }
         let sync_state = self.sync_state.lock().unwrap().clone();
@@ -409,6 +480,7 @@ impl VendorBridge {
         self.stop_tx = stop_tx;
         *self.retry_not_before.lock().unwrap() = None;
         let mut led_rx = self.led_tx.subscribe();
+        let mut lease_rx = self.preview_lease_tx.subscribe();
         let initial_session = initial_session.filter(|s| !s.is_disconnected());
         let initial_notif_rx = if let Some(ref s) = initial_session {
             let rx = s.notifications();
@@ -421,6 +493,7 @@ impl VendorBridge {
             None
         };
         let connected = Arc::clone(&self.connected);
+        let preview_lease_active = Arc::clone(&self.preview_lease_active);
         let sync_state = Arc::clone(&self.sync_state);
         let retry_not_before = Arc::clone(&self.retry_not_before);
         let active_session = Arc::clone(&self.active_session);
@@ -472,9 +545,24 @@ impl VendorBridge {
                     .unwrap_or_else(|| session.notifications());
                 connected.store(true, Ordering::Release);
                 let mut session_ok = !session.is_disconnected();
+                let queued_mismatch = {
+                    let confirmed = match &*sync_state.lock().unwrap() {
+                        WireSyncState::Confirmed(d) => Some(d.clone()),
+                        WireSyncState::Unsynced | WireSyncState::InFlight(_) => None,
+                    };
+                    led_rx
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|(d, _)| confirmed.as_deref() != Some(d.as_str()))
+                };
                 let needs_initial_flush = !rotated_from_live
-                    || matches!(*sync_state.lock().unwrap(), WireSyncState::Unsynced);
-                if session_ok && needs_initial_flush {
+                    || matches!(*sync_state.lock().unwrap(), WireSyncState::Unsynced)
+                    || queued_mismatch;
+                let mut deferred_led_flush = session_ok
+                    && needs_initial_flush
+                    && (*lease_rx.borrow_and_update()
+                        || preview_lease_active.load(Ordering::Acquire));
+                if session_ok && needs_initial_flush && !deferred_led_flush {
                     let initial_payload = { led_rx.borrow_and_update().clone() };
                     if let Some((digest, entries)) = initial_payload {
                         send_thstatus_bounded(
@@ -532,7 +620,9 @@ impl VendorBridge {
                 let mut next_rotated = None;
                 let mut already_shut_down = false;
                 while session_ok && !*stop_rx.borrow() {
-                    if allow_reconnect && session.request_count() >= 900 {
+                    let preview_held = *lease_rx.borrow_and_update()
+                        || preview_lease_active.load(Ordering::Acquire);
+                    if allow_reconnect && !preview_held && session.request_count() >= 900 {
                         while let Ok(received) = notif_rx.try_recv() {
                             let layer1_fallback =
                                 routing.lock().unwrap().accepts_layer1_vendor_fallback();
@@ -574,10 +664,32 @@ impl VendorBridge {
                         }
                         break;
                     }
+                    if !preview_held && deferred_led_flush {
+                        deferred_led_flush = false;
+                        let next_payload = { led_rx.borrow_and_update().clone() };
+                        if let Some((digest, entries)) = next_payload {
+                            send_thstatus_bounded(
+                                &session,
+                                &sync_state,
+                                &retry_not_before,
+                                digest,
+                                &entries,
+                                &mut session_ok,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
                     tokio::select! {
+                        biased;
                         _ = stop_rx.changed() => break,
                         _ = session.wait_disconnected() => {
                             session_ok = false;
+                        }
+                        changed = lease_rx.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
                         }
                         notif = notif_rx.recv() => {
                             match notif {
@@ -637,9 +749,15 @@ impl VendorBridge {
                                 }
                             }
                         }
-                        changed = led_rx.changed() => {
+                        changed = led_rx.changed(), if !preview_held => {
                             if changed.is_err() {
                                 break;
+                            }
+                            // Re-check atomic lease flag to close the window between acquire_preview_lease()
+                            // returning and this select arm waking up with a stale preview_held=false.
+                            if *lease_rx.borrow() || preview_lease_active.load(Ordering::Acquire) {
+                                deferred_led_flush = true;
+                                continue;
                             }
                             let next_payload = { led_rx.borrow_and_update().clone() };
                             if let Some((digest, entries)) = next_payload {

@@ -155,6 +155,7 @@ impl WorkbenchStore {
         if self.selected_profile_id == profile_id {
             return;
         }
+        self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
         self.selected_layer_id = profile_id.as_ref().and_then(|id| {
             self.document_store
                 .draft
@@ -202,6 +203,11 @@ impl WorkbenchStore {
             profile_id: profile_id.to_string(),
         })?;
         self.cancel_encoder_model_picker();
+        if self.selected_profile_id.as_deref() != Some(profile_id)
+            || self.selected_layer_id != first_layer_id
+        {
+            self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
+        }
         self.selected_profile_id = Some(profile_id.to_string());
         self.selected_layer_id = first_layer_id;
         self.v070_hardware.device_layer_override = None;
@@ -339,6 +345,7 @@ impl WorkbenchStore {
             .map_err(WorkbenchError::Storage)?;
         self.ensure_selected_profile_visible();
         self.normalize_surface_for_current_layer();
+        self.sync_lighting_preview_after_document_change();
         self.sync_six_layer_routing_context();
         self.sync_v070_session_sa_rgb();
         self.commit_runtime_update();
@@ -358,6 +365,7 @@ impl WorkbenchStore {
                 if CanonicalAgent::from_profile_name(&name).is_none() {
                     self.show_other_profiles = true;
                 }
+                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.selected_profile_id = Some(created_id.clone());
                 self.selected_layer_id = self
                     .document_store
@@ -402,6 +410,7 @@ impl WorkbenchStore {
                 if CanonicalAgent::from_profile_name(&resolved_name).is_none() {
                     self.show_other_profiles = true;
                 }
+                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.selected_profile_id = Some(duplicated_id.clone());
                 self.selected_layer_id = self
                     .document_store
@@ -452,6 +461,7 @@ impl WorkbenchStore {
                     .update(|draft| draft.delete_profile(&profile_id))
                     .map_err(WorkbenchError::Storage)?;
                 if self.selected_profile_id.as_deref() == Some(profile_id.as_str()) {
+                    self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                     self.selected_profile_id = None;
                 }
                 self.sync_routing_snapshot();
@@ -504,6 +514,7 @@ impl WorkbenchStore {
                         Ok(())
                     })
                     .map_err(WorkbenchError::Storage)?;
+                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.sync_routing_snapshot();
                 self.prepare_desktop_profiles()?;
                 self.show_other_profiles = true;
@@ -515,6 +526,7 @@ impl WorkbenchStore {
                 Ok(None)
             }
             BackupCommand::ReturnToHostDocument => {
+                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.document_store.return_to_host();
                 self.sync_routing_snapshot();
                 self.v070_hardware.device_layer_override = None;
@@ -808,6 +820,7 @@ impl WorkbenchStore {
                 {
                     if self.selected_layer_id.as_deref() != Some(layer_id.as_str()) {
                         self.cancel_encoder_model_picker();
+                        self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                     }
                     self.selected_layer_id = Some(layer_id);
                     self.v070_hardware.device_layer_override = None;
@@ -1046,6 +1059,7 @@ impl WorkbenchStore {
                         .map_err(WorkbenchError::Storage)?;
                     created_lid
                 };
+                self.end_lighting_preview(LightingPreviewStopReason::ContextChanged);
                 self.selected_layer_id = Some(target_lid);
                 self.v070_hardware.device_layer_override = None;
                 self.normalize_surface_for_current_layer();
@@ -1329,6 +1343,7 @@ impl WorkbenchStore {
         let snapshots = self.slot_table.lighting_snapshots(&acks);
         let live_phase = self.derive_live_lighting_phase(&acks);
         let is_protected = self.is_active_lighting_protected();
+        let preview_busy = self.is_lighting_preview_busy();
         let is_split = self.current_bottom_row_layout() == BottomRowLayout::Split;
         let six_layer_mode =
             self.six_layer_state.installation.is_some() || self.six_layer_running.is_some();
@@ -1338,10 +1353,12 @@ impl WorkbenchStore {
                 &snapshots,
                 false,
                 is_protected,
-                false,
+                preview_busy,
                 is_split,
             );
-            if result != LightingUpdateResult::DeviceBusy {
+            if result == LightingUpdateResult::DeviceBusy {
+                self.lighting_arbiter.invalidate_hardware_cache();
+            } else {
                 let running = &self.six_layer_running;
                 let _ = self
                     .lighting_arbiter
@@ -1364,12 +1381,12 @@ impl WorkbenchStore {
             .as_ref()
             .and_then(|_| self.connected_candidate.as_ref().map(|c| c.path.clone()));
         let runtime_for_lighting = Arc::clone(&self.tokio_runtime);
-        let _ = self.lighting_arbiter.update_feedback(
+        let result = self.lighting_arbiter.update_feedback(
             live_phase,
             &snapshots,
             false,
             is_protected,
-            false,
+            preview_busy,
             is_split,
             connected_device_id.as_deref(),
             |payload_str| {
@@ -1383,6 +1400,9 @@ impl WorkbenchStore {
                 Ok("{\"synced\":true}".to_string())
             },
         );
+        if result == LightingUpdateResult::DeviceBusy {
+            self.lighting_arbiter.invalidate_hardware_cache();
+        }
         self.sync_v070_session_sa_rgb();
     }
 

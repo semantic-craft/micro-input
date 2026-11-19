@@ -577,7 +577,10 @@ impl WorkbenchStore {
     }
 
     pub(crate) fn sync_v070_session_sa_rgb(&mut self) {
-        if self.system_lifecycle != SystemLifecycle::Awake || self.firmware_update.reserved() {
+        if self.system_lifecycle != SystemLifecycle::Awake
+            || self.firmware_update.reserved()
+            || self.is_lighting_preview_busy()
+        {
             self.sa_rgb_coordinator
                 .sync(DesiredTarget::Inactive, None, &self.tokio_runtime);
             return;
@@ -942,12 +945,20 @@ impl WorkbenchStore {
                         "已开启 AI 会话状态自动映灯".into();
                     self.sync_v070_session_sa_rgb();
                 } else {
-                    let session = self.live_v070_session();
-                    self.sa_rgb_coordinator.sync(
-                        DesiredTarget::UrgentClear(UrgentClearReason::OptInDisabled),
-                        session,
-                        &self.tokio_runtime,
-                    );
+                    if self.is_lighting_preview_busy() {
+                        self.sa_rgb_coordinator.sync(
+                            DesiredTarget::Inactive,
+                            None,
+                            &self.tokio_runtime,
+                        );
+                    } else {
+                        let session = self.live_v070_session();
+                        self.sa_rgb_coordinator.sync(
+                            DesiredTarget::UrgentClear(UrgentClearReason::OptInDisabled),
+                            session,
+                            &self.tokio_runtime,
+                        );
+                    }
                     self.v070_hardware.projection.status_message =
                         "已关闭 AI 会话状态自动映灯".into();
                 }

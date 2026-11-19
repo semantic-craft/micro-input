@@ -2681,7 +2681,7 @@ fn localize_editor_modal_in_place(
                 z.zone_title = crate::i18n::tr(&z.zone_title, locale).to_string();
             }
             if let Some(err) = &mut l.validation_error {
-                *err = crate::i18n::tr(err, locale).to_string();
+                *err = crate::i18n::localize_lighting_preview_message(err, locale);
             }
         }
         EditorModalProjection::MultiEditor(m) => {

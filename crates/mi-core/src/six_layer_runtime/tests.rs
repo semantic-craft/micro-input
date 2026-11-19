@@ -3623,3 +3623,224 @@ fn runtime_state_load_and_backup_path_containment_enforce_private_fs_boundaries(
     symlink(&ext_backup, &sym_backup).unwrap();
     assert!(lifecycle::validate_backup_within_document_dir(&doc_dir, &sym_backup).is_err());
 }
+
+#[test]
+fn vendor_bridge_preview_lease_suppresses_thstatus_and_rotation_while_keeping_hid_notifications_and_resumes_on_drop(
+) {
+    use mi_proto::Framer;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let make_exclusive_rpc_session = |rt: &tokio::runtime::Runtime| {
+        let (link, mut writes) = mi_transport::MockLink::new();
+        let inject = link.inject.clone();
+        let sent_methods = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = Arc::clone(&sent_methods);
+        let session = {
+            let _entered = rt.enter();
+            DeviceSession::new(
+                Arc::new(MockVendorLink {
+                    inner: link.clone(),
+                    exclusive: true,
+                }),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig {
+                    timeout: Duration::from_secs(2),
+                    interval: Duration::ZERO,
+                },
+            )
+        };
+        let responder = rt.spawn(async move {
+            let mut in_framer = mi_proto::NativeFramer::default();
+            let out_framer = mi_proto::NativeFramer::default();
+            while let Some(report) = writes.recv().await {
+                let Ok(messages) = in_framer.feed(&report) else {
+                    break;
+                };
+                for msg in messages {
+                    let Ok(req) = serde_json::from_slice::<serde_json::Value>(&msg) else {
+                        continue;
+                    };
+                    if let Some(m) = req["method"].as_str() {
+                        recorded.lock().unwrap().push(m.to_string());
+                    }
+                    let result_val = if req["method"].as_str() == Some("v.oai.thstatus") {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!({"version": "0.6.3", "profile_index": 1, "layer_index": 1})
+                    };
+                    let reply = serde_json::json!({
+                        "id": req["id"],
+                        "result": result_val
+                    });
+                    let mut wire = reply.to_string();
+                    wire.push('\n');
+                    for frame in out_framer.encode(wire.as_bytes()).unwrap() {
+                        let _ = inject.send(frame);
+                    }
+                }
+            }
+        });
+        (link, session, sent_methods, responder)
+    };
+
+    let (link1, session1, methods1, responder1) = make_exclusive_rpc_session(&runtime);
+    runtime.block_on(async {
+        for _ in 0..899 {
+            session1
+                .request(mi_proto::Method::DeviceStatus, serde_json::Value::Null)
+                .await
+                .unwrap();
+        }
+    });
+    assert_eq!(session1.request_count(), 899);
+
+    let (link2, session2, methods2, responder2) = make_exclusive_rpc_session(&runtime);
+    let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
+    receiver.arm().unwrap();
+    let routing = Arc::new(Mutex::new(RoutingContext::default()));
+    let reopened_flag = Arc::new(AtomicBool::new(false));
+    let reopened_inner = Arc::clone(&reopened_flag);
+    let session2_reopen = Arc::clone(&session2);
+
+    let mut bridge = VendorBridge::new(Some(Arc::clone(&session1)));
+    bridge.spawn_with_reopen(
+        &runtime,
+        Some(Arc::clone(&session1)),
+        Arc::clone(&receiver),
+        Arc::clone(&routing),
+        true,
+        move || {
+            reopened_inner.store(true, Ordering::Release);
+            let next = Arc::clone(&session2_reopen);
+            async move { Some(next) }
+        },
+    );
+
+    let (leased_session, lease) = bridge
+        .acquire_preview_lease()
+        .expect("acquire exclusive preview lease below 900 requests");
+    assert_eq!(leased_session.id, session1.id);
+    assert!(
+        bridge.acquire_preview_lease().is_err(),
+        "second concurrent preview lease must be rejected"
+    );
+
+    let thstatus_before = methods1
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.as_str() == "v.oai.thstatus")
+        .count();
+    let entries = vec![OaiKeyStatusEntry::new("AG06", 0x22c55e)];
+    let _ = bridge
+        .led_tx
+        .send(Some(("digest-during-lease".into(), entries.clone())));
+    assert!(!bridge.needs_lighting_sync());
+
+    runtime.block_on(async {
+        leased_session
+            .request(mi_proto::Method::DeviceStatus, serde_json::Value::Null)
+            .await
+            .unwrap();
+    });
+    assert_eq!(session1.request_count(), 900);
+
+    thread::sleep(Duration::from_millis(80));
+    assert!(
+        !reopened_flag.load(Ordering::Acquire),
+        "900-request rotation must stay deferred while preview lease is held"
+    );
+    assert!(!session1.is_disconnected());
+    assert_eq!(
+        methods1
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.as_str() == "v.oai.thstatus")
+            .count(),
+        thstatus_before,
+        "v.oai.thstatus must stay suppressed while preview lease is held"
+    );
+
+    let framer = mi_proto::NativeFramer::default();
+    let press_line = "{\"m\":\"v.oai.hid\",\"p\":{\"k\":\"AG06\",\"act\":1}}\n";
+    for frame in framer.encode(press_line.as_bytes()).unwrap() {
+        link1.inject.send(frame).unwrap();
+    }
+    let wait_hid = Instant::now();
+    let mut hid_controls = Vec::new();
+    while hid_controls.is_empty() && wait_hid.elapsed() < Duration::from_secs(1) {
+        while let Some(ev) = receiver.next().unwrap() {
+            hid_controls.push(ev.control);
+        }
+        if hid_controls.is_empty() {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    assert_eq!(
+        hid_controls,
+        vec![0],
+        "HID notifications must continue flowing while preview lease is held"
+    );
+
+    drop(lease);
+
+    let wait_resume = Instant::now();
+    while (!reopened_flag.load(Ordering::Acquire)
+        || bridge.confirmed_digest().as_deref() != Some("digest-during-lease"))
+        && wait_resume.elapsed() < Duration::from_secs(2)
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(reopened_flag.load(Ordering::Acquire));
+    assert!(session1.is_disconnected());
+    assert_eq!(
+        bridge.confirmed_digest().as_deref(),
+        Some("digest-during-lease")
+    );
+    assert!(methods2
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|m| m == "v.oai.thstatus"));
+
+    let (_leased2, lease2) = bridge
+        .acquire_preview_lease()
+        .expect("reacquire lease on rotated session");
+    let count_on_s2 = methods2
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.as_str() == "v.oai.thstatus")
+        .count();
+    let _ = bridge
+        .led_tx
+        .send(Some(("digest-after-lease2".into(), entries)));
+    thread::sleep(Duration::from_millis(60));
+    assert_eq!(
+        methods2
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.as_str() == "v.oai.thstatus")
+            .count(),
+        count_on_s2
+    );
+    drop(lease2);
+    let wait_flush2 = Instant::now();
+    while bridge.confirmed_digest().as_deref() != Some("digest-after-lease2")
+        && wait_flush2.elapsed() < Duration::from_secs(2)
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        bridge.confirmed_digest().as_deref(),
+        Some("digest-after-lease2")
+    );
+
+    let _ = link2;
+    bridge.shutdown(&runtime);
+    responder1.abort();
+    responder2.abort();
+}

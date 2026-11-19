@@ -297,6 +297,7 @@ impl WorkbenchStore {
     pub(super) fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
         self.cancel_session_navigation();
         self.cancel_encoder_model_picker();
+        self.end_lighting_preview_blocking(LightingPreviewStopReason::ExclusiveDeviceTransition);
         self.teardown_v070_session_sa_rgb();
         if let Some(running) = self.six_layer_running.take() {
             if let Err(error) = running.shutdown(&self.tokio_runtime) {
@@ -624,6 +625,7 @@ impl WorkbenchStore {
             }
         }
         if needs_cleanup {
+            self.end_lighting_preview_blocking(LightingPreviewStopReason::DeviceDisconnected);
             self.sa_rgb_coordinator.clear_on_disconnect();
             let stopped = self
                 .six_layer_running
