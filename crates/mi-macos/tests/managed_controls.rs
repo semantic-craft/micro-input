@@ -5244,3 +5244,177 @@ fn active_recording_with_changed_window_title_still_blocks_toggle_and_submit_wit
         "cleanup after manual UI stop must not emit any new press events"
     );
 }
+
+#[test]
+fn codex_finishing_or_missing_control_with_changed_title_stays_strictly_blocked() {
+    for pending in ["Finishing dictation", "正在完成听写", ""] {
+        let provider = Provider::codex();
+        provider.0.lock().unwrap().window.identity.title = "Thread A".into();
+        let controls = provider.controls();
+        controls.start_dictation("codex").unwrap();
+        {
+            let mut state = provider.0.lock().unwrap();
+            state.window.identity.title = "Thread B".into();
+            if pending.is_empty() {
+                state.window.controls.remove(0);
+            } else {
+                state.window.controls[0].label = pending.into();
+                state.window.controls[0].enabled = false;
+                state.window.controls[0].pressable = false;
+            }
+        }
+        assert_eq!(
+            controls.toggle_dictation("codex"),
+            Err("blocked:uncleared_dictation_target_changed".into())
+        );
+        assert_eq!(
+            controls.submit("codex", None),
+            Err("blocked:uncleared_dictation_target_changed".into())
+        );
+        let cleanup_err = controls.stop_owned_dictations().expect_err(
+            "cleanup must remain blocked while Codex dictation is finishing or missing",
+        );
+        assert!(
+            cleanup_err.contains("dictation_target_changed"),
+            "expected dictation_target_changed error, got {cleanup_err}"
+        );
+        let blocked_events = provider.events();
+        assert_eq!(
+            blocked_events
+                .iter()
+                .filter(|e| e.starts_with("press:"))
+                .count(),
+            1,
+            "finishing or missing Codex control under changed title must not emit extra presses: {blocked_events:?}"
+        );
+        assert!(
+            !blocked_events.iter().any(|e| e == "submit"),
+            "finishing or missing Codex control under changed title must never submit: {blocked_events:?}"
+        );
+        assert_eq!(
+            provider.0.lock().unwrap().retained_targets.len(),
+            1,
+            "retained dictation lease must remain held while state is not confirmed Idle"
+        );
+
+        {
+            let mut state = provider.0.lock().unwrap();
+            let idle_control = ManagedControl {
+                id: 2,
+                role: "AXCheckBox".into(),
+                label: "Dictate".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            };
+            if pending.is_empty() {
+                state.window.controls.insert(0, idle_control);
+            } else {
+                state.window.controls[0] = idle_control;
+            }
+        }
+        assert_eq!(
+            controls.stop_owned_dictations(),
+            Ok(()),
+            "cleanup must release the stale lease once Codex reports Idle"
+        );
+        assert!(provider.0.lock().unwrap().retained_targets.is_empty());
+        assert_eq!(
+            provider
+                .events()
+                .iter()
+                .filter(|e| e.starts_with("press:"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn active_model_picker_stays_active_when_window_title_changes_in_place() {
+    let ag_provider = Provider::antigravity();
+    {
+        let mut state = ag_provider.0.lock().unwrap();
+        state.window.identity.title = "Conversation A".into();
+        state.window.controls.push(ManagedControl {
+            id: 40,
+            role: "AXButton".into(),
+            label: "Select model".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: None,
+        });
+    }
+    let ag_controls = ag_provider.controls();
+    ag_controls.open_model_picker("antigravity").unwrap();
+    ag_provider.0.lock().unwrap().window.identity.title = "Conversation B".into();
+    ag_controls.step_model_picker("antigravity", 0x7D).unwrap();
+    assert_eq!(
+        ag_controls.confirm_model_picker("antigravity"),
+        Ok(ModelPickerConfirmResult::Confirmed)
+    );
+    let ag_events = ag_provider.events();
+    assert_eq!(
+        ag_events
+            .iter()
+            .filter(|e| *e == "press:Select model")
+            .count(),
+        1,
+        "in-place title drift must not re-open an already active Antigravity model picker: {ag_events:?}"
+    );
+    assert!(ag_events.contains(&"window_key:arrow_down".to_string()));
+    assert!(ag_events.contains(&"window_key:return".to_string()));
+
+    ag_controls.open_model_picker("antigravity").unwrap();
+    ag_provider.0.lock().unwrap().window.identity.window_id = 2;
+    ag_controls.step_model_picker("antigravity", 0x7D).unwrap();
+    assert_eq!(
+        ag_provider
+            .events()
+            .iter()
+            .filter(|e| *e == "press:Select model")
+            .count(),
+        3,
+        "switching to a different window container must not inherit the prior active picker target"
+    );
+
+    let codex_provider = Provider::codex();
+    {
+        let mut state = codex_provider.0.lock().unwrap();
+        state.window.identity.title = "Thread A".into();
+        state.window.controls.push(ManagedControl {
+            id: 41,
+            role: "AXPopUpButton".into(),
+            label: "GPT-5".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        });
+    }
+    let codex_controls = codex_provider.controls();
+    codex_controls.open_model_picker("codex").unwrap();
+    codex_provider.0.lock().unwrap().window.identity.title = "Thread B".into();
+    codex_controls.step_model_picker("codex", 0x7D).unwrap();
+    assert_eq!(
+        codex_controls.confirm_model_picker("codex"),
+        Ok(ModelPickerConfirmResult::Confirmed),
+        "in-place title drift must keep an active Codex model picker confirmable"
+    );
+    let codex_events = codex_provider.events();
+    assert_eq!(
+        codex_events
+            .iter()
+            .filter(|e| *e == "window_key:control+shift:2e")
+            .count(),
+        1,
+        "in-place title drift must not re-send Ctrl+Shift+M on an active Codex picker: {codex_events:?}"
+    );
+    assert!(codex_events.contains(&"window_key:arrow_down".to_string()));
+    assert!(codex_events.contains(&"window_key:return".to_string()));
+}
