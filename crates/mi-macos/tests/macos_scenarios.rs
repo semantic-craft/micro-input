@@ -660,9 +660,41 @@ fn antigravity_live_voice_does_not_map_to_dictation_shortcut_ctrl_m() {
         None,
         "live-voice must trigger Antigravity Start/End Voice mode via AXPress, never Ctrl+M dictation"
     );
+    assert_eq!(
+        native_shortcut_for_agent_command("antigravity", "browser"),
+        None,
+        "antigravity/browser must open built-in Browser via AX flow, never Cmd+Shift+B side panel toggle"
+    );
+    assert_eq!(
+        native_shortcut_for_agent_command("dsh-desktop", "browser"),
+        Some((0x11, vec!["command".to_string()])),
+        "dsh-desktop/browser shortcut must remain intact"
+    );
 
     let driver = RecordingOsDriver::new(true);
     let executor = LiveHostActionExecutor::new(driver.clone());
+    let browser_action = ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".to_string(),
+        command: "browser".to_string(),
+    };
+    let browser_receipt = executor.execute("Antigravity", "AG08", &browser_action);
+    assert_eq!(browser_receipt.outcome, "executed");
+    assert_eq!(browser_receipt.detail, "antigravity/browser");
+    assert!(
+        driver
+            .events()
+            .iter()
+            .any(|e| matches!(e, RecordedOsEvent::OpenBrowser(a) if a == "antigravity")),
+        "antigravity/browser must invoke driver open_browser"
+    );
+    assert!(
+        !driver
+            .events()
+            .iter()
+            .any(|e| matches!(e, RecordedOsEvent::PostKeyShortcut { key_code: 0x0B, .. })),
+        "antigravity/browser must never fall back to Cmd+Shift+B (0x0B)"
+    );
+
     let live_voice_action = ResolvedHostAction::AgentCommand {
         adapter: "antigravity".to_string(),
         command: "live-voice".to_string(),

@@ -918,6 +918,9 @@ impl HostOsDriver for Driver {
     fn close_side_panel(&self, adapter: &str) -> Result<(), String> {
         self.controls.set_side_panel_open(adapter, false)
     }
+    fn open_browser(&self, adapter: &str) -> Result<(), String> {
+        self.controls.open_browser(adapter)
+    }
 }
 
 #[test]
@@ -1260,6 +1263,23 @@ fn manual_managed_ax_control() {
             }
             result.expect("focus target input");
         }
+        "browser" => {
+            let started = std::time::Instant::now();
+            let result = driver.open_browser(&adapter);
+            let elapsed = started.elapsed();
+            let outcome = match &result {
+                Ok(()) => "success",
+                Err(error) if error.starts_with("unconfirmed:") => "unconfirmed",
+                Err(error) if error.starts_with("blocked:") => "blocked",
+                Err(_) => "error",
+            };
+            println!(
+                "managed_ax_timing action=browser elapsed_us={} result={outcome} confirmed={}",
+                elapsed.as_micros(),
+                result.is_ok()
+            );
+            result.expect("open built-in browser");
+        }
         "toggle" => println!(
             "{:?}",
             driver
@@ -1276,7 +1296,9 @@ fn manual_managed_ax_control() {
                 sidebar: false,
             })
             .expect("scroll target"),
-        _ => panic!("allowed actions: inspect, focus, toggle, scroll-up, scroll-down, bottom"),
+        _ => panic!(
+            "allowed actions: inspect, focus, browser, toggle, scroll-up, scroll-down, bottom"
+        ),
     }
 }
 
@@ -3616,4 +3638,1301 @@ fn antigravity_side_panel_open_and_close_are_directional_idempotent_and_verified
     });
     let r_replaced = replaced_exec.execute("antigravity", "AG16", &open_cmd);
     assert_eq!(r_replaced.outcome, "executed", "{r_replaced:?}");
+}
+
+#[test]
+fn antigravity_browser_opens_closed_side_panel_then_clicks_browser_and_confirms_address_bar() {
+    let ag = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = ag.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![ManagedControl {
+            id: 10,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        }];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                if let Some(btn) = fixture.window.controls.iter_mut().find(|c| c.id == 10) {
+                    btn.expanded = Some(true);
+                }
+                fixture.window.controls.push(ManagedControl {
+                    id: 20,
+                    role: "AXTextField".into(),
+                    label: "Search for content to open".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: true,
+                    expanded: None,
+                });
+                fixture.window.controls.push(ManagedControl {
+                    id: 21,
+                    role: "AXButton".into(),
+                    label: "Browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "Browser" {
+                fixture.window.controls.retain(|c| c.id != 20 && c.id != 21);
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXComboBox".into(),
+                    label: "Address bar".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+                fixture.window.controls.push(ManagedControl {
+                    id: 31,
+                    role: "AXButton".into(),
+                    label: "Open in external browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+
+    let exec = LiveHostActionExecutor::new(Driver {
+        controls: ag.controls(),
+        trusted: true,
+    });
+    let cmd = ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".into(),
+        command: "browser".into(),
+    };
+    let receipt = exec.execute("antigravity", "AG08", &cmd);
+    assert_eq!(receipt.outcome, "executed", "{receipt:?}");
+    assert_eq!(receipt.detail, "antigravity/browser");
+
+    let events = ag.events();
+    assert!(events.contains(&"activate_window".to_string()));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.starts_with("press:"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            "press:Toggle Side Panel".to_string(),
+            "press:Browser".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn antigravity_browser_from_open_new_tab_clicks_browser_directly_without_toggling_panel() {
+    let ag = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = ag.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 20,
+                role: "AXTextField".into(),
+                label: "Search for content to open".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: true,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 21,
+                role: "AXButton".into(),
+                label: "Browser".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Browser" {
+                fixture.window.controls.retain(|c| c.id != 20 && c.id != 21);
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXComboBox".into(),
+                    label: "Address bar".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+
+    ag.controls().open_browser("antigravity").unwrap();
+    let presses: Vec<String> = ag
+        .events()
+        .into_iter()
+        .filter(|e| e.starts_with("press:"))
+        .collect();
+    assert_eq!(presses, vec!["press:Browser".to_string()]);
+}
+
+#[test]
+fn antigravity_browser_clicks_new_tab_when_other_tab_active_and_confirms_toolbar_marker() {
+    let ag = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = ag.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 11,
+                role: "AXButton".into(),
+                label: "New tab".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "New tab" {
+                fixture.window.controls.push(ManagedControl {
+                    id: 20,
+                    role: "AXTextField".into(),
+                    label: "Search for content to open".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: true,
+                    expanded: None,
+                });
+                fixture.window.controls.push(ManagedControl {
+                    id: 21,
+                    role: "AXButton".into(),
+                    label: "Browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "Browser" {
+                fixture.window.controls.retain(|c| c.id != 20 && c.id != 21);
+                // Confirm secondary marker works even if Address bar combobox isn't present.
+                fixture.window.controls.push(ManagedControl {
+                    id: 31,
+                    role: "AXButton".into(),
+                    label: "Open in external browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+
+    ag.controls().open_browser("antigravity").unwrap();
+    let presses: Vec<String> = ag
+        .events()
+        .into_iter()
+        .filter(|e| e.starts_with("press:"))
+        .collect();
+    assert_eq!(
+        presses,
+        vec!["press:New tab".to_string(), "press:Browser".to_string()]
+    );
+}
+
+#[test]
+fn antigravity_browser_already_open_is_idempotent_and_collapsed_panel_reopens_without_new_tab() {
+    // 1. Already open & expanded -> zero presses.
+    let open = Provider::with_target("com.google.antigravity", "Record voice memo");
+    open.0.lock().unwrap().window.controls = vec![
+        ManagedControl {
+            id: 10,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(true),
+        },
+        ManagedControl {
+            id: 30,
+            role: "AXComboBox".into(),
+            label: "Address bar".into(),
+            enabled: true,
+            pressable: false,
+            editable: true,
+            focused: false,
+            expanded: None,
+        },
+    ];
+    open.controls().open_browser("antigravity").unwrap();
+    assert!(!open.events().iter().any(|e| e.starts_with("press:")));
+
+    // 2. Side Panel collapsed (expanded=false) with stale mounted Address bar -> must press Toggle Side Panel once.
+    let collapsed = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = collapsed.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(false),
+            },
+            ManagedControl {
+                id: 30,
+                role: "AXComboBox".into(),
+                label: "Address bar".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                if let Some(btn) = fixture.window.controls.iter_mut().find(|c| c.id == 10) {
+                    btn.expanded = Some(true);
+                }
+            }
+        });
+    }
+    collapsed.controls().open_browser("antigravity").unwrap();
+    let presses: Vec<String> = collapsed
+        .events()
+        .into_iter()
+        .filter(|e| e.starts_with("press:"))
+        .collect();
+    assert_eq!(presses, vec!["press:Toggle Side Panel".to_string()]);
+}
+
+#[test]
+fn antigravity_browser_clears_new_tab_search_and_does_not_click_new_tab_during_mount_race() {
+    // 1. New Tab has active search text -> clears search first, then clicks Browser.
+    let with_query = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = with_query.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 11,
+                role: "AXButton".into(),
+                label: "New tab".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 20,
+                role: "AXTextField".into(),
+                label: "Search for content to open".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: true,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 22,
+                role: "AXButton".into(),
+                label: "Clear search".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Clear search" {
+                fixture.window.controls.retain(|c| c.id != 22);
+                fixture.window.controls.push(ManagedControl {
+                    id: 21,
+                    role: "AXButton".into(),
+                    label: "Browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "Browser" {
+                fixture.window.controls.retain(|c| c.id != 20 && c.id != 21);
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXComboBox".into(),
+                    label: "Address bar".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+    with_query.controls().open_browser("antigravity").unwrap();
+    let presses: Vec<String> = with_query
+        .events()
+        .into_iter()
+        .filter(|e| e.starts_with("press:"))
+        .collect();
+    assert_eq!(
+        presses,
+        vec![
+            "press:Clear search".to_string(),
+            "press:Browser".to_string()
+        ]
+    );
+
+    // 2. Transient mount race: after clicking Browser, "New tab" appears 1 frame before Address bar;
+    // open_browser must NOT click "New tab" back away from the Browser tab.
+    let race = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = race.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 20,
+                role: "AXTextField".into(),
+                label: "Search for content to open".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: true,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 21,
+                role: "AXButton".into(),
+                label: "Browser".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Browser" {
+                fixture.window.controls.retain(|c| c.id != 20 && c.id != 21);
+                fixture.window.controls.push(ManagedControl {
+                    id: 11,
+                    role: "AXButton".into(),
+                    label: "New tab".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+                // Delay Address bar arrival via a separate thread after 40ms.
+            }
+        });
+    }
+    let race_bg = race.clone();
+    std::thread::spawn(move || loop {
+        let pressed = race_bg.events().iter().any(|e| e == "press:Browser");
+        if pressed {
+            std::thread::sleep(Duration::from_millis(60));
+            race_bg
+                .0
+                .lock()
+                .unwrap()
+                .window
+                .controls
+                .push(ManagedControl {
+                    id: 30,
+                    role: "AXComboBox".into(),
+                    label: "Address bar".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    });
+    race.controls().open_browser("antigravity").unwrap();
+    let race_presses: Vec<String> = race
+        .events()
+        .into_iter()
+        .filter(|e| e.starts_with("press:"))
+        .collect();
+    assert_eq!(
+        race_presses,
+        vec!["press:Browser".to_string()],
+        "must never press New tab while waiting for Browser pane to mount"
+    );
+}
+
+#[test]
+fn antigravity_browser_preview_fallback_and_fail_closed_boundaries() {
+    // 1. Preview fallback works ONLY when "Search for content to open" is present.
+    let preview_ok = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = preview_ok.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 20,
+                role: "AXTextField".into(),
+                label: "Search for content to open".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: true,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 25,
+                role: "AXButton".into(),
+                label: "Preview".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Preview" {
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXComboBox".into(),
+                    label: "Address bar".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+    preview_ok.controls().open_browser("antigravity").unwrap();
+    assert_eq!(
+        preview_ok
+            .events()
+            .into_iter()
+            .filter(|e| e.starts_with("press:"))
+            .collect::<Vec<_>>(),
+        vec!["press:Preview".to_string()]
+    );
+
+    // 2. Stray Preview without New Tab search must NEVER be pressed.
+    let stray_preview = Provider::with_target("com.google.antigravity", "Record voice memo");
+    stray_preview.0.lock().unwrap().window.controls = vec![ManagedControl {
+        id: 25,
+        role: "AXButton".into(),
+        label: "Preview".into(),
+        enabled: true,
+        pressable: true,
+        editable: false,
+        focused: false,
+        expanded: None,
+    }];
+    let err =
+        ManagedAxControls::with_readback_timeout(stray_preview.clone(), Duration::from_millis(20))
+            .open_browser("antigravity")
+            .unwrap_err();
+    assert_eq!(err, "blocked:browser_control_not_found");
+    assert!(!stray_preview
+        .events()
+        .iter()
+        .any(|e| e.starts_with("press:")));
+
+    // 3. Disabled Browser button fails closed with zero press.
+    let disabled = Provider::with_target("com.google.antigravity", "Record voice memo");
+    disabled.0.lock().unwrap().window.controls = vec![
+        ManagedControl {
+            id: 10,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(true),
+        },
+        ManagedControl {
+            id: 21,
+            role: "AXButton".into(),
+            label: "Browser".into(),
+            enabled: false,
+            pressable: false,
+            editable: false,
+            focused: false,
+            expanded: None,
+        },
+    ];
+    assert_eq!(
+        disabled.controls().open_browser("antigravity").unwrap_err(),
+        "blocked:browser_unavailable"
+    );
+    assert!(!disabled.events().iter().any(|e| e.starts_with("press:")));
+
+    // 4. Stuck after pressing Browser reports unconfirmed failure.
+    let stuck = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = stuck.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 21,
+                role: "AXButton".into(),
+                label: "Browser".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+    }
+    let stuck_exec = LiveHostActionExecutor::new(Driver {
+        controls: ManagedAxControls::with_readback_timeout(
+            stuck.clone(),
+            Duration::from_millis(20),
+        ),
+        trusted: true,
+    });
+    let cmd = ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".into(),
+        command: "browser".into(),
+    };
+    let r_stuck = stuck_exec.execute("antigravity", "AG08", &cmd);
+    assert_eq!(r_stuck.outcome, "failed", "{r_stuck:?}");
+    assert_eq!(r_stuck.detail, "unconfirmed:browser_open");
+
+    // 5. Non-Antigravity adapter rejected cleanly.
+    assert_eq!(
+        Provider::codex()
+            .controls()
+            .open_browser("codex")
+            .unwrap_err(),
+        "blocked:unsupported_browser_adapter"
+    );
+
+    // 6. Untrusted accessibility blocks before any capture or press.
+    let untrusted = Provider::with_target("com.google.antigravity", "Record voice memo");
+    let untrusted_exec = LiveHostActionExecutor::new(Driver {
+        controls: untrusted.controls(),
+        trusted: false,
+    });
+    let r_untrusted = untrusted_exec.execute("antigravity", "AG08", &cmd);
+    assert_eq!(r_untrusted.outcome, "blocked", "{r_untrusted:?}");
+    assert_eq!(r_untrusted.detail, "accessibility_untrusted");
+    assert!(untrusted.events().is_empty());
+}
+
+#[test]
+fn antigravity_browser_three_step_collapsed_other_tab_to_new_tab_to_browser_and_target_validation()
+{
+    // 1. Collapsed Side Panel with a previously open non-Browser tab requires 3 transitions:
+    //    Toggle Side Panel -> New tab -> Browser -> Address bar + Open in external browser.
+    let ag = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = ag.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![ManagedControl {
+            id: 10,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        }];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                if let Some(btn) = fixture.window.controls.iter_mut().find(|c| c.id == 10) {
+                    btn.expanded = Some(true);
+                }
+                fixture.window.controls.push(ManagedControl {
+                    id: 11,
+                    role: "AXButton".into(),
+                    label: "New tab".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "New tab" {
+                fixture.window.controls.push(ManagedControl {
+                    id: 20,
+                    role: "AXTextField".into(),
+                    label: "Search for content to open".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: true,
+                    expanded: None,
+                });
+                fixture.window.controls.push(ManagedControl {
+                    id: 21,
+                    role: "AXButton".into(),
+                    label: "Browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "Browser" {
+                fixture.window.controls.retain(|c| c.id != 20 && c.id != 21);
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXComboBox".into(),
+                    label: "Address bar".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+                fixture.window.controls.push(ManagedControl {
+                    id: 31,
+                    role: "AXButton".into(),
+                    label: "Open in external browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+
+    ag.controls().open_browser("antigravity").unwrap();
+    let presses: Vec<String> = ag
+        .events()
+        .into_iter()
+        .filter(|e| e.starts_with("press:"))
+        .collect();
+    assert_eq!(
+        presses,
+        vec![
+            "press:Toggle Side Panel".to_string(),
+            "press:New tab".to_string(),
+            "press:Browser".to_string(),
+        ]
+    );
+
+    // 2. Mismatched captured window bundle must fail validation BEFORE activating or pressing.
+    let wrong_bundle = Provider::with_target("com.other.app", "Record voice memo");
+    let err = wrong_bundle
+        .controls()
+        .open_browser("antigravity")
+        .unwrap_err();
+    assert!(
+        err.starts_with("blocked:"),
+        "wrong bundle must be blocked, got {err}"
+    );
+    assert!(
+        !wrong_bundle
+            .events()
+            .iter()
+            .any(|e| e == "activate_window" || e.starts_with("press:")),
+        "must not activate or press mismatched target window: {:?}",
+        wrong_bundle.events()
+    );
+
+    // 3. Non-transient press error AFTER Toggle Side Panel was already pressed must report unconfirmed.
+    let post_fail = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = post_fail.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![ManagedControl {
+            id: 10,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        }];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                if let Some(btn) = fixture.window.controls.iter_mut().find(|c| c.id == 10) {
+                    btn.expanded = Some(true);
+                }
+                fixture.window.controls.push(ManagedControl {
+                    id: 21,
+                    role: "AXButton".into(),
+                    label: "Browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+                // Cause next press on Browser to fail with a non-transient error (LoseTarget).
+                fixture.effect = PressEffect::LoseTarget;
+            }
+        });
+    }
+    let err =
+        ManagedAxControls::with_readback_timeout(post_fail.clone(), Duration::from_millis(20))
+            .open_browser("antigravity")
+            .unwrap_err();
+    assert!(
+        err.starts_with("unconfirmed:"),
+        "failure after mutating Side Panel must report unconfirmed, got {err}"
+    );
+}
+
+#[test]
+fn antigravity_browser_post_mutation_unavailable_controls_report_unconfirmed_not_blocked() {
+    let make_btn =
+        |id: u64, label: &str, enabled: bool, pressable: bool, expanded: Option<bool>| {
+            ManagedControl {
+                id,
+                role: "AXButton".into(),
+                label: label.into(),
+                enabled,
+                pressable,
+                editable: false,
+                focused: false,
+                expanded,
+            }
+        };
+
+    // 1. Toggle Side Panel pressed -> Browser appears disabled -> must wrap as unconfirmed.
+    let disabled_browser = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = disabled_browser.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![make_btn(10, "Toggle Side Panel", true, true, Some(false))];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                fixture.window.controls[0].expanded = Some(true);
+                fixture.window.controls.push(ManagedControl {
+                    id: 21,
+                    role: "AXButton".into(),
+                    label: "Browser".into(),
+                    enabled: false,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+    let exec = LiveHostActionExecutor::new(Driver {
+        controls: disabled_browser.controls(),
+        trusted: true,
+    });
+    let cmd = ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".into(),
+        command: "browser".into(),
+    };
+    let receipt = exec.execute("antigravity", "AG08", &cmd);
+    assert_eq!(receipt.outcome, "failed", "{receipt:?}");
+    assert_eq!(receipt.detail, "unconfirmed:blocked:browser_unavailable");
+
+    // 2. Toggle Side Panel pressed -> New Tab search + unpressable Preview -> unconfirmed.
+    let disabled_preview = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = disabled_preview.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![make_btn(10, "Toggle Side Panel", true, true, Some(false))];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                fixture.window.controls[0].expanded = Some(true);
+                fixture.window.controls.push(ManagedControl {
+                    id: 20,
+                    role: "AXTextField".into(),
+                    label: "Search for content to open".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: true,
+                    expanded: None,
+                });
+                fixture.window.controls.push(ManagedControl {
+                    id: 25,
+                    role: "AXButton".into(),
+                    label: "Preview".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+    assert_eq!(
+        disabled_preview
+            .controls()
+            .open_browser("antigravity")
+            .unwrap_err(),
+        "unconfirmed:blocked:browser_unavailable"
+    );
+
+    // 3. Toggle Side Panel pressed -> disabled New tab -> unconfirmed.
+    let disabled_new_tab = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = disabled_new_tab.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![make_btn(10, "Toggle Side Panel", true, true, Some(false))];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                fixture.window.controls[0].expanded = Some(true);
+                fixture.window.controls.push(ManagedControl {
+                    id: 11,
+                    role: "AXButton".into(),
+                    label: "New tab".into(),
+                    enabled: false,
+                    pressable: false,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+    assert_eq!(
+        disabled_new_tab
+            .controls()
+            .open_browser("antigravity")
+            .unwrap_err(),
+        "unconfirmed:blocked:browser_unavailable"
+    );
+
+    // 4. New tab pressed (pressed_toggle_panel=false) -> panel collapses and Toggle Side Panel is disabled -> unconfirmed.
+    let disabled_collapsed_toggle =
+        Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = disabled_collapsed_toggle.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            make_btn(10, "Toggle Side Panel", true, true, Some(true)),
+            make_btn(11, "New tab", true, true, None),
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "New tab" {
+                fixture.window.controls.retain(|c| c.id != 11);
+                fixture.window.controls[0].expanded = Some(false);
+                fixture.window.controls[0].enabled = false;
+            }
+        });
+    }
+    assert_eq!(
+        disabled_collapsed_toggle
+            .controls()
+            .open_browser("antigravity")
+            .unwrap_err(),
+        "unconfirmed:blocked:browser_unavailable"
+    );
+
+    // 4b. Already-pressed Toggle Side Panel that stays permanently collapsed & disabled
+    //     still reports unconfirmed (never raw blocked) once the post-mutation deadline expires.
+    let stuck_collapsed_toggle =
+        Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = stuck_collapsed_toggle.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![make_btn(10, "Toggle Side Panel", true, true, Some(false))];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                fixture.window.controls[0].enabled = false;
+            }
+        });
+    }
+    let stuck_exec = LiveHostActionExecutor::new(Driver {
+        controls: ManagedAxControls::with_readback_timeout(
+            stuck_collapsed_toggle.clone(),
+            Duration::from_millis(30),
+        ),
+        trusted: true,
+    });
+    let stuck_receipt = stuck_exec.execute("antigravity", "AG08", &cmd);
+    assert_eq!(stuck_receipt.outcome, "failed", "{stuck_receipt:?}");
+    assert_eq!(stuck_receipt.detail, "unconfirmed:browser_open");
+
+    // 5. New tab pressed -> fallback Toggle Side Panel (expanded=None) becomes disabled -> unconfirmed.
+    let disabled_fallback_toggle =
+        Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = disabled_fallback_toggle.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            make_btn(10, "Toggle Side Panel", true, true, None),
+            make_btn(11, "New tab", true, true, None),
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "New tab" {
+                fixture.window.controls.retain(|c| c.id != 11);
+                fixture.window.controls[0].enabled = false;
+            }
+        });
+    }
+    assert_eq!(
+        disabled_fallback_toggle
+            .controls()
+            .open_browser("antigravity")
+            .unwrap_err(),
+        "unconfirmed:blocked:browser_unavailable"
+    );
+
+    // 6. Pre-mutation disabled Toggle Side Panel and New tab still fail closed with raw blocked: and zero press.
+    for pre_controls in [
+        vec![make_btn(10, "Toggle Side Panel", false, true, Some(false))],
+        vec![make_btn(10, "Toggle Side Panel", true, false, None)],
+        vec![
+            make_btn(10, "Toggle Side Panel", true, true, Some(true)),
+            make_btn(11, "New tab", false, false, None),
+        ],
+    ] {
+        let pre = Provider::with_target("com.google.antigravity", "Record voice memo");
+        pre.0.lock().unwrap().window.controls = pre_controls;
+        assert_eq!(
+            pre.controls().open_browser("antigravity").unwrap_err(),
+            "blocked:browser_unavailable"
+        );
+        assert!(
+            !pre.events().iter().any(|e| e.starts_with("press:")),
+            "pre-mutation unavailable control must never press"
+        );
+    }
+}
+
+#[test]
+fn antigravity_browser_pre_mutation_fails_fast_while_preserving_post_mutation_deadline() {
+    // 1. Antigravity Home / New Conversation page (no side-panel/browser controls, pressed_any=false)
+    //    must fail fast well before the 3500ms post-mutation deadline using default timeouts.
+    let home_page = Provider::with_target("com.google.antigravity", "Record voice memo");
+    let started = std::time::Instant::now();
+    let err = ManagedAxControls::new(home_page.clone())
+        .open_browser("antigravity")
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert_eq!(err, "blocked:browser_control_not_found");
+    assert!(
+        !home_page.events().iter().any(|e| e.starts_with("press:")),
+        "Home/New Conversation page must perform zero presses"
+    );
+    assert!(
+        elapsed < Duration::from_millis(1200),
+        "pre-mutation discovery should fail fast (~250ms), not wait 3500ms; elapsed={elapsed:?}"
+    );
+
+    // 2. Once a mutation press occurs (pressed_any=true), open_browser must honor the full
+    //    post-mutation readback deadline (waiting >250ms for Browser Address bar to mount).
+    let delayed_mount = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = delayed_mount.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 21,
+                role: "AXButton".into(),
+                label: "Browser".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Browser" {
+                fixture.window.controls.retain(|c| c.id != 21);
+            }
+        });
+    }
+    let bg = delayed_mount.clone();
+    let mount_thread = std::thread::spawn(move || loop {
+        if bg.events().iter().any(|e| e == "press:Browser") {
+            std::thread::sleep(Duration::from_millis(400));
+            bg.0.lock().unwrap().window.controls.push(ManagedControl {
+                id: 30,
+                role: "AXComboBox".into(),
+                label: "Address bar".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: false,
+                expanded: None,
+            });
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    });
+    ManagedAxControls::new(delayed_mount.clone())
+        .open_browser("antigravity")
+        .expect("post-mutation readback must exceed the 250ms pre-mutation discovery window");
+    mount_thread.join().unwrap();
+    let presses: Vec<String> = delayed_mount
+        .events()
+        .into_iter()
+        .filter(|e| e.starts_with("press:"))
+        .collect();
+    assert_eq!(presses, vec!["press:Browser".to_string()]);
+}
+
+#[test]
+fn antigravity_browser_waits_through_transient_mid_animation_disable_on_already_pressed_controls() {
+    // 1. Toggle Side Panel temporarily disables mid-animation while still reporting expanded=false,
+    //    then expands and mounts Browser. open_browser must wait rather than aborting immediately.
+    let animating_panel = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = animating_panel.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![ManagedControl {
+            id: 10,
+            role: "AXButton".into(),
+            label: "Toggle Side Panel".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        }];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "Toggle Side Panel" {
+                fixture.window.controls[0].enabled = false;
+            } else if label == "Browser" {
+                fixture.window.controls.retain(|c| c.id != 21);
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXComboBox".into(),
+                    label: "Address bar".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+    let bg_panel = animating_panel.clone();
+    let panel_thread = std::thread::spawn(move || loop {
+        if bg_panel
+            .events()
+            .iter()
+            .any(|e| e == "press:Toggle Side Panel")
+        {
+            std::thread::sleep(Duration::from_millis(60));
+            let mut st = bg_panel.0.lock().unwrap();
+            st.window.controls[0].enabled = true;
+            st.window.controls[0].expanded = Some(true);
+            st.window.controls.push(ManagedControl {
+                id: 21,
+                role: "AXButton".into(),
+                label: "Browser".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            });
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    });
+    animating_panel
+        .controls()
+        .open_browser("antigravity")
+        .expect("already-pressed Toggle Side Panel disabling mid-animation must recover");
+    panel_thread.join().unwrap();
+    let panel_presses: Vec<String> = animating_panel
+        .events()
+        .into_iter()
+        .filter(|e| e.starts_with("press:"))
+        .collect();
+    assert_eq!(
+        panel_presses,
+        vec![
+            "press:Toggle Side Panel".to_string(),
+            "press:Browser".to_string(),
+        ]
+    );
+
+    // 2. New tab temporarily disables while the New Tab screen mounts, then Browser appears.
+    let animating_new_tab = Provider::with_target("com.google.antigravity", "Record voice memo");
+    {
+        let mut state = animating_new_tab.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "Toggle Side Panel".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 11,
+                role: "AXButton".into(),
+                label: "New tab".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "New tab" {
+                if let Some(btn) = fixture.window.controls.iter_mut().find(|c| c.id == 11) {
+                    btn.enabled = false;
+                }
+            } else if label == "Browser" {
+                fixture.window.controls.retain(|c| c.id != 21);
+                fixture.window.controls.push(ManagedControl {
+                    id: 31,
+                    role: "AXButton".into(),
+                    label: "Open in external browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+    let bg_new_tab = animating_new_tab.clone();
+    let new_tab_thread = std::thread::spawn(move || loop {
+        if bg_new_tab.events().iter().any(|e| e == "press:New tab") {
+            std::thread::sleep(Duration::from_millis(60));
+            let mut st = bg_new_tab.0.lock().unwrap();
+            st.window.controls.push(ManagedControl {
+                id: 21,
+                role: "AXButton".into(),
+                label: "Browser".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            });
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    });
+    animating_new_tab
+        .controls()
+        .open_browser("antigravity")
+        .expect("already-pressed New tab disabling while mounting must recover");
+    new_tab_thread.join().unwrap();
+    let new_tab_presses: Vec<String> = animating_new_tab
+        .events()
+        .into_iter()
+        .filter(|e| e.starts_with("press:"))
+        .collect();
+    assert_eq!(
+        new_tab_presses,
+        vec!["press:New tab".to_string(), "press:Browser".to_string()]
+    );
 }

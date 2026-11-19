@@ -128,6 +128,10 @@ pub enum SubagentOpenResult {
 }
 
 const MODEL_PICKER_FALLBACK_TTL: Duration = Duration::from_secs(12);
+/// Short pre-mutation discovery window for Antigravity pages without side-panel/browser controls
+/// (e.g., Home / New Conversation), so `open_browser` fails fast instead of polling the full
+/// 3500ms post-mutation readback deadline.
+const BROWSER_PRE_MUTATION_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(250);
 
 fn is_codex_trigger_excluded(label: &str) -> bool {
     let lower = label.trim().to_lowercase();
@@ -1296,6 +1300,209 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         }
     }
 
+    pub fn open_browser(&self, adapter: &str) -> Result<(), String> {
+        if managed_adapter(adapter)? != DictationAdapter::Antigravity {
+            return Err(blocked("unsupported_browser_adapter"));
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window =
+            self.capture_full_window_for_key(&mut *provider, DictationAdapter::Antigravity)?;
+        let identity = window.identity.clone();
+        provider.activate_window(&identity)?;
+
+        let timeout = if self.readback_timeout.is_zero() {
+            Duration::from_millis(3500)
+        } else if self.readback_timeout < Duration::from_millis(100) {
+            self.readback_timeout * 2
+        } else {
+            self.readback_timeout.max(Duration::from_millis(3500))
+        };
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let discovery_deadline = started + timeout.min(BROWSER_PRE_MUTATION_DISCOVERY_TIMEOUT);
+        let mut initial_window = Some(window);
+        let mut pressed_toggle_panel = false;
+        let mut pressed_new_tab = false;
+        let mut pressed_clear_search = false;
+        let mut pressed_browser = false;
+
+        let is_transient_removal = |err: &str| {
+            matches!(
+                err,
+                "blocked:ax_control_removed" | "blocked:ax_target_missing"
+            )
+        };
+        let wrap_post_mutation = |err: String, pressed_any: bool| {
+            if pressed_any && !err.starts_with("unconfirmed:") {
+                format!("unconfirmed:{err}")
+            } else {
+                err
+            }
+        };
+        let try_press = |provider: &mut P,
+                         flag: &mut bool,
+                         control_id: u64,
+                         pressed_any: bool|
+         -> Result<(), String> {
+            if *flag {
+                return Ok(());
+            }
+            match provider.press(&identity, control_id) {
+                Ok(()) => {
+                    *flag = true;
+                    Ok(())
+                }
+                Err(err)
+                    if pressed_any && is_transient_removal(&err) && Instant::now() < deadline =>
+                {
+                    Ok(())
+                }
+                Err(err) => Err(wrap_post_mutation(err, pressed_any)),
+            }
+        };
+
+        loop {
+            let pressed_any =
+                pressed_toggle_panel || pressed_new_tab || pressed_clear_search || pressed_browser;
+            let active_deadline = if pressed_any {
+                deadline
+            } else {
+                discovery_deadline
+            };
+
+            if initial_window.is_none() && Instant::now() >= active_deadline {
+                if pressed_any {
+                    return Err("unconfirmed:browser_open".into());
+                } else {
+                    return Err(blocked("browser_control_not_found"));
+                }
+            }
+
+            let current = match initial_window.take() {
+                Some(snapshot) => snapshot,
+                None => match read(&mut *provider, &identity) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => return Err(wrap_post_mutation(error, pressed_any)),
+                },
+            };
+
+            let toggle_panel_btn = current
+                .controls
+                .iter()
+                .find(|c| c.role == "AXButton" && c.label.trim() == "Toggle Side Panel");
+            let panel_collapsed = toggle_panel_btn.is_some_and(|btn| btn.expanded == Some(false));
+
+            if panel_collapsed {
+                let btn = toggle_panel_btn.expect("panel_collapsed implies toggle_panel_btn");
+                if !pressed_toggle_panel {
+                    if !btn.enabled || !btn.pressable {
+                        return Err(wrap_post_mutation(
+                            blocked("browser_unavailable"),
+                            pressed_any,
+                        ));
+                    }
+                    try_press(
+                        &mut provider,
+                        &mut pressed_toggle_panel,
+                        btn.id,
+                        pressed_any,
+                    )?;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+
+            if is_antigravity_browser_open(&current) {
+                return Ok(());
+            }
+
+            if pressed_browser {
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+
+            let has_new_tab_search = current
+                .controls
+                .iter()
+                .any(|c| c.role == "AXTextField" && c.label.trim() == "Search for content to open");
+
+            let browser_btn = current
+                .controls
+                .iter()
+                .find(|c| c.role == "AXButton" && c.label.trim() == "Browser")
+                .or_else(|| {
+                    has_new_tab_search.then(|| {
+                        current
+                            .controls
+                            .iter()
+                            .find(|c| c.role == "AXButton" && c.label.trim() == "Preview")
+                    })?
+                });
+
+            if let Some(btn) = browser_btn {
+                if !btn.enabled || !btn.pressable {
+                    return Err(wrap_post_mutation(
+                        blocked("browser_unavailable"),
+                        pressed_any,
+                    ));
+                }
+                try_press(&mut provider, &mut pressed_browser, btn.id, pressed_any)?;
+                std::thread::sleep(Duration::from_millis(25));
+            } else if has_new_tab_search {
+                if let Some(btn) = current.controls.iter().find(|c| {
+                    c.role == "AXButton"
+                        && c.label.trim() == "Clear search"
+                        && c.enabled
+                        && c.pressable
+                }) {
+                    try_press(
+                        &mut provider,
+                        &mut pressed_clear_search,
+                        btn.id,
+                        pressed_any,
+                    )?;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            } else if let Some(btn) = current
+                .controls
+                .iter()
+                .find(|c| c.role == "AXButton" && c.label.trim() == "New tab")
+            {
+                if !pressed_new_tab {
+                    if !btn.enabled || !btn.pressable {
+                        return Err(wrap_post_mutation(
+                            blocked("browser_unavailable"),
+                            pressed_any,
+                        ));
+                    }
+                    try_press(&mut provider, &mut pressed_new_tab, btn.id, pressed_any)?;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            } else if let Some(btn) = toggle_panel_btn.filter(|btn| btn.expanded != Some(true)) {
+                if !pressed_toggle_panel {
+                    if !btn.enabled || !btn.pressable {
+                        return Err(wrap_post_mutation(
+                            blocked("browser_unavailable"),
+                            pressed_any,
+                        ));
+                    }
+                    try_press(
+                        &mut provider,
+                        &mut pressed_toggle_panel,
+                        btn.id,
+                        pressed_any,
+                    )?;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            } else {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+
     pub fn scroll(&self, request: &DialScrollRequest) -> Result<(), String> {
         if !matches!(
             request.target_bundle_id.as_str(),
@@ -2369,6 +2576,13 @@ fn stop_in_window<P: ManagedAxProvider>(
 
 pub(crate) fn is_side_question_input(control: &ManagedControl) -> bool {
     control.label == "Side Question Input"
+}
+
+fn is_antigravity_browser_open(window: &ManagedWindow) -> bool {
+    window.controls.iter().any(|c| {
+        (matches!(c.role.as_str(), "AXComboBox" | "AXTextField") && c.label.trim() == "Address bar")
+            || (c.role == "AXButton" && c.label.trim() == "Open in external browser")
+    })
 }
 
 fn focus_in_window<P: ManagedAxProvider>(

@@ -674,7 +674,6 @@ pub fn native_shortcut_for_agent_command(
         ("antigravity", "project" | "prev-project" | "next-project") => {
             Some((0x29, mods(&["command"])))
         }
-        ("antigravity", "browser") => Some((0x0B, mods(&["command", "shift"]))),
         ("antigravity", "terminal") => Some((0x26, mods(&["command"]))),
         ("antigravity", "dictation" | "push-to-talk") => Some((0x2E, mods(&["control"]))),
         ("antigravity", "split-right") => Some((0x02, mods(&["command"]))),
@@ -917,6 +916,9 @@ pub trait HostOsDriver: Send + Sync {
     }
     fn open_side_question(&self, _adapter: &str) -> Result<(), String> {
         Err("blocked:unsupported_agent_command".into())
+    }
+    fn open_browser(&self, _adapter: &str) -> Result<(), String> {
+        Err("blocked:unsupported_browser_adapter".into())
     }
     fn open_side_panel(&self, _adapter: &str) -> Result<(), String> {
         Err("blocked:unsupported_side_panel_adapter".into())
@@ -2639,6 +2641,16 @@ impl HostOsDriver for MacOsSystemDriver {
         self.managed_controls.open_side_question(adapter)
     }
 
+    fn open_browser(&self, adapter: &str) -> Result<(), String> {
+        if adapter != "antigravity" {
+            return Err("blocked:unsupported_browser_adapter".into());
+        }
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        self.managed_controls.open_browser(adapter)
+    }
+
     fn open_side_panel(&self, adapter: &str) -> Result<(), String> {
         if adapter != "antigravity" {
             return Err("blocked:unsupported_side_panel_adapter".into());
@@ -2822,6 +2834,7 @@ pub enum RecordedOsEvent {
     OpenModelPicker(String),
     OpenSubagentPicker(String),
     OpenSideQuestion(String),
+    OpenBrowser(String),
     OpenSidePanel(String),
     CloseSidePanel(String),
     SendModelPickerKey {
@@ -3156,6 +3169,15 @@ impl HostOsDriver for RecordingOsDriver {
         }
         st.events
             .push(RecordedOsEvent::OpenSideQuestion(adapter.to_string()));
+        Ok(())
+    }
+    fn open_browser(&self, adapter: &str) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events
+            .push(RecordedOsEvent::OpenBrowser(adapter.to_string()));
         Ok(())
     }
     fn open_side_panel(&self, adapter: &str) -> Result<(), String> {
@@ -4087,6 +4109,14 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
                     match self.driver.open_side_question(adapter) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    }
+                } else if command == "browser" && effective_adapter == "antigravity" {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    match self.driver.open_browser(effective_adapter) {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }

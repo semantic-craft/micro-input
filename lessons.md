@@ -1,5 +1,11 @@
 # 项目教训
 
+## Antigravity 2.33 AX 控件扫描必须剪枝客体 WebContentsView 并以标题锚点隔离对话正文
+
+- 起因与后果：将 Antigravity `browser` 动作从 `Cmd+Shift+B` 升级为受管 AX 直达内置浏览器时，在实机 Antigravity 2.33.0 暴露两处 DOM/AX 差异：其一，Electron 的 `wcvBrowserRegistry` 即使在右侧栏折叠时也会将客体浏览器 `WebContentsView` 与 `catcherWcv` 作为同级 `AXWebArea` 挂在 `AXWindow` 下，不剪枝会把客体网页内的 `<textarea>` 或同名按钮混入控件扫描，破坏聊天输入框唯一性并带来网页伪造风险；其二，2.33.0 中 `aria-label="Conversation turns"` 仅为左侧导航圆点轨（与正文同级而非祖先），实际对话正文位于无标签 `AXGroup`（直系子 `AXHeading` 为 `"Conversation Log" | "Agent said" | "Agent working" | "You said"`），代码块 `"Preview"` 则位于 `AXGroup("Markdown view mode")`，仅按旧祖先标签过滤会漏放正文内的同名按钮。
+- 修复：`crates/mi-macos/src/native_ax.rs` 新增 `ObservationPurpose::AntigravityControls`，按 `AXURL`/`AXTitle` 仅遍历 Antigravity Hub 本地 `AXWebArea` 并剪枝客体/插件 `AXWebArea`；在 `controls_from_observation` 中以 `O(N)` 扫描直系子 `AXHeading` 建立聊天正文容器集合，连同 `Settings` 与 `Markdown view mode` 一并排除浏览器假阳性候选；`crates/mi-macos/src/managed_controls.rs` 实现 `open_browser` 受管状态机（复用初始快照、未变更发现期 250ms 快速失败、变更后统一 `unconfirmed:` 包装并容忍已按按钮动画期短暂禁用）。
+- 验证点：`crates/mi-macos/src/native_ax.rs` 覆盖 `antigravity_controls_observation_prunes_guest_browser_and_catcher_web_areas`、`antigravity_controls_filter_blocks_settings_browser_button_beyond_depth_16` 与 `antigravity_controls_filter_blocks_unlabeled_heading_anchored_chat_log_and_markdown_preview`；`crates/mi-macos/tests/managed_controls.rs` 覆盖 3 步折叠打开、动画期短暂禁用与变更后错误包装；实机通过 `MI_LIVE_AX_VERIFY=1 MI_LIVE_AX_ADAPTER=antigravity MI_LIVE_AX_ACTION=browser` 与 `inspect` 核对 `editable_inputs == 1`，再以 Developer ID 签名更新 `/Applications/Micro Input.app` 并由用户实体按键确认。Seen 1x（2026-11-19）。
+
 ## 预设迁移须覆盖真实残留槽位并先核查 USB 传输与硬件死区
 
 - 起因与后果：将 Antigravity 从全层 `MOUSE` 改回 `RADIAL` 侧栏控制后，用户实机仍出现鼠标到处晃。排查真实环境发现三点叠加：其一，日常 `workbench.json` 中 Antigravity 的 `joystick_mode` 为 `"mouse"` 但 `logical-16..19` 仍残留 `agent-model-picker-*`，迁移谓词仅匹配全 `None` 导致迁移跳过；其二，键盘当时仅通过 `Bluetooth Low Energy` 连接（`0xFF00` 写 Flash 仅支持 `TransportHint::Usb`），硬件层仍停留在旧版全层 `MOUSE`；其三，设备 NVS 的 `joystick.deadzone` 为 `0.07`（低于出厂 `0.15`）配合 `stick_speed = 24` 放大静止微漂，且 Antigravity 新建对话页仅渲染左侧 `Toggle Sidebar`、进入会话页才渲染右侧 `Toggle Side Panel`。

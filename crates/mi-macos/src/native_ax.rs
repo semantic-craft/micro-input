@@ -652,8 +652,25 @@ mod macos {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ObservationPurpose {
         Controls,
+        AntigravityControls,
         Sessions,
         SessionDocuments,
+    }
+
+    fn is_antigravity_hub_web_area(url: Option<&str>, title: Option<&str>) -> bool {
+        let Some(raw_url) = url.map(str::trim).filter(|u| !u.is_empty()) else {
+            return true;
+        };
+        let is_loopback_https = raw_url
+            .strip_prefix("https://")
+            .is_some_and(|rest| rest.starts_with("127.0.0.1:") || rest.starts_with("localhost:"));
+        if !is_loopback_https {
+            return false;
+        }
+        match title.map(str::trim).filter(|t| !t.is_empty()) {
+            None => true,
+            Some(t) => t.contains("Antigravity") || t == "Jetski Web",
+        }
     }
 
     #[derive(Clone, Default)]
@@ -782,6 +799,8 @@ mod macos {
             role.as_str(),
             "AXTextArea" | "AXTextField" | "AXSecureTextField"
         );
+        let combobox = role == "AXComboBox";
+        let labeled_input = role == "AXTextField" || combobox;
         let button = matches!(
             role.as_str(),
             "AXButton"
@@ -806,13 +825,25 @@ mod macos {
             && !children.is_empty()
             && matches!(role.as_str(), "AXGroup" | "AXScrollArea" | "AXList");
         let names: &[&str] = match purpose {
-            ObservationPurpose::Controls if input => &["AXEnabled", "AXFocused"],
-            ObservationPurpose::Controls if role == "AXPopUpButton" => {
+            ObservationPurpose::Controls | ObservationPurpose::AntigravityControls
+                if labeled_input =>
+            {
+                &["AXDescription", "AXTitle", "AXEnabled", "AXFocused"]
+            }
+            ObservationPurpose::Controls | ObservationPurpose::AntigravityControls if input => {
+                &["AXEnabled", "AXFocused"]
+            }
+            ObservationPurpose::Controls | ObservationPurpose::AntigravityControls
+                if role == "AXPopUpButton" =>
+            {
                 &["AXDescription", "AXTitle", "AXEnabled", "AXExpanded"]
             }
-            ObservationPurpose::Controls if button || role == "AXHeading" => {
+            ObservationPurpose::Controls | ObservationPurpose::AntigravityControls
+                if button || role == "AXHeading" =>
+            {
                 &["AXDescription", "AXTitle", "AXEnabled"]
             }
+            ObservationPurpose::AntigravityControls if role == "AXWebArea" => &["AXURL", "AXTitle"],
             ObservationPurpose::Sessions if role == "AXLink" => {
                 &["AXDescription", "AXTitle", "AXEnabled", "AXURL"]
             }
@@ -841,14 +872,30 @@ mod macos {
             ..Default::default()
         };
         match purpose {
-            ObservationPurpose::Controls if input => {
+            ObservationPurpose::Controls | ObservationPurpose::AntigravityControls
+                if labeled_input =>
+            {
+                let desc = text_attribute(attrs.next().flatten())?;
+                let title = text_attribute(attrs.next().flatten())?;
+                data.label = desc
+                    .filter(|s| !s.trim().is_empty())
+                    .or(title)
+                    .unwrap_or_default();
+                data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                data.focused = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
+                data.editable =
+                    subrole.as_deref() != Some("AXSecureTextField") && settable("AXValue")?;
+            }
+            ObservationPurpose::Controls | ObservationPurpose::AntigravityControls if input => {
                 data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
                 data.focused = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
                 data.editable = data.role != "AXSecureTextField"
                     && subrole.as_deref() != Some("AXSecureTextField")
                     && settable("AXValue")?;
             }
-            ObservationPurpose::Controls if button || data.role == "AXHeading" => {
+            ObservationPurpose::Controls | ObservationPurpose::AntigravityControls
+                if button || data.role == "AXHeading" =>
+            {
                 let desc = text_attribute(attrs.next().flatten())?;
                 let title = text_attribute(attrs.next().flatten())?;
                 data.label = desc
@@ -860,6 +907,17 @@ mod macos {
                     data.expanded = bool_attribute(attrs.next().flatten())?;
                 }
                 data.pressable = button && actions()?.iter().any(|action| action == "AXPress");
+            }
+            ObservationPurpose::AntigravityControls if data.role == "AXWebArea" => {
+                data.url = attrs
+                    .next()
+                    .flatten()
+                    .map(lenient_url_attribute)
+                    .transpose()?;
+                let title = lenient_text_attribute(attrs.next().flatten())?;
+                if !is_antigravity_hub_web_area(data.url.as_deref(), title.as_deref()) {
+                    data.children.clear();
+                }
             }
             ObservationPurpose::Sessions if data.role == "AXLink" => {
                 let desc = lenient_text_attribute(attrs.next().flatten())?;
@@ -923,9 +981,11 @@ mod macos {
                     .flatten()
                     .map(lenient_url_attribute)
                     .transpose()?;
-                if purpose == ObservationPurpose::SessionDocuments
-                    && data.url.as_deref().is_some_and(|url| !url.is_empty())
-                {
+                let should_prune = (purpose == ObservationPurpose::SessionDocuments
+                    && data.url.as_deref().is_some_and(|url| !url.is_empty()))
+                    || (purpose == ObservationPurpose::Sessions
+                        && !is_antigravity_hub_web_area(data.url.as_deref(), None));
+                if should_prune {
                     data.children.clear();
                 }
             }
@@ -2501,11 +2561,25 @@ mod macos {
             let subagent_trigger =
                 antigravity_subagent_trigger || codex_subagent_trigger || dsh_subagent_trigger;
 
-            let is_antigravity_side_question_btn = is_antigravity
+            let is_antigravity_side_panel_btn = is_antigravity
+                && data.role == "AXButton"
                 && matches!(
                     data.label.trim(),
-                    "Toggle Side Panel" | "New tab" | "Side Question" | "New Side Question"
+                    "Toggle Side Panel"
+                        | "New tab"
+                        | "Side Question"
+                        | "New Side Question"
+                        | "Browser"
+                        | "Preview"
+                        | "Open in external browser"
+                        | "Clear search"
                 );
+            let is_antigravity_browser_address_bar = is_antigravity
+                && matches!(data.role.as_str(), "AXComboBox" | "AXTextField")
+                && data.label.trim() == "Address bar";
+            let is_antigravity_new_tab_search = is_antigravity
+                && data.role == "AXTextField"
+                && data.label.trim() == "Search for content to open";
 
             let relevant_button = data.pressable
                 && ([
@@ -2519,7 +2593,7 @@ mod macos {
                         || adapter.matches_stop_label(&data.label)
                 }) || crate::executor::is_antigravity_live_voice_start_label(&data.label)
                     || crate::executor::is_antigravity_live_voice_end_label(&data.label)
-                    || is_antigravity_side_question_btn
+                    || is_antigravity_side_panel_btn
                     || matches!(
                         data.label.trim(),
                         "Jump to bottom"
@@ -2539,10 +2613,13 @@ mod macos {
             let codex_dictation = codex.matches_start_label(&data.label)
                 || codex.matches_stop_label(&data.label)
                 || codex.matches_finishing_label(&data.label);
-            if !data.editable
+            let editable_text_input = data.editable && data.role != "AXComboBox";
+            if !editable_text_input
                 && !relevant_button
                 && !codex_dictation
-                && !is_antigravity_side_question_btn
+                && !is_antigravity_side_panel_btn
+                && !is_antigravity_browser_address_bar
+                && !is_antigravity_new_tab_search
                 && !chat_heading
                 && data.role != "AXScrollArea"
                 && !antigravity_model_trigger
@@ -2563,7 +2640,7 @@ mod macos {
                 || subagent_trigger
             {
                 true
-            } else if is_antigravity_side_question_btn {
+            } else if is_antigravity_side_panel_btn {
                 data.pressable
             } else {
                 relevant_button
@@ -2597,6 +2674,7 @@ mod macos {
                 role.as_str(),
                 "AXTextArea" | "AXTextField" | "AXSecureTextField"
             );
+            let labeled_input = matches!(role.as_str(), "AXTextField" | "AXComboBox");
             let button = matches!(
                 role.as_str(),
                 "AXButton"
@@ -2613,7 +2691,22 @@ mod macos {
                 enabled: true,
                 ..Default::default()
             };
-            if input {
+            if labeled_input {
+                let mut attrs = element
+                    .attributes(
+                        &["AXDescription", "AXTitle", "AXEnabled", "AXFocused"],
+                        deadline,
+                    )?
+                    .into_iter();
+                data.label = text_attribute(attrs.next().flatten())?
+                    .filter(|s| !s.trim().is_empty())
+                    .or(text_attribute(attrs.next().flatten())?)
+                    .unwrap_or_default();
+                data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                data.focused = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
+                data.editable = subrole.as_deref() != Some("AXSecureTextField")
+                    && element.settable("AXValue")?;
+            } else if input {
                 let mut attrs = element
                     .attributes(&["AXEnabled", "AXFocused"], deadline)?
                     .into_iter();
@@ -2647,6 +2740,80 @@ mod macos {
                     button && element.actions()?.iter().any(|action| action == "AXPress");
             }
             Ok(Some(data))
+        }
+        fn ancestor_matches_container(
+            &self,
+            observation: &WindowObservation,
+            node_by_id: &std::collections::HashMap<u64, usize>,
+            cache: &mut std::collections::HashMap<u64, bool>,
+            ancestor_id: u64,
+            allowed_roles: &[&str],
+            matches_role_and_label: impl Fn(&str, &str) -> bool,
+        ) -> bool {
+            if let Some(&cached) = cache.get(&ancestor_id) {
+                return cached;
+            }
+            let node_opt = node_by_id
+                .get(&ancestor_id)
+                .map(|&idx| &observation.nodes[idx]);
+            let role_opt: Option<std::borrow::Cow<'_, str>> = if let Some(n) = node_opt {
+                Some(std::borrow::Cow::Borrowed(n.data.role.as_str()))
+            } else if let Ok(elem) = self.element(ancestor_id) {
+                elem.attr("AXRole")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.string())
+                    .map(std::borrow::Cow::Owned)
+            } else {
+                None
+            };
+            let matched = match role_opt.as_deref() {
+                Some(role) if allowed_roles.contains(&role) => {
+                    if let Some(n) = node_opt.filter(|n| !n.data.label.trim().is_empty()) {
+                        matches_role_and_label(role, n.data.label.trim())
+                    } else if let Ok(elem) = self.element(ancestor_id) {
+                        let deadline = Instant::now() + Duration::from_millis(100);
+                        if let Ok(attrs) = elem.attributes(&["AXDescription", "AXTitle"], deadline)
+                        {
+                            let mut iter = attrs.into_iter();
+                            let desc = iter.next().flatten().and_then(|v| v.string());
+                            let title = iter.next().flatten().and_then(|v| v.string());
+                            desc.as_deref()
+                                .map(str::trim)
+                                .is_some_and(|label| matches_role_and_label(role, label))
+                                || title
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .is_some_and(|label| matches_role_and_label(role, label))
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            cache.insert(ancestor_id, matched);
+            matched
+        }
+        fn is_excluded_browser_container(role: &str, label: &str) -> bool {
+            (matches!(role, "AXGroup" | "AXSheet" | "AXDialog") && label == "Settings")
+                || (role == "AXGroup" && label == "Markdown view mode")
+                || (matches!(role, "AXGroup" | "AXScrollArea" | "AXList")
+                    && matches!(
+                        label,
+                        "Conversation turns" | "Agent response" | "User message"
+                    ))
+        }
+        fn is_browser_filter_candidate(control: &ManagedControl) -> bool {
+            (control.role == "AXButton"
+                && matches!(
+                    control.label.trim(),
+                    "Browser" | "Preview" | "Open in external browser" | "Clear search"
+                ))
+                || (matches!(control.role.as_str(), "AXComboBox" | "AXTextField")
+                    && control.label.trim() == "Address bar")
         }
         fn controls_from_observation(
             &mut self,
@@ -2723,58 +2890,15 @@ mod macos {
                                 .iter()
                                 .find(|(cid, _)| *cid == control.id)
                             {
-                                for &ancestor_id in path.iter().rev().skip(1).take(16) {
-                                    let is_sq_group = if let Some(&cached) =
-                                        side_question_ancestors.get(&ancestor_id)
-                                    {
-                                        cached
-                                    } else {
-                                        let node_opt = node_by_id
-                                            .get(&ancestor_id)
-                                            .map(|&idx| &observation.nodes[idx]);
-                                        let role_matches = if let Some(n) = node_opt {
-                                            n.data.role == "AXGroup"
-                                        } else if let Ok(elem) = self.element(ancestor_id) {
-                                            elem.attr("AXRole")
-                                                .ok()
-                                                .flatten()
-                                                .and_then(|v| v.string())
-                                                .as_deref()
-                                                == Some("AXGroup")
-                                        } else {
-                                            false
-                                        };
-                                        let matched = if !role_matches {
-                                            false
-                                        } else if let Some(n) =
-                                            node_opt.filter(|n| !n.data.label.trim().is_empty())
-                                        {
-                                            n.data.label.trim() == "Side Question"
-                                        } else if let Ok(elem) = self.element(ancestor_id) {
-                                            let deadline =
-                                                Instant::now() + Duration::from_millis(100);
-                                            if let Ok(attrs) = elem
-                                                .attributes(&["AXDescription", "AXTitle"], deadline)
-                                            {
-                                                let mut iter = attrs.into_iter();
-                                                let desc =
-                                                    iter.next().flatten().and_then(|v| v.string());
-                                                let title =
-                                                    iter.next().flatten().and_then(|v| v.string());
-                                                desc.as_deref().map(str::trim)
-                                                    == Some("Side Question")
-                                                    || title.as_deref().map(str::trim)
-                                                        == Some("Side Question")
-                                            } else {
-                                                false
-                                            }
-                                        } else {
-                                            false
-                                        };
-                                        side_question_ancestors.insert(ancestor_id, matched);
-                                        matched
-                                    };
-                                    if is_sq_group {
+                                for &ancestor_id in path.iter().rev().skip(1) {
+                                    if self.ancestor_matches_container(
+                                        &observation,
+                                        &node_by_id,
+                                        &mut side_question_ancestors,
+                                        ancestor_id,
+                                        &["AXGroup"],
+                                        |_, label| label == "Side Question",
+                                    ) {
                                         control.label = "Side Question Input".to_string();
                                         break;
                                     }
@@ -2782,6 +2906,132 @@ mod macos {
                             }
                         }
                     }
+                }
+
+                if controls.iter().any(Self::is_browser_filter_candidate) {
+                    let new_tab_search_info = controls
+                        .iter()
+                        .find(|c| {
+                            c.role == "AXTextField"
+                                && c.label.trim() == "Search for content to open"
+                        })
+                        .and_then(|c| {
+                            let search_idx = *node_by_id.get(&c.id)?;
+                            let search_parent = self
+                                .control_paths
+                                .iter()
+                                .find(|(cid, _)| *cid == c.id)
+                                .and_then(|(_, path)| {
+                                    path.len().checked_sub(2).map(|idx| path[idx])
+                                });
+                            Some((search_idx, search_parent))
+                        });
+                    let chat_transcript_containers: std::collections::HashSet<usize> = observation
+                        .nodes
+                        .iter()
+                        .filter_map(|node| {
+                            if node.data.role == "AXHeading"
+                                && matches!(
+                                    node.data.label.trim(),
+                                    "Conversation Log"
+                                        | "Agent said"
+                                        | "Agent working"
+                                        | "You said"
+                                )
+                            {
+                                node.parent.filter(|&parent_idx| {
+                                    matches!(
+                                        observation.nodes[parent_idx].data.role.as_str(),
+                                        "AXGroup" | "AXScrollArea" | "AXList"
+                                    )
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let mut excluded_ancestors: std::collections::HashMap<u64, bool> =
+                        std::collections::HashMap::new();
+                    let mut retained_ids = std::collections::HashSet::with_capacity(controls.len());
+                    controls.retain(|c| {
+                        let keep = if Self::is_browser_filter_candidate(c) {
+                            let path_opt = self
+                                .control_paths
+                                .iter()
+                                .find(|(cid, _)| *cid == c.id)
+                                .map(|(_, p)| p);
+                            let in_excluded_container = path_opt.is_some_and(|path| {
+                                path.iter().rev().skip(1).any(|&ancestor_id| {
+                                    node_by_id
+                                        .get(&ancestor_id)
+                                        .is_some_and(|idx| chat_transcript_containers.contains(idx))
+                                        || self.ancestor_matches_container(
+                                            &observation,
+                                            &node_by_id,
+                                            &mut excluded_ancestors,
+                                            ancestor_id,
+                                            &[
+                                                "AXGroup",
+                                                "AXSheet",
+                                                "AXDialog",
+                                                "AXScrollArea",
+                                                "AXList",
+                                            ],
+                                            Self::is_excluded_browser_container,
+                                        )
+                                })
+                            });
+                            if in_excluded_container {
+                                false
+                            } else if c.role == "AXButton" {
+                                match c.label.trim() {
+                                    "Browser" | "Open in external browser" => true,
+                                    "Preview" => {
+                                        new_tab_search_info.is_some_and(|(search_idx, _)| {
+                                            node_by_id
+                                                .get(&c.id)
+                                                .is_some_and(|&idx| idx > search_idx)
+                                        })
+                                    }
+                                    "Clear search" => new_tab_search_info.is_some_and(
+                                        |(search_idx, search_parent)| {
+                                            let Some(&idx) = node_by_id.get(&c.id) else {
+                                                return false;
+                                            };
+                                            if idx <= search_idx {
+                                                return false;
+                                            }
+                                            if idx - search_idx <= 6 {
+                                                return true;
+                                            }
+                                            let parent_id = path_opt.and_then(|path| {
+                                                path.len().checked_sub(2).map(|p| path[p])
+                                            });
+                                            parent_id.is_some()
+                                                && parent_id == search_parent
+                                                && parent_id
+                                                    .and_then(|pid| node_by_id.get(&pid))
+                                                    .is_some_and(|&pidx| {
+                                                        observation.nodes[pidx].data.role
+                                                            == "AXGroup"
+                                                    })
+                                        },
+                                    ),
+                                    _ => true,
+                                }
+                            } else {
+                                true
+                            }
+                        } else {
+                            true
+                        };
+                        if keep {
+                            retained_ids.insert(c.id);
+                        }
+                        keep
+                    });
+                    self.control_paths
+                        .retain(|(cid, _)| retained_ids.contains(cid));
                 }
             }
             Ok(controls)
@@ -3226,7 +3476,12 @@ mod macos {
                 .ok_or_else(|| blocked("ax_target_missing"))?
                 .scope
                 .clone();
-            let observation = observe_window(scope, ObservationPurpose::Controls)?;
+            let purpose = if target.bundle_id == "com.google.antigravity" {
+                ObservationPurpose::AntigravityControls
+            } else {
+                ObservationPurpose::Controls
+            };
+            let observation = observe_window(scope, purpose)?;
             let controls = self.controls_from_observation(observation)?;
             self.validate(target)?;
             Ok(ManagedWindow {
@@ -5881,6 +6136,1145 @@ mod macos {
                 .find(|c| c.role == "AXTextArea")
                 .expect("Side Question textarea must be observed");
             assert_eq!(sq_input.label, "Side Question Input");
+        }
+
+        #[test]
+        fn read_observed_node_extracts_textfield_and_combobox_labels_for_antigravity_browser() {
+            for (role, label, expected_editable, expect_children_kept) in [
+                ("AXComboBox", "Address bar", false, true),
+                ("AXTextField", "Search for content to open", true, false),
+            ] {
+                let mut pass = 0usize;
+                let observed = read_observed_node(
+                    ObservationPurpose::Controls,
+                    |names| {
+                        pass += 1;
+                        if pass == 1 {
+                            assert_eq!(names, &["AXRole", "AXSubrole", "AXHidden", "AXChildren"]);
+                            Ok(vec![Owned::text(role), None, None, ax_array(&["child"])])
+                        } else {
+                            assert_eq!(
+                                names,
+                                &["AXDescription", "AXTitle", "AXEnabled", "AXFocused"]
+                            );
+                            Ok(vec![Owned::text(label), None, None, None])
+                        }
+                    },
+                    |attr| {
+                        assert_eq!(attr, "AXValue");
+                        Ok(expected_editable)
+                    },
+                    || panic!("labeled inputs should not query AXActions"),
+                )
+                .unwrap()
+                .expect("labeled input/combobox must be observed");
+                assert_eq!(observed.role, role);
+                assert_eq!(observed.label, label);
+                assert_eq!(observed.editable, expected_editable);
+                assert_eq!(!observed.children.is_empty(), expect_children_kept);
+            }
+
+            let make_provider = |bundle_id: &str| NativeAxProvider {
+                target: Some(Target {
+                    identity: ManagedWindowIdentity {
+                        bundle_id: bundle_id.into(),
+                        pid: 42,
+                        window_id: 1,
+                        scope_id: 0,
+                        title: "App".into(),
+                    },
+                    window: CapturedWindow {
+                        bundle_id: bundle_id.into(),
+                        pid: 42,
+                        application: Owned::text("app").unwrap(),
+                        element: Owned::text("win").unwrap(),
+                        title: "App".into(),
+                    },
+                    scope: Owned::text("win").unwrap(),
+                }),
+                ..Default::default()
+            };
+
+            let ag = make_provider("com.google.antigravity");
+            let address_bar = ag
+                .control_from_node_data(
+                    1,
+                    NodeData {
+                        role: "AXComboBox".into(),
+                        label: "Address bar".into(),
+                        enabled: true,
+                        editable: false,
+                        ..Default::default()
+                    },
+                )
+                .expect("Antigravity Address bar combobox must be retained even if editable=false");
+            assert_eq!(address_bar.label, "Address bar");
+
+            let codex = make_provider("com.openai.codex");
+            assert!(
+                codex
+                    .control_from_node_data(
+                        2,
+                        NodeData {
+                            role: "AXComboBox".into(),
+                            label: "Address bar".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    )
+                    .is_none(),
+                "non-Antigravity AXComboBox must not leak into Codex controls"
+            );
+        }
+
+        #[test]
+        fn antigravity_controls_from_observation_filters_settings_code_preview_and_unrelated_clear_search(
+        ) {
+            let mut provider = NativeAxProvider {
+                target: Some(Target {
+                    identity: ManagedWindowIdentity {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        window_id: 1,
+                        scope_id: 0,
+                        title: "Antigravity".into(),
+                    },
+                    window: CapturedWindow {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        application: Owned::text("app").unwrap(),
+                        element: Owned::text("win").unwrap(),
+                        title: "Antigravity".into(),
+                    },
+                    scope: Owned::text("win").unwrap(),
+                }),
+                ..Default::default()
+            };
+
+            let observation = WindowObservation {
+                nodes: vec![
+                    ObservedNode {
+                        element: Owned::text("win").unwrap(),
+                        parent: None,
+                        data: NodeData {
+                            role: "AXWindow".into(),
+                            ..Default::default()
+                        },
+                    },
+                    // 1: Sidebar "Clear search" BEFORE New Tab search (must be filtered out)
+                    ObservedNode {
+                        element: Owned::text("sidebar-clear").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Clear search".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 2: Code block "Preview" BEFORE New Tab search (must be filtered out)
+                    ObservedNode {
+                        element: Owned::text("code-preview").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Preview".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 3: Capitalized "Open in External Browser" link action (must NOT match)
+                    ObservedNode {
+                        element: Owned::text("chat-open-external").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Open in External Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 4: Settings dialog container
+                    ObservedNode {
+                        element: Owned::text("settings-dialog").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: "Settings".into(),
+                            ..Default::default()
+                        },
+                    },
+                    // 5: Settings sidebar "Browser" button (must be filtered out)
+                    ObservedNode {
+                        element: Owned::text("settings-browser").unwrap(),
+                        parent: Some(4),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 6: New Tab search input group
+                    ObservedNode {
+                        element: Owned::text("new-tab-search-group").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            ..Default::default()
+                        },
+                    },
+                    // 7: New Tab search input
+                    ObservedNode {
+                        element: Owned::text("new-tab-search").unwrap(),
+                        parent: Some(6),
+                        data: NodeData {
+                            role: "AXTextField".into(),
+                            label: "Search for content to open".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 8: New Tab "Clear search" sibling (must be retained)
+                    ObservedNode {
+                        element: Owned::text("new-tab-clear").unwrap(),
+                        parent: Some(6),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Clear search".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 9: New Tab "Browser" card (must be retained)
+                    ObservedNode {
+                        element: Owned::text("new-tab-browser").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 10: New Tab "Preview" card after search input (must be retained)
+                    ObservedNode {
+                        element: Owned::text("new-tab-preview").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Preview".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 11: Built-in Browser lowercase "Open in external browser" (must be retained)
+                    ObservedNode {
+                        element: Owned::text("browser-open-external").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Open in external browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 12: Built-in Browser "Address bar" combobox (must be retained)
+                    ObservedNode {
+                        element: Owned::text("browser-address-bar").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXComboBox".into(),
+                            label: "Address bar".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 13: Composer "+" menu item "Browser" (AXMenuItem, must NOT match AXButton)
+                    ObservedNode {
+                        element: Owned::text("composer-browser-menuitem").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXMenuItem".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            };
+
+            let controls = provider.controls_from_observation(observation).unwrap();
+            let summary: Vec<(&str, &str)> = controls
+                .iter()
+                .map(|c| (c.role.as_str(), c.label.as_str()))
+                .collect();
+            assert_eq!(
+                summary,
+                vec![
+                    ("AXTextField", "Search for content to open"),
+                    ("AXButton", "Clear search"),
+                    ("AXButton", "Browser"),
+                    ("AXButton", "Preview"),
+                    ("AXButton", "Open in external browser"),
+                    ("AXComboBox", "Address bar"),
+                ]
+            );
+            assert_eq!(
+                provider.control_paths.len(),
+                controls.len(),
+                "control_paths must stay synchronized with filtered controls"
+            );
+        }
+
+        #[test]
+        fn antigravity_controls_observation_prunes_guest_browser_and_catcher_web_areas() {
+            let mut visited_forbidden = Vec::new();
+            let observation = observe_tree_once(
+                Owned::text("window").unwrap(),
+                Instant::now() + Duration::from_secs(1),
+                |element| {
+                    let id = element.string().unwrap();
+                    if id.ends_with("-child") {
+                        visited_forbidden.push(id.clone());
+                    }
+                    read_observed_node(
+                        ObservationPurpose::AntigravityControls,
+                        |names| match (id.as_str(), names) {
+                            ("window", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Owned::text("AXWindow"),
+                                    None,
+                                    None,
+                                    ax_array(&[
+                                        "google-wcv",
+                                        "catcher-wcv",
+                                        "local-http-wcv",
+                                        "local-https-foreign-wcv",
+                                        "plugin-wcv",
+                                        "hub-wcv",
+                                        "jetski-bootstrap-wcv",
+                                    ]),
+                                ])
+                            }
+                            (
+                                "google-wcv"
+                                | "catcher-wcv"
+                                | "local-http-wcv"
+                                | "local-https-foreign-wcv"
+                                | "plugin-wcv"
+                                | "nested-iframe-wcv",
+                                ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
+                            ) => Ok(vec![
+                                Owned::text("AXWebArea"),
+                                None,
+                                None,
+                                ax_array(&[&format!("{id}-child")]),
+                            ]),
+                            ("google-wcv", ["AXURL", "AXTitle"]) => Ok(vec![
+                                Owned::text("https://www.google.com/?zx=1"),
+                                Owned::text("Google"),
+                            ]),
+                            ("catcher-wcv", ["AXURL", "AXTitle"]) => Ok(vec![
+                                Owned::text("data:text/html,<!doctype html>"),
+                                Owned::text(""),
+                            ]),
+                            ("local-http-wcv", ["AXURL", "AXTitle"]) => Ok(vec![
+                                Owned::text("http://localhost:3000/"),
+                                Owned::text("Local Dev"),
+                            ]),
+                            ("local-https-foreign-wcv", ["AXURL", "AXTitle"]) => Ok(vec![
+                                Owned::text("https://127.0.0.1:8443/"),
+                                Owned::text("User Local HTTPS App"),
+                            ]),
+                            ("plugin-wcv", ["AXURL", "AXTitle"]) => Ok(vec![
+                                Owned::text("plugin://ext-authority/index.html"),
+                                Owned::text("Extension"),
+                            ]),
+                            ("nested-iframe-wcv", ["AXURL", "AXTitle"]) => Ok(vec![
+                                Owned::text("https://example.com/preview"),
+                                Owned::text("Example"),
+                            ]),
+                            ("hub-wcv", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Owned::text("AXWebArea"),
+                                    None,
+                                    None,
+                                    ax_array(&["hub-address-bar", "nested-iframe-wcv"]),
+                                ])
+                            }
+                            ("hub-wcv", ["AXURL", "AXTitle"]) => Ok(vec![
+                                Owned::text("https://127.0.0.1:61037/c/conv-1"),
+                                Owned::text("My Chat - Antigravity"),
+                            ]),
+                            (
+                                "jetski-bootstrap-wcv",
+                                ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
+                            ) => Ok(vec![
+                                Owned::text("AXWebArea"),
+                                None,
+                                None,
+                                ax_array(&["bootstrap-toggle"]),
+                            ]),
+                            ("jetski-bootstrap-wcv", ["AXURL", "AXTitle"]) => Ok(vec![
+                                Owned::text("https://127.0.0.1:61037/"),
+                                Owned::text("Jetski Web"),
+                            ]),
+                            (
+                                "hub-address-bar",
+                                ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
+                            ) => Ok(vec![Owned::text("AXComboBox"), None, None, ax_array(&[])]),
+                            (
+                                "hub-address-bar",
+                                ["AXDescription", "AXTitle", "AXEnabled", "AXFocused"],
+                            ) => Ok(vec![
+                                Owned::text("Address bar"),
+                                None,
+                                unsafe { Some(Owned(CFRetain(kCFBooleanTrue))) },
+                                unsafe { Some(Owned(CFRetain(kCFBooleanFalse))) },
+                            ]),
+                            (
+                                "bootstrap-toggle",
+                                ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
+                            ) => Ok(vec![Owned::text("AXButton"), None, None, ax_array(&[])]),
+                            ("bootstrap-toggle", ["AXDescription", "AXTitle", "AXEnabled"]) => {
+                                Ok(vec![Owned::text("Toggle Side Panel"), None, unsafe {
+                                    Some(Owned(CFRetain(kCFBooleanTrue)))
+                                }])
+                            }
+                            (other, batch) => panic!("unexpected AX read on {other}: {batch:?}"),
+                        },
+                        |_| Ok(true),
+                        || Ok(vec!["AXPress".to_string()]),
+                    )
+                },
+            )
+            .unwrap();
+
+            assert!(
+                visited_forbidden.is_empty(),
+                "guest/catcher/plugin/iframe AXWebArea children must never be traversed, saw: {visited_forbidden:?}"
+            );
+            let mut provider = NativeAxProvider {
+                target: Some(Target {
+                    identity: ManagedWindowIdentity {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        window_id: 1,
+                        scope_id: 0,
+                        title: "Antigravity".into(),
+                    },
+                    window: CapturedWindow {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        application: Owned::text("app").unwrap(),
+                        element: Owned::text("window").unwrap(),
+                        title: "Antigravity".into(),
+                    },
+                    scope: Owned::text("window").unwrap(),
+                }),
+                ..Default::default()
+            };
+            let controls = provider.controls_from_observation(observation).unwrap();
+            let summary: Vec<(&str, &str)> = controls
+                .iter()
+                .map(|c| (c.role.as_str(), c.label.as_str()))
+                .collect();
+            assert_eq!(
+                summary,
+                vec![
+                    ("AXComboBox", "Address bar"),
+                    ("AXButton", "Toggle Side Panel"),
+                ]
+            );
+        }
+
+        #[test]
+        fn antigravity_controls_filter_blocks_settings_browser_button_beyond_depth_16() {
+            let mut provider = NativeAxProvider {
+                target: Some(Target {
+                    identity: ManagedWindowIdentity {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        window_id: 1,
+                        scope_id: 0,
+                        title: "Antigravity".into(),
+                    },
+                    window: CapturedWindow {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        application: Owned::text("app").unwrap(),
+                        element: Owned::text("win").unwrap(),
+                        title: "Antigravity".into(),
+                    },
+                    scope: Owned::text("win").unwrap(),
+                }),
+                ..Default::default()
+            };
+
+            let mut nodes = vec![
+                ObservedNode {
+                    element: Owned::text("win").unwrap(),
+                    parent: None,
+                    data: NodeData {
+                        role: "AXWindow".into(),
+                        ..Default::default()
+                    },
+                },
+                ObservedNode {
+                    element: Owned::text("settings-dialog").unwrap(),
+                    parent: Some(0),
+                    data: NodeData {
+                        role: "AXGroup".into(),
+                        label: "Settings".into(),
+                        ..Default::default()
+                    },
+                },
+            ];
+            for depth in 0..20 {
+                let parent = nodes.len() - 1;
+                nodes.push(ObservedNode {
+                    element: Owned::text(&format!("nest-{depth}")).unwrap(),
+                    parent: Some(parent),
+                    data: NodeData {
+                        role: "AXGroup".into(),
+                        ..Default::default()
+                    },
+                });
+            }
+            let deep_parent = nodes.len() - 1;
+            nodes.push(ObservedNode {
+                element: Owned::text("deep-settings-browser").unwrap(),
+                parent: Some(deep_parent),
+                data: NodeData {
+                    role: "AXButton".into(),
+                    label: "Browser".into(),
+                    enabled: true,
+                    pressable: true,
+                    ..Default::default()
+                },
+            });
+
+            let controls = provider
+                .controls_from_observation(WindowObservation { nodes })
+                .unwrap();
+            assert!(
+                controls.is_empty(),
+                "Settings Browser button nested >16 levels deep must still be filtered out, got: {controls:?}"
+            );
+        }
+
+        #[test]
+        fn antigravity_controls_filter_blocks_chat_transcript_and_settings_browser_false_positives()
+        {
+            let mut provider = NativeAxProvider {
+                target: Some(Target {
+                    identity: ManagedWindowIdentity {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        window_id: 1,
+                        scope_id: 0,
+                        title: "Antigravity".into(),
+                    },
+                    window: CapturedWindow {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        application: Owned::text("app").unwrap(),
+                        element: Owned::text("win").unwrap(),
+                        title: "Antigravity".into(),
+                    },
+                    scope: Owned::text("win").unwrap(),
+                }),
+                ..Default::default()
+            };
+
+            let observation = WindowObservation {
+                nodes: vec![
+                    // 0: Window
+                    ObservedNode {
+                        element: Owned::text("win").unwrap(),
+                        parent: None,
+                        data: NodeData {
+                            role: "AXWindow".into(),
+                            ..Default::default()
+                        },
+                    },
+                    // 1: New Tab search placed BEFORE chat containers to ensure Preview & Clear
+                    // search inside chat containers are rejected by container exclusion, not index order.
+                    ObservedNode {
+                        element: Owned::text("new-tab-search").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXTextField".into(),
+                            label: "Search for content to open".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 2: User message (AXList) right after search (<= 6 nodes away)
+                    ObservedNode {
+                        element: Owned::text("user-msg").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXList".into(),
+                            label: "User message".into(),
+                            ..Default::default()
+                        },
+                    },
+                    // 3: False-positive "Clear search" inside User message
+                    ObservedNode {
+                        element: Owned::text("user-clear-search").unwrap(),
+                        parent: Some(2),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Clear search".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 4: False-positive "Browser" inside User message
+                    ObservedNode {
+                        element: Owned::text("user-browser").unwrap(),
+                        parent: Some(2),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 5: Conversation turns (AXGroup)
+                    ObservedNode {
+                        element: Owned::text("conv-turns").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: "Conversation turns".into(),
+                            ..Default::default()
+                        },
+                    },
+                    // 6: False-positive "Browser" inside Conversation turns
+                    ObservedNode {
+                        element: Owned::text("turns-browser").unwrap(),
+                        parent: Some(5),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 7: False-positive "Address bar" combobox inside Conversation turns
+                    ObservedNode {
+                        element: Owned::text("turns-address-bar").unwrap(),
+                        parent: Some(5),
+                        data: NodeData {
+                            role: "AXComboBox".into(),
+                            label: "Address bar".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 8: Legitimate non-browser chat control inside Conversation turns (must be kept)
+                    ObservedNode {
+                        element: Owned::text("turns-subagent").unwrap(),
+                        parent: Some(5),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Open subagent: worker-1".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 9: Agent response (AXScrollArea)
+                    ObservedNode {
+                        element: Owned::text("agent-resp").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXScrollArea".into(),
+                            label: "Agent response".into(),
+                            ..Default::default()
+                        },
+                    },
+                    // 10: False-positive "Preview" inside Agent response (after search_idx)
+                    ObservedNode {
+                        element: Owned::text("agent-preview").unwrap(),
+                        parent: Some(9),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Preview".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 11: False-positive "Open in external browser" inside Agent response
+                    ObservedNode {
+                        element: Owned::text("agent-open-external").unwrap(),
+                        parent: Some(9),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Open in external browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 12: False-positive "Address bar" textfield inside Agent response
+                    ObservedNode {
+                        element: Owned::text("agent-address-bar").unwrap(),
+                        parent: Some(9),
+                        data: NodeData {
+                            role: "AXTextField".into(),
+                            label: "Address bar".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 13: Settings modal (AXDialog)
+                    ObservedNode {
+                        element: Owned::text("settings-modal").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXDialog".into(),
+                            label: "Settings".into(),
+                            ..Default::default()
+                        },
+                    },
+                    // 14: False-positive "Open in external browser" inside Settings
+                    ObservedNode {
+                        element: Owned::text("settings-open-external").unwrap(),
+                        parent: Some(13),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Open in external browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 15: False-positive "Address bar" inside Settings
+                    ObservedNode {
+                        element: Owned::text("settings-address-bar").unwrap(),
+                        parent: Some(13),
+                        data: NodeData {
+                            role: "AXComboBox".into(),
+                            label: "Address bar".into(),
+                            enabled: true,
+                            editable: false,
+                            ..Default::default()
+                        },
+                    },
+                    // 16: Legitimate Side Panel "Browser" (must be kept)
+                    ObservedNode {
+                        element: Owned::text("side-panel-browser").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 17: Legitimate Side Panel "Open in external browser" (must be kept)
+                    ObservedNode {
+                        element: Owned::text("side-panel-open-external").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Open in external browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 18: Legitimate Side Panel "Address bar" (must be kept)
+                    ObservedNode {
+                        element: Owned::text("side-panel-address-bar").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXComboBox".into(),
+                            label: "Address bar".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            };
+
+            let controls = provider.controls_from_observation(observation).unwrap();
+            let summary: Vec<(&str, &str)> = controls
+                .iter()
+                .map(|c| (c.role.as_str(), c.label.as_str()))
+                .collect();
+            assert_eq!(
+                summary,
+                vec![
+                    ("AXTextField", "Search for content to open"),
+                    ("AXButton", "Open subagent: worker-1"),
+                    ("AXScrollArea", "Agent response"),
+                    ("AXButton", "Browser"),
+                    ("AXButton", "Open in external browser"),
+                    ("AXComboBox", "Address bar"),
+                ]
+            );
+            assert_eq!(
+                provider.control_paths.len(),
+                controls.len(),
+                "control_paths must remain synchronized after chat/settings filtering"
+            );
+        }
+
+        #[test]
+        fn antigravity_controls_filter_blocks_unlabeled_heading_anchored_chat_log_and_markdown_preview(
+        ) {
+            let mut provider = NativeAxProvider {
+                target: Some(Target {
+                    identity: ManagedWindowIdentity {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        window_id: 1,
+                        scope_id: 0,
+                        title: "Antigravity".into(),
+                    },
+                    window: CapturedWindow {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        application: Owned::text("app").unwrap(),
+                        element: Owned::text("win").unwrap(),
+                        title: "Antigravity".into(),
+                    },
+                    scope: Owned::text("win").unwrap(),
+                }),
+                ..Default::default()
+            };
+
+            // Mirrors Antigravity 2.33.0 live AX layout:
+            // - Main chat transcript is an unlabeled AXGroup containing sr-only AXHeading("Conversation Log"),
+            //   AXHeading("Agent said"), AXHeading("You said") rather than aria-label="Agent response".
+            // - Subagent tabs omit "Conversation Log" and contain only AXHeading("Agent working" / "Agent said").
+            // - Markdown code blocks wrap "Preview" in AXGroup("Markdown view mode").
+            let observation = WindowObservation {
+                nodes: vec![
+                    // 0: Window
+                    ObservedNode {
+                        element: Owned::text("win").unwrap(),
+                        parent: None,
+                        data: NodeData {
+                            role: "AXWindow".into(),
+                            ..Default::default()
+                        },
+                    },
+                    // 1: Hub AXWebArea
+                    ObservedNode {
+                        element: Owned::text("hub-web").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXWebArea".into(),
+                            url: Some("https://127.0.0.1:61037/c/test".into()),
+                            ..Default::default()
+                        },
+                    },
+                    // 2: Side Panel New Tab search (placed BEFORE chat logs so index order alone cannot reject Preview/Clear search)
+                    ObservedNode {
+                        element: Owned::text("new-tab-search").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXTextField".into(),
+                            label: "Search for content to open".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 3: Unlabeled main chat transcript container (Antigravity 2.33.0 div.relative.flex.flex-col.gap-y-3)
+                    ObservedNode {
+                        element: Owned::text("chat-log-group").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: String::new(),
+                            ..Default::default()
+                        },
+                    },
+                    // 4: sr-only Conversation Log heading
+                    ObservedNode {
+                        element: Owned::text("heading-conv-log").unwrap(),
+                        parent: Some(3),
+                        data: NodeData {
+                            role: "AXHeading".into(),
+                            label: "Conversation Log".into(),
+                            enabled: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 5: sr-only Agent said heading
+                    ObservedNode {
+                        element: Owned::text("heading-agent-said").unwrap(),
+                        parent: Some(3),
+                        data: NodeData {
+                            role: "AXHeading".into(),
+                            label: "Agent said".into(),
+                            enabled: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 6: False-positive "Clear search" inside unlabeled chat log (<= 6 nodes after search)
+                    ObservedNode {
+                        element: Owned::text("chat-clear-search").unwrap(),
+                        parent: Some(3),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Clear search".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 7: Nested unlabeled step group inside chat log
+                    ObservedNode {
+                        element: Owned::text("chat-step-group").unwrap(),
+                        parent: Some(3),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: String::new(),
+                            ..Default::default()
+                        },
+                    },
+                    // 8: False-positive "Browser" inside unlabeled chat log
+                    ObservedNode {
+                        element: Owned::text("chat-browser").unwrap(),
+                        parent: Some(7),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 9: False-positive "Open in external browser" inside unlabeled chat log
+                    ObservedNode {
+                        element: Owned::text("chat-open-external").unwrap(),
+                        parent: Some(7),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Open in external browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 10: False-positive "Address bar" inside unlabeled chat log
+                    ObservedNode {
+                        element: Owned::text("chat-address-bar").unwrap(),
+                        parent: Some(7),
+                        data: NodeData {
+                            role: "AXComboBox".into(),
+                            label: "Address bar".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 11: Legitimate non-browser chat control inside unlabeled chat log (must be kept)
+                    ObservedNode {
+                        element: Owned::text("chat-open-subagent").unwrap(),
+                        parent: Some(7),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Open subagent: reviewer-1".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 12: Unlabeled subagent turn container (no "Conversation Log" heading, only "Agent working")
+                    ObservedNode {
+                        element: Owned::text("subagent-turn-group").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: String::new(),
+                            ..Default::default()
+                        },
+                    },
+                    // 13: sr-only Agent working heading
+                    ObservedNode {
+                        element: Owned::text("heading-agent-working").unwrap(),
+                        parent: Some(12),
+                        data: NodeData {
+                            role: "AXHeading".into(),
+                            label: "Agent working".into(),
+                            enabled: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 14: False-positive "Browser" inside subagent turn container
+                    ObservedNode {
+                        element: Owned::text("subagent-browser").unwrap(),
+                        parent: Some(12),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 15: False-positive "Preview" inside subagent turn container (after search_idx)
+                    ObservedNode {
+                        element: Owned::text("subagent-preview").unwrap(),
+                        parent: Some(12),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Preview".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 16: Standalone Markdown code block toggle (outside chat log, after search_idx)
+                    ObservedNode {
+                        element: Owned::text("markdown-view-mode").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: "Markdown view mode".into(),
+                            ..Default::default()
+                        },
+                    },
+                    // 17: False-positive "Preview" inside Markdown view mode toggle
+                    ObservedNode {
+                        element: Owned::text("code-block-preview").unwrap(),
+                        parent: Some(16),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Preview".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 18: Legitimate Side Panel "Preview" (after search_idx, outside excluded containers)
+                    ObservedNode {
+                        element: Owned::text("side-panel-preview").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Preview".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    // 19: Legitimate Side Panel "Browser"
+                    ObservedNode {
+                        element: Owned::text("side-panel-browser").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            };
+
+            let controls = provider.controls_from_observation(observation).unwrap();
+            let summary: Vec<(&str, &str)> = controls
+                .iter()
+                .map(|c| (c.role.as_str(), c.label.as_str()))
+                .collect();
+            assert_eq!(
+                summary,
+                vec![
+                    ("AXTextField", "Search for content to open"),
+                    ("AXHeading", "Conversation Log"),
+                    ("AXButton", "Open subagent: reviewer-1"),
+                    ("AXButton", "Preview"),
+                    ("AXButton", "Browser"),
+                ]
+            );
+            assert_eq!(
+                provider.control_paths.len(),
+                controls.len(),
+                "control_paths must remain synchronized after heading-anchored chat filtering"
+            );
+
+            // Safety guard: an AXHeading directly under AXWebArea (not AXGroup/AXScrollArea/AXList)
+            // must never mark AXWebArea as an excluded chat container.
+            let guarded_obs = WindowObservation {
+                nodes: vec![
+                    ObservedNode {
+                        element: Owned::text("win").unwrap(),
+                        parent: None,
+                        data: NodeData {
+                            role: "AXWindow".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("hub-web").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXWebArea".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("direct-heading").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXHeading".into(),
+                            label: "Conversation Log".into(),
+                            enabled: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("legit-browser").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Browser".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            };
+            let guarded_controls = provider.controls_from_observation(guarded_obs).unwrap();
+            assert!(
+                guarded_controls
+                    .iter()
+                    .any(|c| c.role == "AXButton" && c.label == "Browser"),
+                "AXWebArea must never be treated as a chat transcript container: {guarded_controls:?}"
+            );
         }
     }
 }
