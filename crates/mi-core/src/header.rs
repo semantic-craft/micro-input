@@ -163,6 +163,8 @@ pub struct HeaderProjection {
     pub host_execution_enabled: bool,
     #[serde(default = "default_true")]
     pub accessibility_trusted: bool,
+    #[serde(default)]
+    pub can_retry_host_cleanup: bool,
     pub can_edit_draft: bool,
     pub can_undo: bool,
     pub can_redo: bool,
@@ -195,6 +197,7 @@ impl Default for HeaderProjection {
             show_return_to_host_button: false,
             host_execution_enabled: false,
             accessibility_trusted: true,
+            can_retry_host_cleanup: false,
             can_edit_draft: false,
             can_undo: false,
             can_redo: false,
@@ -215,6 +218,7 @@ pub enum HeaderAction {
     ReturnToHostDocument,
     SetExecutionEnabled(bool),
     OpenAccessibilitySettings,
+    RetryHostCleanup,
     Undo,
     Redo,
     OpenSettings,

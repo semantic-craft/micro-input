@@ -87,6 +87,26 @@ public struct StatusMenuPopoverView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
             }
 
+            if let notice = sm.hostCautionNotice {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.circle")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(UITheme.textSecondary)
+                    Text(notice)
+                        .font(UITheme.micro)
+                        .foregroundStyle(UITheme.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    if sm.canRetryHostCleanup {
+                        Button(store.tr("重试清理")) { store.dispatch("status_menu", "RetryHostCleanup") }
+                            .surfaceButton(.secondary)
+                    }
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(UITheme.subtleSurface))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+            }
+
             Rectangle().fill(UITheme.rowDivider).frame(height: 1)
 
             VStack(alignment: .leading, spacing: 2) {

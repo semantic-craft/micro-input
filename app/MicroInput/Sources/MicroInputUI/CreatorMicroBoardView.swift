@@ -133,6 +133,12 @@ struct CreatorMicroStageView: View {
                 }
                 .surfaceButton(.primary)
             }
+            if h.canRetryHostCleanup {
+                Button(store.tr("重试清理")) {
+                    store.dispatch("header", "RetryHostCleanup")
+                }
+                .surfaceButton(.secondary)
+            }
             if !h.deviceConnected {
                 Button(store.tr("重新检测键盘")) {
                     store.dispatch("header", "ConnectKeyboard")

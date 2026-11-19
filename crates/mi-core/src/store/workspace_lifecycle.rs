@@ -143,8 +143,12 @@ impl WorkbenchStore {
                     self.lifecycle_cleanup = None;
                     completed = true;
                     if let Err(error) = self.finish_host_cleanup(result) {
+                        let localized = crate::i18n::localize_managed_error_detail(
+                            &error,
+                            mi_model::ResolvedLocale::ZhHans,
+                        );
                         self.status_message =
-                            format!("旧会话清理未确认 · {error}；宿主输入保持暂停");
+                            format!("旧会话清理未确认 · {localized}；宿主输入保持暂停");
                         self.system_lifecycle = SystemLifecycle::CleanupFailed(error);
                         self.commit_runtime_update();
                         return;
@@ -153,7 +157,9 @@ impl WorkbenchStore {
                 Err(std::sync::mpsc::TryRecvError::Empty) => return,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.lifecycle_cleanup = None;
-                    self.system_lifecycle = SystemLifecycle::CleanupFailed("清理任务已中断".into());
+                    let error = "清理任务已中断".to_string();
+                    let _ = self.finish_host_cleanup(Err(error.clone()));
+                    self.system_lifecycle = SystemLifecycle::CleanupFailed(error);
                     self.status_message = "清理任务已中断 · 宿主输入保持暂停".into();
                     self.commit_runtime_update();
                     return;
@@ -503,5 +509,70 @@ mod tests {
         assert!(store
             .dispatch_session_strip_action(SessionStripAction::ActivateSlot(0))
             .is_err());
+    }
+
+    #[test]
+    fn retry_host_cleanup_after_wake_failure_recovers_system_lifecycle_to_awake() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+
+        store.ptt_controller.set_next_verify_stopped(false);
+        store.system_will_sleep();
+        store.system_did_wake();
+        until(|| {
+            store.poll_hardware_events();
+            store.lifecycle_cleanup.is_none()
+        });
+        assert!(matches!(
+            store.system_lifecycle,
+            SystemLifecycle::CleanupFailed(_)
+        ));
+        assert!(store.require_awake().is_err());
+        assert!(store.projection().status_menu.can_retry_host_cleanup);
+        assert!(store.projection().header.can_retry_host_cleanup);
+        assert_eq!(
+            store
+                .projection()
+                .status_menu
+                .host_caution_notice
+                .as_deref(),
+            Some("原听写停止未确认")
+        );
+
+        store.retry_host_cleanup();
+        assert_eq!(store.system_lifecycle, SystemLifecycle::Awake);
+        assert!(store.require_awake().is_ok());
+        assert!(store.ptt_controller.cleanup_confirmed);
+        assert!(!store.projection().status_menu.can_retry_host_cleanup);
+        assert!(!store.projection().header.can_retry_host_cleanup);
+        assert!(store.projection().status_menu.host_caution_notice.is_none());
+        assert!(!store.projection().header.banner.is_caution());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        store.system_lifecycle = SystemLifecycle::Waking;
+        store.lifecycle_cleanup = Some(rx);
+        drop(tx);
+        store.poll_workspace_lifecycle();
+        assert!(matches!(
+            store.system_lifecycle,
+            SystemLifecycle::CleanupFailed(_)
+        ));
+        assert!(!store.ptt_controller.cleanup_confirmed);
+        assert!(store.projection().status_menu.can_retry_host_cleanup);
+        assert_eq!(
+            store
+                .projection()
+                .status_menu
+                .host_caution_notice
+                .as_deref(),
+            Some("清理任务已中断")
+        );
+
+        store.set_host_execution_enabled(true).unwrap();
+        assert_eq!(store.system_lifecycle, SystemLifecycle::Awake);
+        assert!(store.require_awake().is_ok());
+        assert!(!store.projection().status_menu.can_retry_host_cleanup);
+        assert!(store.projection().status_menu.host_caution_notice.is_none());
+        assert_eq!(store.status_message(), "已启用软件按键映射");
     }
 }

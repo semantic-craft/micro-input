@@ -451,6 +451,15 @@ impl DictationControllerState {
     }
 }
 
+pub(crate) const HOST_CAUTION_TTL: Duration = Duration::from_secs(12);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostActionCaution {
+    pub detail_code: String,
+    pub is_sticky_cleanup: bool,
+    pub expires_at: Option<Instant>,
+}
+
 #[derive(Clone)]
 struct HeldDictation {
     input: HeldInputId,
@@ -520,6 +529,7 @@ pub struct WorkbenchStore {
     pub preset_transfer_error: Option<String>,
     pub last_host_action_receipt: Option<HostActionReceipt>,
     pub dispatched_receipts: Vec<HostActionReceipt>,
+    pub(crate) host_caution: Option<HostActionCaution>,
     pub live_executor: Arc<LiveHostActionExecutor<MacOsSystemDriver>>,
     pub encoder_model_picker: crate::encoder_model_picker::EncoderModelPicker,
     encoder_hold_profile_id: Option<String>,
@@ -665,6 +675,7 @@ impl WorkbenchStore {
             preset_transfer_error: None,
             last_host_action_receipt: None,
             dispatched_receipts: Vec::new(),
+            host_caution: None,
             live_executor: Arc::new(LiveHostActionExecutor::new(if isolated {
                 MacOsSystemDriver::new_isolated()
             } else {
@@ -950,6 +961,14 @@ impl WorkbenchStore {
         dirty |= self.poll_encoder_model_picker(now);
         dirty |= self.poll_session_navigation_with_commit(false);
         dirty |= self.overlay_controller.expire_notice_if_due(now);
+        if self
+            .host_caution
+            .as_ref()
+            .is_some_and(|c| !c.is_sticky_cleanup && c.expires_at.is_some_and(|exp| now >= exp))
+        {
+            self.host_caution = None;
+            dirty = true;
+        }
         if dirty || self.external_runtime_dirty() {
             self.commit_runtime_update();
         }
@@ -1733,6 +1752,7 @@ impl WorkbenchStore {
             board_routing: self.board_routing,
             bottom_row_layout: self.bottom_row_layout,
             busy: self.busy,
+            can_retry_host_cleanup: self.can_retry_host_cleanup(),
             command_execution_enabled: self.command_execution_enabled,
             competing_input_app_running: self
                 .applications
@@ -1745,6 +1765,7 @@ impl WorkbenchStore {
             favorite_action_ids: &self.favorite_action_ids,
             favorites_only: self.favorites_only,
             hardware_rpc_verified: self.hardware_rpc_verified,
+            host_caution: &self.host_caution,
             isolated: self.config.isolated,
             keycap_overrides: &self.keycap_overrides,
             keycap_search_query: &self.keycap_search_query,

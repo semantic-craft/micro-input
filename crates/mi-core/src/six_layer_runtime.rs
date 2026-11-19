@@ -715,6 +715,11 @@ impl RunningSixLayer {
         self.stop.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_executor_handle_for_test(&mut self, handle: JoinHandle<Result<(), String>>) {
+        self.executor = Some(handle);
+    }
+
     pub fn shutdown(mut self, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         self.quiesce(runtime)
     }

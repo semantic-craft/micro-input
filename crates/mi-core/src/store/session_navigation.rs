@@ -434,10 +434,12 @@ impl WorkbenchStore {
         detail: &str,
         commit: bool,
     ) {
-        self.status_message = format!("会话未切换 · {detail}");
-        self.record_host_action_receipt(navigation_receipt(
-            profile, binding, "", "blocked", detail,
-        ));
+        let localized =
+            crate::i18n::localize_managed_error_detail(detail, mi_model::ResolvedLocale::ZhHans);
+        self.status_message = format!("会话未切换 · {localized}");
+        let receipt = navigation_receipt(profile, binding, "", "blocked", detail);
+        self.update_host_caution_from_receipt(&receipt, self.update_now);
+        self.record_host_action_receipt(receipt);
         if commit {
             self.commit_runtime_update();
         }
@@ -734,21 +736,27 @@ impl WorkbenchStore {
                         .unwrap_or_else(|| "session_navigation_retired".into()),
                 )
             };
+            let localized = crate::i18n::localize_managed_error_detail(
+                &detail,
+                mi_model::ResolvedLocale::ZhHans,
+            );
             self.status_message = format!(
-                "{} · {detail}",
+                "{} · {localized}",
                 if confirmed {
                     "已切换会话"
                 } else {
                     "会话未确认"
                 }
             );
-            self.record_host_action_receipt(navigation_receipt(
+            let receipt = navigation_receipt(
                 &pending.profile,
                 &pending.binding,
                 &pending.place.target_id(),
                 outcome,
                 &detail,
-            ));
+            );
+            self.update_host_caution_from_receipt(&receipt, self.update_now);
+            self.record_host_action_receipt(receipt);
             dirty = true;
         }
         if dirty && commit {
@@ -1724,9 +1732,24 @@ mod tests {
             true,
         );
         assert!(store.session_navigation.pending.is_none());
-        assert!(store
-            .status_message
-            .contains("blocked:unconfirmed_apple_fn_release"));
+        assert_eq!(
+            store.status_message,
+            "会话未切换 · 苹果 Fn 听写键释放未确认，请点击「重试清理」"
+        );
+        assert_eq!(
+            store
+                .projection()
+                .status_menu
+                .host_caution_notice
+                .as_deref(),
+            Some("苹果 Fn 听写键释放未确认，请点击「重试清理」")
+        );
+        assert_eq!(
+            store
+                .last_host_action_receipt()
+                .map(|receipt| receipt.detail.as_str()),
+            Some("blocked:unconfirmed_apple_fn_release")
+        );
     }
 
     fn codex_obs(
@@ -1927,9 +1950,15 @@ mod tests {
         );
         assert!(store.session_navigation.pending.is_none());
         assert!(store.navigation_history.is_empty());
-        assert!(store
-            .status_message
-            .contains("blocked:session_target_unavailable"));
+        assert_eq!(store.status_message, "会话未切换 · 目标会话当前不可用");
+        assert_eq!(
+            store
+                .projection()
+                .status_menu
+                .host_caution_notice
+                .as_deref(),
+            Some("目标会话当前不可用")
+        );
         let receipt = store.last_host_action_receipt().unwrap();
         assert!(!receipt.succeeded());
         assert!(receipt
@@ -2055,9 +2084,16 @@ mod tests {
         assert!(store.session_navigation.pending.is_none());
         assert!(store.navigation_history.is_empty());
         assert!(store.lighting_arbiter.acknowledged_watermarks.is_empty());
-        assert!(store
-            .status_message
-            .contains("blocked:session_slots_changed"));
+        assert_eq!(
+            store.status_message,
+            "会话未切换 · 会话列表已更新，请重新按键切换"
+        );
+        assert_eq!(
+            store
+                .last_host_action_receipt()
+                .map(|receipt| receipt.detail.as_str()),
+            Some("blocked:session_slots_changed")
+        );
     }
 
     #[test]

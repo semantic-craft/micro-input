@@ -1190,3 +1190,559 @@ fn external_board_configuration_and_slot_role_override_mutations_are_detected_by
     assert!(store.poll_at(now + Duration::from_millis(48)));
     assert_eq!(store.commit_local_update_count, commits_after_assign + 2);
 }
+
+#[test]
+fn localize_managed_error_detail_translates_zh_and_en_without_raw_prefix_leakage() {
+    use crate::i18n::{localize_managed_error_detail, relocalize_status_message};
+    use mi_model::ResolvedLocale;
+
+    let cases = [
+        (
+            "blocked:uncleared_dictation_target_changed",
+            "上次听写所在窗口或对话已切换，请先确认原录音已停止",
+            "Previous dictation window or chat changed; confirm recording stopped",
+        ),
+        (
+            "unconfirmed:dictation_target_changed",
+            "上次听写所在窗口或对话已切换，请先确认原录音已停止",
+            "Previous dictation window or chat changed; confirm recording stopped",
+        ),
+        (
+            "unconfirmed:blocked:target_window_changed",
+            "目标窗口或会话已变化，请回到原窗口后重试",
+            "Target window or session changed; return to the original window and retry",
+        ),
+        (
+            "blocked:target_identity_changed",
+            "目标窗口或会话已变化，请回到原窗口后重试",
+            "Target window or session changed; return to the original window and retry",
+        ),
+        (
+            "unconfirmed:dictation_readback",
+            "听写状态回读未确认，请检查原窗口是否仍在录音",
+            "Dictation state unconfirmed; check whether recording is still active",
+        ),
+        (
+            "blocked:ambiguous_or_missing_focused_pane",
+            "无法确定目标分屏，请点击目标会话区域",
+            "Unable to determine target pane; click inside the target session",
+        ),
+        (
+            "blocked:ambiguous_or_missing_input",
+            "未找到唯一可编辑输入框",
+            "No unique editable input field found",
+        ),
+        (
+            "blocked:dictation_control_unavailable",
+            "未找到可用的听写按钮，请先切到对话输入界面",
+            "Dictation control unavailable; switch to an active chat input",
+        ),
+        (
+            "blocked:dictation_already_recording",
+            "当前已在听写中",
+            "Dictation is already recording",
+        ),
+        (
+            "blocked:dictation_finishing",
+            "听写正在结束处理中，请稍候",
+            "Dictation is still finishing; please wait",
+        ),
+        (
+            "blocked:accessibility_untrusted",
+            "缺少 macOS 辅助功能权限，按键动作已被系统拦截，请打开辅助功能设置授权",
+            "macOS Accessibility permission is required; key actions are blocked until granted in System Settings",
+        ),
+        (
+            "blocked:unconfirmed_apple_fn_release",
+            "苹果 Fn 听写键释放未确认，请点击「重试清理」",
+            "Apple Fn key release unconfirmed; click Retry Cleanup",
+        ),
+    ];
+
+    for (raw, expected_zh, expected_en) in cases {
+        let zh = localize_managed_error_detail(raw, ResolvedLocale::ZhHans);
+        let en = localize_managed_error_detail(raw, ResolvedLocale::En);
+        assert_eq!(zh, expected_zh, "zh mismatch for {raw}");
+        assert_eq!(en, expected_en, "en mismatch for {raw}");
+        assert!(!zh.contains("blocked:") && !zh.contains("unconfirmed:"));
+        assert!(!en.contains("blocked:") && !en.contains("unconfirmed:"));
+        assert_eq!(
+            relocalize_status_message(&format!("未执行 · {zh}"), ResolvedLocale::En),
+            format!("Not executed · {expected_en}")
+        );
+    }
+
+    let joined_raw = "blocked:uncleared_dictation_target_changed; unconfirmed:dictation_readback";
+    let joined_zh = localize_managed_error_detail(joined_raw, ResolvedLocale::ZhHans);
+    let joined_en = localize_managed_error_detail(joined_raw, ResolvedLocale::En);
+    assert_eq!(
+        joined_zh,
+        "上次听写所在窗口或对话已切换，请先确认原录音已停止；听写状态回读未确认，请检查原窗口是否仍在录音"
+    );
+    assert_eq!(
+        joined_en,
+        "Previous dictation window or chat changed; confirm recording stopped; Dictation state unconfirmed; check whether recording is still active"
+    );
+    assert_eq!(
+        relocalize_status_message(
+            &format!("原目标释放未确认 · {joined_zh}"),
+            ResolvedLocale::En
+        ),
+        format!("Original target release unconfirmed · {joined_en}")
+    );
+
+    for unknown in [
+        "blocked:future_unknown_code",
+        "unconfirmed:blocked:mystery_state",
+    ] {
+        let zh = localize_managed_error_detail(unknown, ResolvedLocale::ZhHans);
+        let en = localize_managed_error_detail(unknown, ResolvedLocale::En);
+        assert!(!zh.contains("blocked:") && !zh.contains("unconfirmed:"));
+        assert!(!en.contains("blocked:") && !en.contains("unconfirmed:"));
+        assert_ne!(zh, en);
+    }
+
+    let unprefixed_cases = [
+        (
+            "accessibility_untrusted",
+            "缺少 macOS 辅助功能权限，按键动作已被系统拦截，请打开辅助功能设置授权",
+            "macOS Accessibility permission is required; key actions are blocked until granted in System Settings",
+        ),
+        (
+            "apple_fn_cleanup_unconfirmed",
+            "苹果 Fn 听写键释放未确认，请点击「重试清理」",
+            "Apple Fn key release unconfirmed; click Retry Cleanup",
+        ),
+        (
+            "unconfirmed_apple_fn_release",
+            "苹果 Fn 听写键释放未确认，请点击「重试清理」",
+            "Apple Fn key release unconfirmed; click Retry Cleanup",
+        ),
+        (
+            "unsupported_agent_adapter",
+            "当前目标应用暂不支持该动作",
+            "Current target app does not support this agent action",
+        ),
+        (
+            "unsupported_dictation_adapter",
+            "当前目标应用暂不支持托管听写",
+            "Current target app does not support managed dictation",
+        ),
+        (
+            "unsupported_agent_command",
+            "当前目标应用不支持此指令",
+            "Current target app does not support this command",
+        ),
+        (
+            "session_navigation_unavailable",
+            "当前无法执行会话切换",
+            "Session navigation is currently unavailable",
+        ),
+        (
+            "subagent_picker_unavailable",
+            "当前目标应用不支持 Subagent 选择",
+            "Subagent picker is unavailable in the current app",
+        ),
+        (
+            "input_retired",
+            "按键输入已失效，未执行动作",
+            "Input event expired; action not executed",
+        ),
+        (
+            "empty_paste_text",
+            "粘贴内容为空，未执行粘贴",
+            "Paste text is empty; nothing pasted",
+        ),
+        (
+            "live_voice_readback_timeout",
+            "实时语音状态回读超时，请检查目标窗口",
+            "Live voice readback timed out; check target window",
+        ),
+        (
+            "session_navigation_retired",
+            "会话切换已取消或失效",
+            "Session navigation cancelled or expired",
+        ),
+    ];
+    for (raw, expected_zh, expected_en) in unprefixed_cases {
+        assert_eq!(
+            localize_managed_error_detail(raw, ResolvedLocale::ZhHans),
+            expected_zh,
+            "zh mismatch for unprefixed {raw}"
+        );
+        assert_eq!(
+            localize_managed_error_detail(raw, ResolvedLocale::En),
+            expected_en,
+            "en mismatch for unprefixed {raw}"
+        );
+    }
+
+    assert_eq!(
+        relocalize_status_message(
+            "会话未确认 · session_navigation_retired",
+            ResolvedLocale::ZhHans
+        ),
+        "会话未确认 · 会话切换已取消或失效"
+    );
+    assert_eq!(
+        relocalize_status_message("会话未确认 · 会话切换已取消或失效", ResolvedLocale::En),
+        "Session switch unconfirmed · Session navigation cancelled or expired"
+    );
+    assert_eq!(
+        relocalize_status_message(
+            "已切换会话 · session_selection_confirmed",
+            ResolvedLocale::ZhHans
+        ),
+        "已切换会话 · 已确认目标会话"
+    );
+    assert_eq!(
+        relocalize_status_message("已切换会话 · 已确认目标会话", ResolvedLocale::En),
+        "Switched session · Target session confirmed"
+    );
+
+    assert_eq!(
+        localize_managed_error_detail("antigravity/focus-input", ResolvedLocale::ZhHans),
+        "antigravity/focus-input"
+    );
+    assert_eq!(
+        localize_managed_error_detail("antigravity/focus-input", ResolvedLocale::En),
+        "antigravity/focus-input"
+    );
+    assert_eq!(
+        localize_managed_error_detail("未找到唯一可编辑输入框", ResolvedLocale::En),
+        "No unique editable input field found"
+    );
+
+    let (_dir, mut store, now) = active_store();
+    store.update_now = now;
+    assert!(store
+        .finish_host_cleanup(Err("accessibility_untrusted".into()))
+        .is_err());
+    store.commit_runtime_update();
+    assert_eq!(
+        store.projection().status_message,
+        "原目标释放未确认 · 缺少 macOS 辅助功能权限，按键动作已被系统拦截，请打开辅助功能设置授权"
+    );
+    assert_eq!(
+        store
+            .projection()
+            .status_menu
+            .host_caution_notice
+            .as_deref(),
+        Some("缺少 macOS 辅助功能权限，按键动作已被系统拦截，请打开辅助功能设置授权")
+    );
+    store
+        .dispatch_header_action(HeaderAction::SetUiLanguage {
+            language: mi_model::UiLanguagePreference::En,
+        })
+        .unwrap();
+    assert_eq!(
+        store.projection().status_message,
+        "Original target release unconfirmed · macOS Accessibility permission is required; key actions are blocked until granted in System Settings"
+    );
+    assert_eq!(
+        store
+            .projection()
+            .status_menu
+            .host_caution_notice
+            .as_deref(),
+        Some("macOS Accessibility permission is required; key actions are blocked until granted in System Settings")
+    );
+}
+
+#[test]
+fn transient_blocked_receipt_sets_localized_status_and_caution_clears_on_success_and_expires_on_poll(
+) {
+    let (_dir, mut store, now) = active_store();
+    store.update_now = now;
+
+    let blocked_receipt = HostActionReceipt {
+        action_type: "agent_command".into(),
+        binding_id: "AG11".into(),
+        profile_id: store.active_host_profile_id().unwrap(),
+        target: "com.google.antigravity".into(),
+        outcome: "blocked".into(),
+        detail: "blocked:uncleared_dictation_target_changed".into(),
+        text_byte_len: None,
+        timestamp_ms: 100,
+    };
+    store.apply_host_action_receipt(blocked_receipt.clone(), None, now);
+    store.commit_runtime_update();
+
+    assert_eq!(
+        store.last_host_action_receipt().unwrap().detail,
+        "blocked:uncleared_dictation_target_changed"
+    );
+    assert_eq!(
+        store.projection().status_message,
+        "未执行 · 上次听写所在窗口或对话已切换，请先确认原录音已停止"
+    );
+    assert_eq!(
+        store
+            .projection()
+            .status_menu
+            .host_caution_notice
+            .as_deref(),
+        Some("上次听写所在窗口或对话已切换，请先确认原录音已停止")
+    );
+    assert!(!store.projection().status_menu.can_retry_host_cleanup);
+    assert!(!store.projection().header.can_retry_host_cleanup);
+    assert!(
+        !store.projection().header.banner.is_caution(),
+        "transient blocked receipt must not shift main window header banner"
+    );
+
+    store
+        .dispatch_header_action(HeaderAction::SetUiLanguage {
+            language: mi_model::UiLanguagePreference::En,
+        })
+        .unwrap();
+    assert_eq!(
+        store.projection().status_message,
+        "Not executed · Previous dictation window or chat changed; confirm recording stopped"
+    );
+    assert_eq!(
+        store
+            .projection()
+            .status_menu
+            .host_caution_notice
+            .as_deref(),
+        Some("Previous dictation window or chat changed; confirm recording stopped")
+    );
+    store
+        .dispatch_header_action(HeaderAction::SetUiLanguage {
+            language: mi_model::UiLanguagePreference::ZhHans,
+        })
+        .unwrap();
+
+    let ok_receipt = HostActionReceipt {
+        action_type: "agent_command".into(),
+        binding_id: "AG08".into(),
+        profile_id: store.active_host_profile_id().unwrap(),
+        target: "com.google.antigravity".into(),
+        outcome: "executed".into(),
+        detail: "antigravity/browser".into(),
+        text_byte_len: None,
+        timestamp_ms: 200,
+    };
+    store.apply_host_action_receipt(ok_receipt, Some("AG08"), now + Duration::from_secs(1));
+    store.commit_runtime_update();
+    assert!(store.projection().status_menu.host_caution_notice.is_none());
+
+    let t_blocked = now + Duration::from_secs(2);
+    store.apply_host_action_receipt(blocked_receipt, Some("AG11"), t_blocked);
+    store.commit_runtime_update();
+    assert!(store.projection().status_menu.host_caution_notice.is_some());
+
+    assert!(!store.poll_at(t_blocked + HOST_CAUTION_TTL - Duration::from_millis(1)));
+    assert!(store.projection().status_menu.host_caution_notice.is_some());
+
+    assert!(store.poll_at(t_blocked + HOST_CAUTION_TTL));
+    assert!(store.projection().status_menu.host_caution_notice.is_none());
+
+    assert!(!store.poll_at(t_blocked + HOST_CAUTION_TTL + Duration::from_secs(1)));
+}
+
+#[test]
+fn sticky_cleanup_failure_surfaces_caution_banner_and_self_heals_via_retry_and_enable_toggle() {
+    let (_dir, mut store, now) = active_store();
+    store.update_now = now;
+
+    assert!(store
+        .finish_host_cleanup(Err("unconfirmed:dictation_target_changed".into()))
+        .is_err());
+    store.commit_runtime_update();
+
+    assert!(store.projection().status_menu.can_retry_host_cleanup);
+    assert!(store.projection().header.can_retry_host_cleanup);
+    assert_eq!(
+        store
+            .projection()
+            .status_menu
+            .host_caution_notice
+            .as_deref(),
+        Some("上次听写所在窗口或对话已切换，请先确认原录音已停止")
+    );
+    assert!(matches!(
+        &store.projection().header.banner,
+        OwnershipBannerState::Caution { reason }
+            if reason == "上次听写所在窗口或对话已切换，请先确认原录音已停止"
+    ));
+
+    assert!(!store.poll_at(now + HOST_CAUTION_TTL + Duration::from_secs(60)));
+    assert!(store.projection().status_menu.can_retry_host_cleanup);
+    assert!(store.projection().status_menu.host_caution_notice.is_some());
+
+    let transient = HostActionReceipt {
+        action_type: "agent_command".into(),
+        binding_id: "AG07".into(),
+        profile_id: store.active_host_profile_id().unwrap(),
+        target: "com.google.antigravity".into(),
+        outcome: "blocked".into(),
+        detail: "blocked:ambiguous_or_missing_input".into(),
+        text_byte_len: None,
+        timestamp_ms: 300,
+    };
+    store.apply_host_action_receipt(transient, Some("AG07"), now + Duration::from_secs(61));
+    store.commit_runtime_update();
+    assert_eq!(
+        store
+            .projection()
+            .status_menu
+            .host_caution_notice
+            .as_deref(),
+        Some("上次听写所在窗口或对话已切换，请先确认原录音已停止"),
+        "transient blocked receipt must not overwrite active sticky cleanup caution"
+    );
+
+    store
+        .dispatch_status_menu_action(StatusMenuAction::RetryHostCleanup)
+        .unwrap();
+    assert!(store.ptt_controller.cleanup_confirmed);
+    assert!(!store.projection().status_menu.can_retry_host_cleanup);
+    assert!(!store.projection().header.can_retry_host_cleanup);
+    assert!(store.projection().status_menu.host_caution_notice.is_none());
+    assert!(!store.projection().header.banner.is_caution());
+
+    assert!(store
+        .finish_host_cleanup(Err("unconfirmed:dictation_readback".into()))
+        .is_err());
+    store.commit_runtime_update();
+    assert!(store.projection().header.can_retry_host_cleanup);
+    assert!(store.projection().header.banner.is_caution());
+
+    store
+        .dispatch_header_action(HeaderAction::RetryHostCleanup)
+        .unwrap();
+    assert!(store.ptt_controller.cleanup_confirmed);
+    assert!(!store.projection().header.can_retry_host_cleanup);
+    assert!(store.projection().status_menu.host_caution_notice.is_none());
+    assert!(!store.projection().header.banner.is_caution());
+
+    assert!(store
+        .finish_host_cleanup(Err("unconfirmed:dictation_target_changed".into()))
+        .is_err());
+    store.commit_runtime_update();
+    assert!(!store.ptt_controller.cleanup_confirmed);
+    assert!(store.projection().header.can_retry_host_cleanup);
+
+    store.set_host_execution_enabled(true).unwrap();
+    assert!(store.ptt_controller.cleanup_confirmed);
+    assert!(!store.projection().header.can_retry_host_cleanup);
+    assert!(!store.projection().status_menu.can_retry_host_cleanup);
+    assert!(store.projection().status_menu.host_caution_notice.is_none());
+    assert!(!store.projection().header.banner.is_caution());
+}
+
+#[test]
+fn finish_dictation_preserves_sticky_caution_when_apple_fn_release_unconfirmed() {
+    let (_dir, mut store, now) = active_store();
+    store.update_now = now;
+    let profile_id = store.active_host_profile_id().unwrap();
+    store.held_dictation = Some(HeldDictation {
+        input: HeldInputId {
+            session_id: 9,
+            binding_id: "AG11".into(),
+        },
+        profile_id,
+        adapter: "antigravity".into(),
+    });
+    store
+        .live_executor
+        .set_unconfirmed_apple_fn_release_for_test(Some(HeldInputId {
+            session_id: 9,
+            binding_id: "AG10".into(),
+        }));
+    store.host_caution = Some(HostActionCaution {
+        detail_code: "blocked:unconfirmed_apple_fn_release".into(),
+        is_sticky_cleanup: true,
+        expires_at: None,
+    });
+    store.commit_runtime_update();
+
+    let receipt = store.finish_dictation(Ok(())).expect("dictation receipt");
+    assert!(receipt.succeeded());
+    assert!(store.held_dictation.is_none());
+    assert!(store.ptt_controller.cleanup_confirmed);
+    assert!(store.can_retry_host_cleanup());
+    assert!(store.projection().status_menu.can_retry_host_cleanup);
+    assert_eq!(
+        store
+            .projection()
+            .status_menu
+            .host_caution_notice
+            .as_deref(),
+        Some("苹果 Fn 听写键释放未确认，请点击「重试清理」")
+    );
+
+    store
+        .live_executor
+        .set_unconfirmed_apple_fn_release_for_test(None);
+    store.held_dictation = Some(HeldDictation {
+        input: HeldInputId {
+            session_id: 9,
+            binding_id: "AG11".into(),
+        },
+        profile_id: store.active_host_profile_id().unwrap(),
+        adapter: "antigravity".into(),
+    });
+    let receipt2 = store
+        .finish_dictation(Ok(()))
+        .expect("second dictation receipt");
+    assert!(receipt2.succeeded());
+    assert!(!store.can_retry_host_cleanup());
+    assert!(store.projection().status_menu.host_caution_notice.is_none());
+}
+
+#[test]
+fn radial_blocked_receipt_populates_status_menu_host_caution_notice() {
+    let (_dir, mut store, now) = active_store();
+    store.update_now = now;
+    store.set_radial_menu_enabled(true);
+    store.consume_radial_input(
+        RadialInputEvent::Position {
+            session_id: 7,
+            ingress_seq: 1,
+            sample: RadialPositionSample::new(0.0, 0.1),
+            admitted: true,
+        },
+        now,
+    );
+    store.consume_radial_input(
+        RadialInputEvent::Position {
+            session_id: 7,
+            ingress_seq: 2,
+            sample: RadialPositionSample::new(0.0, 0.9),
+            admitted: true,
+        },
+        now + Duration::from_millis(20),
+    );
+    let session = store.radial_state.session().unwrap().clone();
+    let blocked = HostActionReceipt {
+        action_type: "open_app".into(),
+        binding_id: "radial-menu".into(),
+        profile_id: session.route.profile_id.clone().unwrap(),
+        target: "test-app".into(),
+        detail: "apple_fn_cleanup_unconfirmed".into(),
+        outcome: "blocked".into(),
+        text_byte_len: None,
+        timestamp_ms: 0,
+    };
+    let receipt = store.execute_radial_intent_using(
+        &session,
+        &RadialIntent::OpenApp {
+            bundle_id: "test-app".into(),
+        },
+        |_, _| blocked.clone(),
+    );
+    store.commit_runtime_update();
+    assert_eq!(receipt.detail, "apple_fn_cleanup_unconfirmed");
+    assert_eq!(
+        store
+            .projection()
+            .status_menu
+            .host_caution_notice
+            .as_deref(),
+        Some("苹果 Fn 听写键释放未确认，请点击「重试清理」")
+    );
+}

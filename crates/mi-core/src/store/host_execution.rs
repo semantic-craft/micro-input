@@ -94,6 +94,99 @@ impl WorkbenchStore {
         let _ = self.finish_host_cleanup(stopped);
     }
 
+    pub(crate) fn can_retry_host_cleanup(&self) -> bool {
+        !self.ptt_controller.cleanup_confirmed
+            || self.live_executor.has_unconfirmed_apple_fn_release()
+            || matches!(self.system_lifecycle, SystemLifecycle::CleanupFailed(_))
+    }
+
+    pub(super) fn finalize_recovered_host_cleanup(&mut self) {
+        if self.can_retry_host_cleanup() {
+            return;
+        }
+        if self
+            .six_layer_running
+            .as_ref()
+            .is_some_and(|running| running.is_retired())
+        {
+            self.six_layer_running = None;
+            self.six_layer_view = None;
+        }
+        self.six_layer_auto_resume_attempts = 0;
+        self.six_layer_next_auto_resume_at = None;
+        self.try_auto_resume_six_layer(self.update_now);
+    }
+
+    pub fn retry_host_cleanup(&mut self) {
+        let had_held_dictation = self.held_dictation.is_some();
+        let stopped = self.live_executor.stop_owned_actions();
+        let ok = self.finish_host_cleanup(stopped).is_ok();
+        if ok && !had_held_dictation {
+            self.status_message = "已完成宿主动作清理".to_string();
+        }
+        self.finalize_recovered_host_cleanup();
+        self.commit_runtime_update();
+    }
+
+    pub(super) fn update_host_caution_from_receipt(
+        &mut self,
+        receipt: &HostActionReceipt,
+        now: Instant,
+    ) {
+        if receipt.succeeded() {
+            if self
+                .host_caution
+                .as_ref()
+                .is_some_and(|c| !c.is_sticky_cleanup)
+            {
+                self.host_caution = None;
+            }
+        } else if receipt.outcome != "simulated" {
+            let sticky_active = self
+                .host_caution
+                .as_ref()
+                .is_some_and(|c| c.is_sticky_cleanup);
+            if !sticky_active {
+                self.host_caution = Some(HostActionCaution {
+                    detail_code: receipt.detail.clone(),
+                    is_sticky_cleanup: false,
+                    expires_at: Some(now + HOST_CAUTION_TTL),
+                });
+            }
+        }
+    }
+
+    pub(super) fn apply_host_action_receipt(
+        &mut self,
+        receipt: HostActionReceipt,
+        binding_prefix: Option<&str>,
+        now: Instant,
+    ) {
+        let localized_detail = crate::i18n::localize_managed_error_detail(
+            &receipt.detail,
+            mi_model::ResolvedLocale::ZhHans,
+        );
+        self.status_message = if let Some(binding_id) = binding_prefix {
+            if receipt.succeeded() {
+                format!("已触发 {binding_id} · {localized_detail}")
+            } else {
+                format!("未执行 {binding_id} · {localized_detail}")
+            }
+        } else {
+            format!(
+                "{} · {}",
+                match receipt.outcome.as_str() {
+                    "unconfirmed" => "动作读回未确认",
+                    _ if receipt.succeeded() => "已执行",
+                    _ => "未执行",
+                },
+                localized_detail
+            )
+        };
+        self.update_host_caution_from_receipt(&receipt, now);
+        self.record_host_action_receipt(receipt);
+    }
+
     pub(super) fn finish_host_cleanup(
         &mut self,
         stopped: Result<(), String>,
@@ -104,8 +197,37 @@ impl WorkbenchStore {
             self.ptt_controller.cancel();
             self.ptt_controller.cleanup_confirmed = stopped.is_ok();
         }
-        if let Err(error) = &stopped {
-            self.status_message = format!("原目标释放未确认 · {error}");
+        match &stopped {
+            Ok(()) => {
+                if self.lifecycle_cleanup.is_none()
+                    && !self.live_executor.has_unconfirmed_apple_fn_release()
+                    && matches!(self.system_lifecycle, SystemLifecycle::CleanupFailed(_))
+                {
+                    self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
+                    self.system_lifecycle = SystemLifecycle::Awake;
+                    self.v070_hardware.set_host_sleep_status("awake");
+                }
+                if !self.can_retry_host_cleanup()
+                    && self
+                        .host_caution
+                        .as_ref()
+                        .is_some_and(|c| c.is_sticky_cleanup)
+                {
+                    self.host_caution = None;
+                }
+            }
+            Err(error) => {
+                self.host_caution = Some(HostActionCaution {
+                    detail_code: error.clone(),
+                    is_sticky_cleanup: true,
+                    expires_at: None,
+                });
+                let localized = crate::i18n::localize_managed_error_detail(
+                    error,
+                    mi_model::ResolvedLocale::ZhHans,
+                );
+                self.status_message = format!("原目标释放未确认 · {localized}");
+            }
         }
         stopped
     }
@@ -117,18 +239,39 @@ impl WorkbenchStore {
         let held = self.held_dictation.as_ref()?.clone();
         self.ptt_controller.cancel();
         self.ptt_controller.cleanup_confirmed = stopped.is_ok();
-        let (outcome, detail) = match stopped {
+        let (outcome, detail, status_message) = match stopped {
             Ok(()) => {
                 self.held_dictation = None;
+                if !self.can_retry_host_cleanup()
+                    && self
+                        .host_caution
+                        .as_ref()
+                        .is_some_and(|c| c.is_sticky_cleanup)
+                {
+                    self.host_caution = None;
+                }
+                let msg = format!(
+                    "已结束原目标听写 ({}, {})",
+                    held.input.binding_id, held.adapter
+                );
+                ("executed", msg.clone(), msg)
+            }
+            Err(error) => {
+                self.host_caution = Some(HostActionCaution {
+                    detail_code: error.clone(),
+                    is_sticky_cleanup: true,
+                    expires_at: None,
+                });
+                let localized = crate::i18n::localize_managed_error_detail(
+                    &error,
+                    mi_model::ResolvedLocale::ZhHans,
+                );
                 (
-                    "executed",
-                    format!(
-                        "已结束原目标听写 ({}, {})",
-                        held.input.binding_id, held.adapter
-                    ),
+                    "unconfirmed",
+                    format!("原目标听写停止未确认 · {error}"),
+                    format!("原目标听写停止未确认 · {localized}"),
                 )
             }
-            Err(error) => ("unconfirmed", format!("原目标听写停止未确认 · {error}")),
         };
         let receipt = HostActionReceipt {
             action_type: "agent_command".into(),
@@ -136,11 +279,11 @@ impl WorkbenchStore {
             profile_id: held.profile_id,
             target: held.adapter,
             outcome: outcome.into(),
-            detail: detail.clone(),
+            detail,
             text_byte_len: None,
             timestamp_ms: 0,
         };
-        self.status_message = detail;
+        self.status_message = status_message;
         self.record_host_action_receipt(receipt.clone());
         self.commit_runtime_update();
         Some(receipt)
@@ -710,7 +853,20 @@ impl WorkbenchStore {
                     binding_id: binding_id.clone(),
                 };
                 if let Some(receipt) = self.live_executor.handle_apple_fn_release(&input) {
-                    self.status_message = format!("已释放 {} · {}", binding_id, receipt.detail);
+                    let localized_detail = crate::i18n::localize_managed_error_detail(
+                        &receipt.detail,
+                        mi_model::ResolvedLocale::ZhHans,
+                    );
+                    self.status_message = format!("已释放 {binding_id} · {localized_detail}");
+                    if self.live_executor.has_unconfirmed_apple_fn_release() {
+                        self.host_caution = Some(HostActionCaution {
+                            detail_code: "blocked:unconfirmed_apple_fn_release".into(),
+                            is_sticky_cleanup: true,
+                            expires_at: None,
+                        });
+                    } else {
+                        self.update_host_caution_from_receipt(&receipt, now);
+                    }
                     self.record_host_action_receipt(receipt.clone());
                     self.commit_runtime_update();
                     return Some(receipt);
@@ -948,8 +1104,8 @@ impl WorkbenchStore {
                     profile_id,
                     target,
                 ) {
-                    self.status_message = format!("已触发 {} · {}", binding_id, receipt.detail);
-                    self.record_host_action_receipt(receipt.clone());
+                    let now = self.update_now;
+                    self.apply_host_action_receipt(receipt.clone(), Some(binding_id), now);
                     if commit {
                         self.commit_runtime_update();
                     }
@@ -1038,11 +1194,24 @@ impl WorkbenchStore {
                     text_byte_len: None,
                     timestamp_ms: 0,
                 };
+                let localized_detail = crate::i18n::localize_managed_error_detail(
+                    &detail,
+                    mi_model::ResolvedLocale::ZhHans,
+                );
                 self.status_message = if self.ptt_controller.is_active {
                     format!("正在按住语音 ({binding_id})…")
                 } else {
-                    format!("听写未启动 · {detail}")
+                    format!("听写未启动 · {localized_detail}")
                 };
+                if uncertain {
+                    self.host_caution = Some(HostActionCaution {
+                        detail_code: receipt.detail.clone(),
+                        is_sticky_cleanup: true,
+                        expires_at: None,
+                    });
+                } else {
+                    self.update_host_caution_from_receipt(&receipt, self.update_now);
+                }
                 self.record_host_action_receipt(receipt.clone());
                 if commit {
                     self.commit_runtime_update();
@@ -1067,12 +1236,8 @@ impl WorkbenchStore {
             }
         }
 
-        self.status_message = if receipt.succeeded() {
-            format!("已触发 {} · {}", binding_id, receipt.detail)
-        } else {
-            format!("未执行 {} · {}", binding_id, receipt.detail)
-        };
-        self.record_host_action_receipt(receipt.clone());
+        let now = self.update_now;
+        self.apply_host_action_receipt(receipt.clone(), Some(binding_id), now);
         if commit {
             self.commit_runtime_update();
         }

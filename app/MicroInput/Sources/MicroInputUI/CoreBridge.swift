@@ -402,7 +402,7 @@ private struct HeaderDTO: Decodable {
     let engineVersion, preferredDeviceSerial, uiLanguage, resolvedLocale: String?
     let readyState: ReadyStateDTO?
     let banner: BannerDTO?
-    let showConnectButton, showReturnToHostButton, hostExecutionEnabled, accessibilityTrusted: Bool?
+    let showConnectButton, showReturnToHostButton, hostExecutionEnabled, accessibilityTrusted, canRetryHostCleanup: Bool?
     let canEditDraft, canUndo, canRedo, busy, silentAtLogin: Bool?
     let powerStatus: PowerStatusDTO?
     let candidateDevices: [CandidateDeviceDTO]?
@@ -419,6 +419,7 @@ private struct HeaderDTO: Decodable {
         m.showReturnToHostButton = showReturnToHostButton ?? false
         m.hostExecutionEnabled = hostExecutionEnabled ?? false
         m.accessibilityTrusted = accessibilityTrusted ?? true
+        m.canRetryHostCleanup = canRetryHostCleanup ?? false
         m.canEditDraft = canEditDraft ?? true
         m.canUndo = canUndo ?? false
         m.canRedo = canRedo ?? false
@@ -734,8 +735,8 @@ private struct CheatSheetDTO: Decodable {
 private struct StatusMenuDTO: Decodable {
     struct PendingImportDTO: Decodable { let name, scope: String?; let containsCompleteArchive: Bool?; let profileCount, layerCount, actionCount: Int? }
     struct FavoriteDTO: Decodable { let slot: Int?; let profileId, title: String?; let isActive: Bool? }
-    let activeProfileName, routingModeSummary, lockedProfileId, competingHostNotice, radialConfirmMode, presetError, preferredDeviceSerial: String?
-    let isProfileLocked, accessibilityTrusted, radialMenuEnabled, lightingEnabled, cheatSheetVisible: Bool?
+    let activeProfileName, routingModeSummary, lockedProfileId, competingHostNotice, hostCautionNotice, radialConfirmMode, presetError, preferredDeviceSerial: String?
+    let isProfileLocked, accessibilityTrusted, canRetryHostCleanup, radialMenuEnabled, lightingEnabled, cheatSheetVisible: Bool?
     let cheatSheetPreview: CheatSheetDTO?; let pendingImport: PendingImportDTO?
     let powerStatus: PowerStatusDTO?; let candidateDevices: [CandidateDeviceDTO]?; let favorites2X2: [FavoriteDTO]?
 
@@ -746,6 +747,8 @@ private struct StatusMenuDTO: Decodable {
         m.lockedProfileId = lockedProfileId ?? m.lockedProfileId
         if !hasHeader, let trusted = accessibilityTrusted { m.accessibilityTrusted = trusted }
         m.competingHostNotice = competingHostNotice
+        m.hostCautionNotice = hostCautionNotice
+        if !hasHeader, let retry = canRetryHostCleanup { m.canRetryHostCleanup = retry }
         m.radialMenuEnabled = radialMenuEnabled ?? false
         m.radialConfirmMode = radialConfirmMode ?? "encoder_press"
         m.lightingEnabled = lightingEnabled ?? true

@@ -790,12 +790,12 @@ public struct PopoverActionRow: View {
 
 @MainActor
 public enum StatusItemIcon {
-    private static let zhHansIcon = build(locale: .zhHans)
-    private static let enIcon = build(locale: .en)
+    private static let zhNormal = build(locale: .zhHans, hasCaution: false), enNormal = build(locale: .en, hasCaution: false)
+    private static let zhCaution = build(locale: .zhHans, hasCaution: true), enCaution = build(locale: .en, hasCaution: true)
 
-    public static func make(locale: ResolvedLocale = .zhHans) -> NSImage { locale == .en ? enIcon : zhHansIcon }
+    public static func make(locale: ResolvedLocale = .zhHans, hasCaution: Bool = false) -> NSImage { hasCaution ? (locale == .en ? enCaution : zhCaution) : (locale == .en ? enNormal : zhNormal) }
 
-    private static func build(locale: ResolvedLocale) -> NSImage {
+    private static func build(locale: ResolvedLocale, hasCaution: Bool) -> NSImage {
         let image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
             NSColor.black.set()
             let strokePath: (NSBezierPath, CGFloat) -> Void = { $0.lineWidth = $1; $0.stroke() }
@@ -807,10 +807,16 @@ public enum StatusItemIcon {
             fillRect(5, 4.5, 7.5, 1.25, 0.4)
             strokePath(NSBezierPath(ovalIn: NSRect(x: 14, y: 10, width: 3, height: 3)), 1)
             fillRect(14.5, 5, 2, 3, 0.4)
+            if hasCaution {
+                NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
+                NSBezierPath(ovalIn: NSRect(x: 14.25, y: 11.75, width: 5.75, height: 5.75)).fill()
+                NSGraphicsContext.current?.cgContext.setBlendMode(.normal); NSColor.black.set()
+                NSBezierPath(ovalIn: NSRect(x: 15.25, y: 12.75, width: 3.75, height: 3.75)).fill()
+            }
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = locale == .en ? "Micro Input Keypad" : "Micro Input 键盘"
+        image.accessibilityDescription = locale == .en ? (hasCaution ? "Micro Input Keypad (Attention Needed)" : "Micro Input Keypad") : (hasCaution ? "Micro Input 键盘（需关注）" : "Micro Input 键盘")
         return image
     }
 }

@@ -455,6 +455,7 @@ public enum L10n {
         "这一层尚未分配应用": "No Profile Assigned to This Layer",
         "在应用方案中分配后，即可查看与编辑对应按键。": "Assign a profile in Profiles to view and edit its keys.",
         "授权辅助功能": "Grant Accessibility",
+        "重试清理": "Retry Cleanup",
         "重新检测键盘": "Detect Keyboard",
         "开启按键映射": "Enable Key Mapping",
         "左旋": "CCW",

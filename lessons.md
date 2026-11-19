@@ -1,5 +1,11 @@
 # 项目教训
 
+## 听写租约须以容器身份核销、与非听写控制解耦，并通过常驻菜单栏告警提供清理重试
+
+- 起因与后果：在 Antigravity / DSH 等单窗口 Electron 应用中启动语音听写后，切换会话或自动生成标题会原地改写 `AXWindow.AXTitle`；旧版 `uncleared_targets` 按完整 `ManagedWindowIdentity`（含易变标题）比较，且 `capture_window_for_key` / `capture_full_window_for_key` 复制了听写租约检查，导致用户手动停录或切会话后不仅语音键与发送键报 `blocked:uncleared_dictation_target_changed`，连旋钮模型选择、内置浏览器与侧栏开关也被一并锁死，关闭重开映射触发 `stop_owned_dictations()` 时又因 `CapturedWindow::validate` 严格比对旧标题返回 `blocked:target_window_changed` / `unconfirmed:dictation_target_changed` 形成死锁；同时 `mi-core` 将原始 `blocked:`/`unconfirmed:` 令牌直接写入窗口底栏且缺乏菜单栏常驻提示与手动重试入口，主窗收起时用户无从感知与自愈。
+- 修复：`crates/mi-macos/src/managed_controls.rs` 与 `crates/mi-macos/src/native_ax.rs` 将听写租约收敛到 `DictationLeaseRegistry`，按容器身份（`bundle_id + pid + window_id + scope_id`）匹配并在同容器读回明确 `Idle` 时零按压核销陈旧租约，保持活动录音或 `Finishing` 状态标题变化时的保守拒绝，同时将非听写控制（模型选择器、子智能体选择器、内置浏览器、侧栏开关）与听写租约解耦；`crates/mi-core/src/i18n.rs` 与 `crates/mi-core/src/store/` 统一本地化受管错误（零 `blocked:`/`unconfirmed:` 泄漏），新增 12 秒瞬态与粘性清理两级 `HostActionCaution`、菜单栏状态图标角标与卡片、主工作台横幅及 `RetryHostCleanup` / 重新开启按键映射自愈路径。
+- 验证点：`crates/mi-macos/tests/managed_controls.rs` 与 `native_ax.rs` 覆盖标题漂移后空闲自动核销、非听写控制解耦、活动录音及 Codex `Finishing` 标题变化保守拒绝与纯容器过滤；`crates/mi-core/src/store/runtime_consistency_tests.rs` 覆盖 `localize_managed_error_detail` 中英文及分号拼接、瞬态告警 TTL 过期与成功清除、粘性清理告警经 `RetryHostCleanup` 与 `set_host_execution_enabled(true)` 自愈；`app/MicroInput/Tests/MicroInputTests/MicroInputTests.swift` 覆盖 `StatusItemIcon` 4 态缓存与 `StatusMenuSliceModel` 切片隔离；全量通过 `scripts/check` 与 `scripts/verify-offline` 并更新 Developer ID 签名的 `/Applications/Micro Input.app` 实机核验。Seen 1x（2026-11-20）。
+
 ## Antigravity 2.33 AX 控件扫描必须剪枝客体 WebContentsView 并以标题锚点隔离对话正文
 
 - 起因与后果：将 Antigravity `browser` 动作从 `Cmd+Shift+B` 升级为受管 AX 直达内置浏览器时，在实机 Antigravity 2.33.0 暴露两处 DOM/AX 差异：其一，Electron 的 `wcvBrowserRegistry` 即使在右侧栏折叠时也会将客体浏览器 `WebContentsView` 与 `catcherWcv` 作为同级 `AXWebArea` 挂在 `AXWindow` 下，不剪枝会把客体网页内的 `<textarea>` 或同名按钮混入控件扫描，破坏聊天输入框唯一性并带来网页伪造风险；其二，2.33.0 中 `aria-label="Conversation turns"` 仅为左侧导航圆点轨（与正文同级而非祖先），实际对话正文位于无标签 `AXGroup`（直系子 `AXHeading` 为 `"Conversation Log" | "Agent said" | "Agent working" | "You said"`），代码块 `"Preview"` 则位于 `AXGroup("Markdown view mode")`，仅按旧祖先标签过滤会漏放正文内的同名按钮。
