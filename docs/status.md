@@ -4,8 +4,8 @@
 
 ## 当前版本与架构基线
 
-- **最新发行标签**：[v0.11.1](releases/v0.11.1.md)（`CFBundleShortVersionString = 0.11.1`；历次发行说明归档于 [releases/](releases/v0.11.1.md)）。
-- **主线演进（v0.11.1 基线）**：在 v0.11.0 架构收口基础上合入安全加固（`private_fs` `O_NOFOLLOW` 文件描述符权限与属主核验、`app_cache` 安全应用包解析、`mi-session` / `six_layer_runtime` 私有原子备份及 `qa_runner` / `scripts/run` 隔离加固），以及 QA 临时包 TCC 重置与公证策略门禁接入。
+- **最新发行标签**：[v0.11.2](releases/v0.11.2.md)（`CFBundleShortVersionString = 0.11.2`；历次发行说明归档于 [releases/](releases/v0.11.2.md)）。
+- **主线演进（v0.11.2 基线）**：在 v0.11.1 安全加固基线上合入 Antigravity 内置浏览器直达受控 AX 流程与访客 `WebContentsView` 剪枝（`e9416e8`），以及听写租约容器化对账、非听写控件解耦、受控 AX 错误中英本地化与菜单栏警示/重试清理恢复链路（PR #165）。
 - **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C14`。
 
 ## 已实现与已验证能力
