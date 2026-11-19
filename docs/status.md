@@ -42,6 +42,6 @@ MI_AUTO_HOST_READY=0 scripts/verify-offline  # 全量检查 + 6 个隔离合成 
 ```
 
 - **已知代码与硬件边界**（合并与离线通过不替代以下验收）：
-  - **灯光模态框预览入口**：工作台 `LightingBeginPreview` 当前只更新界面预览计时状态，尚未接入物理设备 `lights.preview` 发送（会话层已有独立原语与合成验证，见 [模块契约](module-contracts.md#rgb-编辑与合成预览)）。
+  - **灯光模态框预览入口**：工作台到会话层 `Preview::begin_native` 的实时预览接线（含 `LightingPreviewState`、`VendorBridgePreviewLease` 冲突抑制及关闭/切换/断连/睡眠排空）已在源码与离线测试收口（见 [模块契约](module-contracts.md#rgb-编辑与合成预览)）；实体物理 LED 视觉验收与结束预览后的运行态回读/自动恢复边界（[#24](https://github.com/semantic-craft/micro-input/issues/24) / [#44](https://github.com/semantic-craft/micro-input/issues/44)）仍属实机验收范围，不以协议 ACK 替代。
   - **BLE 传输**：Vendor `0xFF00` 配置读写与写 Flash 当前仅对 USB（`TransportHint::Usb`）放行；蓝牙模式仅作正常 HID 键盘/鼠标工作，写键位或更新参数需插线走 USB。
   - **实机持续验收**：[#44](https://github.com/semantic-craft/micro-input/issues/44) 的完整端到端实体按键、多屏、灯光视觉与各宿主应用升级后的回归继续按 [开发与验证入口](development.md)、[实机验收准备](designs/hardware-acceptance.md)、[桌面控制验收](verification/desktop-agent-controls.md) 与 [听写验收](verification/push-to-talk.md) 登记。

@@ -649,6 +649,19 @@ struct LightingEditorSheet: View {
                 .surfaceButton(.ghost)
                 Spacer()
                 if model.hasLighting {
+                    Button(
+                        model.previewActive
+                            ? (store.locale == .en
+                                ? "Stop Preview (\(model.previewRemainingSecs)s)"
+                                : "停止预览 (\(model.previewRemainingSecs)s)")
+                            : store.tr("在键盘上预览")
+                    ) {
+                        store.dispatch(
+                            "editor",
+                            model.previewActive ? "LightingEndPreview" : "LightingBeginPreview"
+                        )
+                    }
+                    .surfaceButton(.secondary)
                     Button(store.tr("完成")) {
                         store.dispatch("editor", "CloseModal")
                     }
