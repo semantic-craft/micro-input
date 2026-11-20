@@ -1,12 +1,12 @@
 # Micro Input
 
-[简体中文](#简体中文) · [English](#english) · [开发状态与历史验收日志](docs/status.md)
+[简体中文](#简体中文) · [English](#english) · [最新发行版 v0.11.4](docs/releases/v0.11.4.md) · [开发状态与历史验收日志](docs/status.md)
 
 ## 简体中文
 
 面向 macOS 开发者的独立 AI Coding 工作台与 **Work Louder Creator Micro 2** 原生配置器。哪怕手头没有 Creator Micro 2，仓库里已经跑通的本机 **Antigravity** 状态解析与低延迟辅助功能控制链依然与硬件协议完全解耦，可以直接帮你为自己桌面上的 QMK 或 VIA 键盘、Stream Deck、Loupedeck、多键鼠标、语音脚踏板或 DIY 控制器开发 Antigravity 联动功能，同时也能不接硬件直接运行软件查看与直达会话；而接上 Creator Micro 2 后，它则一站取代官方 `Input.app` 与固定插件，覆盖通用键位映射、安全固件升级、Antigravity 深度控制与可自定义 Codex 交互。
 
-Micro Input 采用纯 Rust 内核、极简 C-ABI 边界与原生 SwiftUI 和 AppKit 薄壳架构，安装版完整包体为 26 MB，遵循 [MIT 许可证](LICENSE)。它不依赖 Electron，不在未确认硬件状态时静默改写设备 Flash，也不在文档中隐瞒尚未验证的固件能力。
+Micro Input 采用纯 Rust 内核、极简 C-ABI 边界与原生 SwiftUI 和 AppKit 薄壳架构，已通过 Apple 公证的安装版完整包体为 18 MB（发布压缩包 8.5 MB），遵循 [MIT 许可证](LICENSE)。它不依赖 Electron，不在未确认硬件状态时静默改写设备 Flash，也不在文档中隐瞒尚未验证的固件能力。
 
 ### 谁能用上 Micro Input
 
@@ -29,13 +29,13 @@ Creator Micro 2 配备 13 个机械开关、1 个旋钮与 1 个摇杆共 20 个
 
 Micro Input 一方面在 macOS 上完整接管日常配置、通用快捷键映射与官方固件升级，另一方面把这块左手边的小键盘改造成可按工作流定制的**独立物理控制台**。
 
-- **接管日常按键配置与最新固件更新，不必再依赖 Electron 版官方软件。** 支持 281 项设备硬件键码、系统快捷键与苹果专属 `Fn` 语音键录制、本地宏、文本指令安全粘贴、桌面鼠标控制及两区灯光配置预览，并可直接下载、校验并安全刷入含 `0.7.0-rc.16` 在内的官方最新固件，解锁板载硬件鼠标与无写 Flash 切层。
+- **接管日常按键配置与最新固件更新，不必再依赖 Electron 版官方软件。** 支持 281 项设备硬件键码、系统快捷键与苹果专属 `Fn` 语音键录制、本地宏、文本指令安全粘贴、桌面鼠标控制及直连键盘原生 `lights.preview` 的两区实时灯效预览，并可直接下载、校验并安全刷入含 `0.7.0-rc.16` 在内的官方最新固件，解锁板载硬件鼠标与无写 Flash 切层。
 - **从盲按快捷键变成带余光感知的副屏。** 顶部机械键承担后台 Agent 会话状态指示与一键直达，不用频繁切换编辑窗口或扫视侧边栏，仅靠键帽灯光颜色就能掌握推理与完成进度。
 - **突破原生插件限制，按个人习惯重塑 Codex 与多 Agent 手感。** 针对 **Antigravity** 打磨全套物理键位与零弹窗直达链路，同时接管并扩展固定死的官方 **Codex** 插件，允许自由重绑所有 20 个控制位，并与 **Deepseek Harness**、**Herdr** 及「其他软件」共用同一套稳健路由。
 
 #### 专为 Antigravity 优化的物理工作流
 
-- **开箱即用的 Antigravity 全键位映射。** 顶部 6 键（`AG00–AG05`）对应会话状态槽位与绿/蓝逐键状态灯；下排 7 键（`AG06–AG12`）预置为 Gemini Live 实时语音、聚焦当前输入框、打开内置浏览器、打开 Side Question、在项目中新建会话、按住说话与先停听写再发送消息；右上角摇杆采用四向扇区（上/下滚动对话、左划打开右边栏、右划关闭右边栏）。
+- **开箱即用的 Antigravity 全键位映射。** 顶部 6 键（`AG00–AG05`）对应会话状态槽位与绿/蓝逐键状态灯；下排 7 键（`AG06–AG12`）预置为 Gemini Live 实时语音、聚焦当前输入框、受控 AX 直达内置浏览器（自动展开侧栏、清理旧搜索词并剪除访客 `WebContentsView` 噪音节点）、打开 Side Question、在项目中新建会话、按住说话与先停听写再发送消息；右上角摇杆采用四向扇区（上/下滚动对话、左划打开右边栏、右划关闭右边栏）。
 - **物理键帽同步真实未读状态。** 顶部状态键按上述过滤规则只跟踪顶层主会话，运行中呼吸绿光，超过 15 分钟仍保留未读海洋蓝状态灯，直到你在前台窗口实际打开对应 `/c/<cid>` 会话后自动熄灯，单按槽位即通过侧栏直达。
 - **围绕语音与选模型重构的硬件操控。** 直接旋转旋钮即可在 Antigravity 内原位展开并切换模型与推理档位，按下或长按旋钮直接搜索会话（`Cmd+K`），无需先聚焦输入框或抬手点选菜单。底行中键合并为 2U 宽键后适合连续口述代码需求，并由底层防抖确保松开最后一侧微动才停录，也可随时拆回两颗 1U 按键分别承担新建会话与按住说话。
 - **跟手且零侵入的辅助功能执行。** 所有 Antigravity 集成均基于可观测界面与辅助功能实现，不向宿主应用打 `.patch` 补丁，并在 Antigravity 2.31.0 下把 release 构建聚焦输入框中位耗时压至 284.3 ms，让单键切换窗口和输入几乎感受不到等待。
@@ -56,8 +56,8 @@ Micro Input 一方面在 macOS 上完整接管日常配置、通用快捷键映�
 除了补足通用键位工具在多 Agent 场景上的短板，项目从一开始确立了三条工程边界。
 
 - **原生链路与最小接口。** 协议分帧、配置模型、本地文档、设备会话与 macOS 宿主执行全部收拢在 7 个核心 Rust crate 中，分别为 `mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos` 和 `mi-core`。`crates/mi-ffi` 通过 9 个 `extern "C"` 导出函数驱动由 13 个 Swift 源文件构成的原生长驻界面。
-- **把未知和边界写到台面上。** 未穷尽的固件行为和待实机验证项全部登记在 [UNKNOWNS](docs/spec/UNKNOWNS.md)。`scripts/check-boundaries.py` 在每次检查时强制核验 `R-C01` 至 `R-C14` 静态门禁，确保生产只读退出路径不被绕过，合成测试通过绝不冒充实体按键通过。
-- **宁可拒绝写入，绝不静默毁坏配置。** 设备读取、本地草稿、基线快照与真实写入严格分离。配置应用和固件刷写前必须保存完整原字节备份与 `fsync` 操作记录，写入后逐字节读回核对一致才标记完成。
+- **把未知和边界写到台面上。** 未穷尽的固件行为和待实机验证项全部登记在 [UNKNOWNS](docs/spec/UNKNOWNS.md)。`scripts/check-boundaries.py` 在每次检查时强制核验 `R-C01` 至 `R-C15` 静态门禁与公证路径卫生检查，确保生产只读退出路径、安全文件权限与防误触约束不被绕过，合成测试通过绝不冒充实体按键通过。
+- **宁可拒绝写入，绝不静默毁坏配置。** 设备读取、本地草稿、基线快照与真实写入严格分离。本地私有配置与恢复备份经 `private_fs` 以 `O_NOFOLLOW` 文件描述符核验属主与 `0700`/`0600` 权限，配置应用和固件刷写前必须保存完整原字节备份与 `fsync` 操作记录，写入后逐字节读回核对一致才标记完成。
 
 ### 结合同类项目的工程取舍
 
@@ -81,16 +81,16 @@ Micro Input 针对每个关键子系统吸收了同类开源项目的成熟结�
 - **旋钮的多手势与模型选择器。** 除常规按键映射外，`encoder_model_picker.rs` 实现了完整的多阶段手势状态机。在桌面 Agent 方案下，直接左右旋转旋钮即可不抢输入框焦点原位展开模型列表并切换模型，随后水平轻扫鼠标或左右拨动摇杆调节推理力度，短按旋钮确认选择；无活跃弹层时无论短按或长按旋钮均统一打开会话搜索（`Cmd+K`）并进入旋钮选会话；按住旋钮同时旋转触发快速滚动，闲置 12 秒自动退出。工作台内建 6 套旋钮与摇杆组合预设，覆盖模型选择、Working 与未读会话轮询、双滚轮、对话滚动、推理档位和硬件鼠标模式。
 - **摇杆按层混合运行。** 在软件模式中，摇杆驱动不抢焦点的 8 向极坐标「轮盘菜单」，必须先回中再拨动选区，支持旋钮按下确认或摇杆回弹确认，慢速回中则取消。升级至官方 `0.7.0-rc.16` 预发布固件后，六层方案按层分配硬件摇杆模式：`Codex`（第 1 层）与 `Deepseek Harness`（第 3 层）默认采用原生高响应 `MOUSE` 模式（支持 `Precise`、`Slow`、`Standard`、`Fast` 四档预设、13 项 `mouse.config` 曲线参数、默认 `0.15` 防漂移死区调校与脱机 `MS_*` 鼠标键码），而 `Antigravity`（第 2 层）默认保持四向 `RADIAL` 扇区用于对话滚动与右边栏开关。
 - **底排双微动自由切换 1U+1U 与 2U 宽键。** 针对底行左中两个微动开关 `AG10` 与 `AG11`，主机偏好支持随时在拆成两个 1U 按键与合并为 2U 宽键之间切换。合并模式下通过 `WideKeyMerger` 对双微动按位掩码去重，直到最后一个微动松开才结束按住手势，避免并排开关触发微差导致的误松手。
-- **六层物理共存与逐键状态灯。** 第 1 层完整保留 20 个控制位的 `Codex · Micro Input` 本机控制，同时通过 `SharedVendorBridge` 将第 2、3 层顶部按键映射为 `KV_OAI_AG06` 至 `KV_OAI_AG17` 专属通道。这些机械键帽直接作为 AI 会话状态指示灯使用，运行中呼吸绿光，完成待查看常亮海洋蓝光，阅读后自动熄灭，并且只以固件 `v.oai.thstatus` 总线真实 ACK 确认同步状态，在到达 900 次请求边界前自动预轮转会话。
+- **六层物理共存、逐键状态灯与实时硬件灯光预览。** 第 1 层完整保留 20 个控制位的 `Codex · Micro Input` 本机控制，同时通过 `VendorBridge` 将第 2、3 层顶部按键映射为 `KV_OAI_AG06` 至 `KV_OAI_AG17` 专属通道，以固件 `v.oai.thstatus` 总线真实 ACK 确认呼吸绿光与海洋蓝未读灯效并在 900 次请求边界前自动预轮转。双区 RGB 弹窗中的「在键盘上预览」通过 `LightingPreviewState` 状态机与 RAII `VendorBridgePreviewLease` 接入原生 `Preview::begin_native`（支持 `0.6.3` 与 `0.7.0*`），预览期间抑制后台状态灯、排队 v0.7.0 命令与会话轮转同时保持物理按键畅通，关闭、切换上下文、断连、休眠或 30 秒到期时自动排空停止且不写入 Flash。
 - **无写 Flash 实时切层、电源读取与安全刷机机制。** 在 `0.7.0-rc.16` 及以上固件通过 `kb.pl.set` 实现不磨损 Flash 的即时切层，保持 `keymap.json` SHA-1 不变，并通过 `device.status`、`pm.config` 与 `pm.state` 读取电池电量和随主机休眠配置。ESP32-S3 串口更新器在写入前校验官方 SHA-256 摘要，先保存完整 16 MB Flash 备份并解析 `0x8000` 分区表，确认保留 `nvs` 与 `fs` 用户分区后再写入与重连读回核对，不做整片擦除与盲目重试。
 
 ### 面向每日编码的实用细节
 
 - **开箱即用的 4+1 应用预设。** 以 Antigravity 为主要工作台预设，同时提供可自由定制的 **Codex**、**Deepseek Harness** 与 **Herdr** 三套 Agent 方案，外加通配任意应用的「其他软件」方案，默认将底部中键映射为 macOS 原生 `Fn` 听写键，支持在工作台内联录制快捷键。外部应用全部基于原生辅助功能或公开接口适配，零第三方 `.patch` 补丁。
 - **不打断肌肉记忆的路由规则。** 项目依据 `R-C11` 退役了容易误触发的「跟随前台应用自动切方案」，改由六层板载路由、菜单栏手动选择和「锁定当前方案」决定当前生效目标，浏览和编辑本地草稿都不会更改运行中的键位归属。
-- **状态可核验的语音听写。** 区分「按住说话，松开停止」与 Codex「点击听写」两种手势。按住模式具备 120 秒安全上限与原窗口、原输入框锁，确认进入录音状态才标记录音中，松开、断连或睡眠沿同一执行器清理。点击听写会等待转写完成后再发送消息；若停止结果无法确认，系统立即阻止后续触发并在菜单栏提供只读状态复核入口。
+- **状态可核验且防漂移锁死的语音听写。** 区分「按住说话，松开停止」与 Codex「点击听写」两种手势。`DictationLeaseRegistry` 按窗口容器身份（`bundle_id + pid + window_id + scope_id`）追踪听写租约，在 Antigravity 切换对话导致窗口标题变化后，若只读核验已回落 `Idle` 即零按压自动核销，且旋钮选模型、内置浏览器、侧栏与 Subagent 选择等非听写控件完全与听写护栏解耦。按住模式具备 120 秒安全上限与原目标锁，点击听写等待转写完成后提交；若宿主清理无法确认，菜单栏常驻图标与弹层立即展示本地化警示卡并提供一键「重试清理」。
 - **多窗口焦点隔离与 50 步往返导航。** 在 Antigravity 零弹窗跳转之外，Codex 等多窗口桌面应用也会锁定当前焦点窗口执行命令，防止误发给背景项目；工作台同时维护最多 50 条跨 Agent 打开历史栈，可用导航前进与后退动作快速回到上一个处理中的窗口或会话。
-- **常驻菜单栏与双语工作台。** 菜单栏弹出层以 `⇧⌘M` 呼出，2×2 平铺四个常用配置，并附带严格对齐物理 4×4 拓扑的按键速查。关闭主窗口保留菜单栏运行，支持 macOS `SMAppService` 静默开机驻留、简体中文与英文界面即时切换，以及基于 Ed25519 签名的 Sparkle 自动更新。本地配置支持离线编辑、结构差异对比与整次撤销，外部 Agent 也可通过 `mi draft` 的 `read`、`validate` 与 `patch` CLI 生成受限提案，由用户在弹窗中逐项审阅接受。
+- **三态常驻菜单栏、防误触开关与双语工作台。** 菜单栏图标按 `.caution`、`.paused`、`.active` 三态呈现，暂停映射时以半透明键体配双竖线暂停徽标与双语悬浮提示即时提醒；主工作台与 `⇧⌘M` 弹层中的全局「按键映射」开关经 `R-C15` 脱离默认键盘焦点链，杜绝窗口切到前台后按空格误关整盘映射。关闭主窗口保留菜单栏运行，支持 macOS `SMAppService` 静默开机驻留、简体中文与英文即时切换、基于 Ed25519 签名的 Sparkle 自动更新、离线结构差异与撤销，以及受限的 `mi draft` CLI 提案审阅。
 
 ### 工程架构与仓库索引
 
@@ -117,7 +117,7 @@ Work Louder Creator Micro 2 (USB 303A:8298, HID Report 0x06)
 构建需要 macOS 14+、Rust stable 与 Swift 工具链。
 
 ```sh
-scripts/check           # 静态与边界门禁 R-C01 至 R-C14、Rust 与 Swift 单测、C-ABI 静态库与开发包构建
+scripts/check           # 静态与边界门禁 R-C01 至 R-C15、Rust 与 Swift 单测、C-ABI 静态库与开发包构建
 scripts/verify-offline  # 全量检查加 6 个隔离合成 QA 场景及自动清理核对，不连接真实设备
 scripts/run             # 启动当前 checkout 构建的 target/MicroInput.app，带单实例排他锁
 ```
@@ -137,7 +137,7 @@ scripts/run             # 启动当前 checkout 构建的 target/MicroInput.app�
 
 A standalone macOS AI coding workbench and native **Work Louder Creator Micro 2** configurator. Even without owning a Creator Micro 2 keypad, the local **Antigravity** session parser and low-latency macOS Accessibility control chain in this repository stay completely decoupled from hardware HID code, so you can reuse them to build Antigravity integrations for the QMK or VIA keyboard, Stream Deck, Loupedeck, multi-button mouse, voice foot pedal, or DIY controller already on your desk, or run the app offline to inspect and jump directly to active coding sessions. With a Creator Micro 2 connected, Micro Input replaces Electron-based `Input.app` workflows and fixed vendor plugins for daily key remapping, safe official firmware upgrades, Antigravity ergonomics, and customizable Codex controls.
 
-Micro Input uses a pure Rust core, a minimal C-ABI static boundary, and a native SwiftUI and AppKit shell weighing 26 MB in its installed app bundle under the [MIT License](LICENSE). It drops Electron, refuses silent Flash writes on unverified hardware states, and tracks unverified firmware behaviors openly in repository documentation.
+Micro Input uses a pure Rust core, a minimal C-ABI static boundary, and a native SwiftUI and AppKit shell weighing 18 MB in its Apple-notarized installed app bundle (8.5 MB zipped release archive) under the [MIT License](LICENSE). Latest release: [v0.11.4](docs/releases/v0.11.4.md). It drops Electron, refuses silent Flash writes on unverified hardware states, and tracks unverified firmware behaviors openly in repository documentation.
 
 ### Who Micro Input Is For
 
@@ -160,13 +160,13 @@ Creator Micro 2 ships 13 mechanical switches, 1 rotary encoder, and 1 joystick f
 
 Micro Input handles daily macOS key configuration and official firmware updates while turning the left-hand keypad into a status-aware physical controller next to your main keyboard.
 
-- **Replaces daily macOS `Input.app` setup and handles official firmware upgrades.** Supports 281 onboard `DEVICE_KEY_TOKENS`, inline shortcut recording with Apple `Fn` voice triggers, local macros, clipboard-safe prompt snippets, CoreGraphics pointer control, two-zone lighting preview editing, and downloading, verifying, and flashing official `0.7.0-rc.16` firmware with pre-write Flash backups.
+- **Replaces daily macOS `Input.app` setup and handles official firmware upgrades.** Supports 281 onboard `DEVICE_KEY_TOKENS`, inline shortcut recording with Apple `Fn` voice triggers, local macros, clipboard-safe prompt snippets, CoreGraphics pointer control, live two-zone native `lights.preview` editing on connected hardware, and downloading, verifying, and flashing official `0.7.0-rc.16` firmware with pre-write Flash backups.
 - **Turns top mechanical switches into peripheral-vision status monitors.** Green breathing and ocean-blue unread keycaps reflect real agent progress and open target conversations with one press without pulling your eyes away from code.
 - **Removes fixed plugin limits across Antigravity and Codex.** Combines a dedicated Antigravity physical layout with an editable `Codex · Micro Input` profile across all 20 controls alongside **Deepseek Harness**, **Herdr**, and **Other Apps**.
 
 #### Dedicated Physical Workflows for Antigravity
 
-- **Antigravity keymap ready out of the box.** Top six slots (`AG00–AG05`) show live session status and trigger direct jumps; bottom seven keys (`AG06–AG12`) cover Gemini Live voice toggle, composer input focus, built-in browser, Side Question, new conversation in project, hold-to-talk, and submit after confirmed dictation stop; the top-right joystick uses 4-sector `RADIAL` controls (Up/Down chat scroll, Left open right side panel, Right close right side panel).
+- **Antigravity keymap ready out of the box.** Top six slots (`AG00–AG05`) show live session status and trigger direct jumps; bottom seven keys (`AG06–AG12`) cover Gemini Live voice toggle, composer input focus, direct managed Accessibility built-in browser opening (expanding the Side Panel, clearing stale search text, and pruning guest `WebContentsView` noise), Side Question, new conversation in project, hold-to-talk, and submit after confirmed dictation stop; the top-right joystick uses 4-sector `RADIAL` controls (Up/Down chat scroll, Left open right side panel, Right close right side panel).
 - **Hardware keycaps track real unread watermarks.** Top slots track primary conversations after subagent filtering, retain ocean-blue unread indicators past 15 minutes, clear automatically once viewed frontmost at `/c/<cid>`, and switch sessions directly through sidebar links.
 - **Voice and model controls tuned to hardware cadence.** Rotating the encoder directly opens Antigravity's model picker in place without stealing composer focus and adjusts reasoning effort, pressing or holding the encoder searches conversations, and bottom `AG10` and `AG11` switches merge into a debounced 2U wide dictation key or split back into dual 1U keys for new conversation and hold-to-talk.
 - **Responsive, zero-patch Accessibility execution.** Integrates cleanly through macOS Accessibility and observable endpoints without patching the target app, reducing Antigravity 2.31.0 release composer focus median time to 284.3 ms.
@@ -187,8 +187,8 @@ Micro Input handles daily macOS key configuration and official firmware updates 
 Micro Input enforces three engineering boundaries from the ground up.
 
 - **Pure Rust core behind a thin C-ABI shell.** Framing, document models, local drafts, device sessions, agent bridges, and macOS execution live in 7 Rust crates named `mi-proto`, `mi-transport`, `mi-model`, `mi-session`, `mi-bridge`, `mi-macos`, and `mi-core`, driving 13 SwiftUI and AppKit files via 9 `extern "C"` functions in `crates/mi-ffi`.
-- **Explicit unknowns and static gates.** Unverified firmware edges stay logged in [UNKNOWNS](docs/spec/UNKNOWNS.md). `scripts/check-boundaries.py` enforces static rules `R-C01` through `R-C14` on every run so read-only safety checks stay intact and synthetic runs never impersonate physical hardware sign-off.
-- **Refuse writes before risking device state.** Device snapshots, local drafts, and baselines remain strictly isolated, with full pre-write backups, `fsync` operation logs, and byte-for-byte readback checks required before marking any apply or Flash operation complete.
+- **Explicit unknowns and static gates.** Unverified firmware edges stay logged in [UNKNOWNS](docs/spec/UNKNOWNS.md). `scripts/check-boundaries.py` enforces static rules `R-C01` through `R-C15` and notarization path hygiene on every run so read-only safety checks, private file permissions, and UI focus guards stay intact and synthetic runs never impersonate physical hardware sign-off.
+- **Refuse writes before risking device state.** Device snapshots, local drafts, and baselines remain strictly isolated. Private local files and recovery backups are verified via `private_fs` `O_NOFOLLOW` descriptor ownership and `0700`/`0600` checks, with full pre-write backups, `fsync` operation logs, and byte-for-byte readback checks required before marking any apply or Flash operation complete.
 
 ### Engineering Tradeoffs from Peer Projects
 
@@ -212,16 +212,16 @@ Micro Input opens an exclusive macOS Vendor HID link to `303A:8298` over 267-byt
 - **Multi-stage rotary encoder picker and presets.** `encoder_model_picker.rs` opens the target Agent's model picker directly on idle left or right turns without stealing input focus, adjusts reasoning effort via horizontal mouse flick or joystick tilt, unifies short presses and 350 ms holds on conversation search when idle, preserves press-and-turn fast scrolling, and exits automatically after 12 seconds idle. Six built-in knob and joystick presets cover model picking, Working and unread cycling, dual scroll, chat scrolling, effort levels, and hardware mouse mode.
 - **Per-layer hybrid joystick operation.** In software mode, the joystick drives an 8-direction polar wheel menu that avoids stealing window focus, requiring neutral return before selection and supporting encoder click or spring-back confirmation. On `0.7.0-rc.16` firmware, the six-layer board assigns hardware joystick modes per layer: `Codex` (Layer 1) and `Deepseek Harness` (Layer 3) default to hardware `MOUSE` mode (`Precise`, `Slow`, `Standard`, and `Fast` presets, 13 `mouse.config` curve parameters, `0.15` factory anti-drift deadzone default, and host-independent `MS_*` mouse keycodes), while `Antigravity` (Layer 2) defaults to 4-sector `RADIAL` for chat scrolling and right side panel toggling.
 - **Flexible bottom `1U+1U` split or `2U` merged micro-switches.** Bottom switches `AG10` and `AG11` can switch globally between dual 1U keys and a merged 2U bar deduplicated by bitmask in `WideKeyMerger` until the final switch releases.
-- **Six-layer coexistence and ACK-verified per-key status LEDs.** Layer 1 preserves 20-control `Codex · Micro Input` behavior while `SharedVendorBridge` assigns Layer 2 and 3 top slots to `KV_OAI_AG06` through `KV_OAI_AG17` for green running and ocean-blue unread keycaps backed by firmware `v.oai.thstatus` ACK tracking and proactive session rotation at 900 requests.
+- **Six-layer coexistence, ACK-verified per-key status LEDs, and live hardware lighting preview.** Layer 1 preserves 20-control `Codex · Micro Input` behavior while `VendorBridge` assigns Layer 2 and 3 top slots to `KV_OAI_AG06` through `KV_OAI_AG17` for green running and ocean-blue unread keycaps backed by firmware `v.oai.thstatus` ACK tracking and proactive session rotation at 900 requests. In the two-zone RGB modal, clicking live preview drives native `Preview::begin_native` (`0.6.3` / `0.7.0*`) through `LightingPreviewState` and an RAII `VendorBridgePreviewLease` that suppresses background LED flushes, queued v0.7.0 commands, and rotation while keeping physical HID input live, draining cleanly on stop, close, context switch, disconnect, sleep, or 30-second expiry without writing Flash.
 - **Flash-free live layer switching, power telemetry, and partitioned firmware recovery.** Uses `kb.pl.set` on `0.7.0-rc.16+` to switch onboard layers without wearing Flash, reads battery and host-sleep config via `device.status`, `pm.config`, and `pm.state`, and verifies official SHA-256 digests, full 16 MB Flash backups, and `0x8000` `nvs` and `fs` partitions before flashing over ESP32-S3 serial.
 
 ### Daily Coding Details
 
 - **4+1 ready-to-use profiles.** Ships tailored profiles for **Antigravity**, customizable **Codex**, **Deepseek Harness**, and **Herdr**, plus an **Other Apps** profile pre-mapped with Apple `Fn` dictation and inline shortcut recording using zero external `.patch` files.
 - **Muscle-memory-safe routing.** Gate `R-C11` retired error-prone foreground-app auto-switching in favor of six-layer onboard routing, manual menu-bar selection, and a hard profile lock toggle.
-- **Verified dictation state machine.** Separates hold-to-talk with a 120-second limit and original target lock from Codex click-to-dictate with automatic wait-for-transcription submission and menu-bar recovery status when a stop cannot be confirmed.
+- **Verified, title-drift-resilient dictation state machine.** Separates hold-to-talk with a 120-second limit and original target lock from Codex click-to-dictate with automatic wait-for-transcription submission. `DictationLeaseRegistry` tracks leases by window container identity (`bundle_id + pid + window_id + scope_id`), reconciles `Idle` containers with zero presses when Antigravity conversation switches mutate `AXTitle`, decouples non-dictation controls (knobs, model picker, browser, side panel, subagent picker) from dictation cleanup fences, and surfaces localized menu-bar caution cards with one-click cleanup retry whenever cleanup cannot be confirmed.
 - **Multi-window focus locking and 50-step navigation stack.** Pins Codex actions to the currently focused window across multiple open projects and maintains a 50-entry cross-agent back and forward navigation stack.
-- **Always-ready menu bar and bilingual workbench.** Pressing `⇧⌘M` reveals a 2×2 quick switcher and physical 4×4 cheatsheet, backed by `SMAppService` silent login launch, live Simplified Chinese and English switching, Ed25519-signed Sparkle updates, offline diff and undo, and reviewable `mi draft` CLI proposals supporting `read`, `validate`, and `patch`.
+- **Three-state menu bar, Spacebar-safe mapping switches, and bilingual workbench.** `StatusItemIcon.Presentation` renders distinct `.active`, `.paused` (dimmed keypad with pause bars and bilingual tooltip), and `.caution` icons; global Key Mapping switches opt out of macOS keyboard focus under `R-C15` so Spacebar can never silently disable mapping when a window becomes key. Pressing `⇧⌘M` reveals a 2×2 quick switcher and physical 4×4 cheatsheet, backed by `SMAppService` silent login launch, live Simplified Chinese and English switching, Ed25519-signed Sparkle updates, offline diff and undo, and reviewable `mi draft` CLI proposals supporting `read`, `validate`, and `patch`.
 
 ### Architecture and Repository Index
 
@@ -248,7 +248,7 @@ Further design specifications, research logs, and verification ledgers live insi
 Building requires macOS 14+, Rust stable, and the Swift toolchain.
 
 ```sh
-scripts/check           # Static boundary gates R-C01 to R-C14, Rust + Swift tests, C-ABI static lib, and app build
+scripts/check           # Static boundary gates R-C01 to R-C15, Rust + Swift tests, C-ABI static lib, and app build
 scripts/verify-offline  # Full checks plus 6 isolated synthetic QA scenarios and cleanup checks without real hardware
 scripts/run             # Launches target/MicroInput.app from the current checkout under a single-instance lock
 ```
