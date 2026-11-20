@@ -910,23 +910,231 @@ final class DesignSystemVerificationTests: XCTestCase {
 
     @MainActor
     func testStatusItemIconCachingAndLocaleMetadata() {
-        let zh1 = StatusItemIcon.make(locale: .zhHans)
-        let zh2 = StatusItemIcon.make(locale: .zhHans)
+        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: true, hasCaution: false), .active)
+        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: false, hasCaution: false), .paused)
+        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: true, hasCaution: true), .caution)
+        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: false, hasCaution: true), .caution)
+
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .zhHans, hostExecutionEnabled: true, hostCautionNotice: nil),
+            "Micro Input 按键与会话控制"
+        )
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .en, hostExecutionEnabled: true, hostCautionNotice: nil),
+            "Micro Input Keypad & Session Control"
+        )
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .zhHans, hostExecutionEnabled: false, hostCautionNotice: nil),
+            "已暂停软件按键映射，点击菜单栏重新启用"
+        )
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .en, hostExecutionEnabled: false, hostCautionNotice: nil),
+            "Key mapping paused. Click the menu bar icon to re-enable."
+        )
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .zhHans, hostExecutionEnabled: false, hostCautionNotice: "需要重试清理"),
+            "需要重试清理"
+        )
+
+        let zhActive = StatusItemIcon.make(locale: .zhHans, presentation: .active)
         let zhDefault = StatusItemIcon.make()
-        let en1 = StatusItemIcon.make(locale: .en)
-        let en2 = StatusItemIcon.make(locale: .en)
+        let zhPaused = StatusItemIcon.make(locale: .zhHans, presentation: .paused)
+        let zhCaution = StatusItemIcon.make(locale: .zhHans, presentation: .caution)
+        let enActive = StatusItemIcon.make(locale: .en, presentation: .active)
+        let enPaused = StatusItemIcon.make(locale: .en, presentation: .paused)
+        let enCaution = StatusItemIcon.make(locale: .en, presentation: .caution)
 
-        XCTAssertTrue(zh1 === zh2)
-        XCTAssertTrue(zh1 === zhDefault)
-        XCTAssertTrue(en1 === en2)
-        XCTAssertTrue(zh1 !== en1)
+        XCTAssertTrue(zhActive === StatusItemIcon.make(locale: .zhHans, presentation: .active))
+        XCTAssertTrue(zhActive === zhDefault)
+        XCTAssertTrue(zhPaused === StatusItemIcon.make(locale: .zhHans, presentation: .paused))
+        XCTAssertTrue(zhCaution === StatusItemIcon.make(locale: .zhHans, presentation: .caution))
+        XCTAssertTrue(enActive === StatusItemIcon.make(locale: .en))
+        XCTAssertTrue(enPaused === StatusItemIcon.make(locale: .en, presentation: .paused))
+        XCTAssertTrue(enCaution === StatusItemIcon.make(locale: .en, presentation: .caution))
 
-        for icon in [zh1, en1] {
+        let allSix = [zhActive, zhPaused, zhCaution, enActive, enPaused, enCaution]
+        for i in 0..<allSix.count {
+            for j in (i + 1)..<allSix.count {
+                XCTAssertTrue(allSix[i] !== allSix[j])
+            }
+        }
+
+        for icon in allSix {
             XCTAssertTrue(icon.isTemplate)
             XCTAssertEqual(icon.size, NSSize(width: 20, height: 18))
         }
-        XCTAssertEqual(zh1.accessibilityDescription, "Micro Input 键盘")
-        XCTAssertEqual(en1.accessibilityDescription, "Micro Input Keypad")
+        XCTAssertEqual(zhActive.accessibilityDescription, "Micro Input 键盘")
+        XCTAssertEqual(enActive.accessibilityDescription, "Micro Input Keypad")
+        XCTAssertEqual(zhPaused.accessibilityDescription, "Micro Input 键盘（已暂停按键映射）")
+        XCTAssertEqual(enPaused.accessibilityDescription, "Micro Input Keypad (Key Mapping Paused)")
+        XCTAssertEqual(zhCaution.accessibilityDescription, "Micro Input 键盘（需关注）")
+        XCTAssertEqual(enCaution.accessibilityDescription, "Micro Input Keypad (Attention Needed)")
+
+        XCTAssertNotEqual(zhActive.tiffRepresentation, zhPaused.tiffRepresentation)
+        XCTAssertNotEqual(zhActive.tiffRepresentation, zhCaution.tiffRepresentation)
+        XCTAssertNotEqual(zhPaused.tiffRepresentation, zhCaution.tiffRepresentation)
+        XCTAssertNotEqual(enActive.tiffRepresentation, enPaused.tiffRepresentation)
+        XCTAssertNotEqual(enActive.tiffRepresentation, enCaution.tiffRepresentation)
+        XCTAssertNotEqual(enPaused.tiffRepresentation, enCaution.tiffRepresentation)
+    }
+
+    @MainActor
+    private static var didFinishAppKitLaunch = false
+
+    @MainActor
+    func testGlobalKeyMappingKillSwitchesIgnoreSpacebarWhenWindowBecomesKey() throws {
+        let app = NSApplication.shared
+        let previousFrontmostApp = NSWorkspace.shared.frontmostApplication
+        if !Self.didFinishAppKitLaunch {
+            app.setActivationPolicy(.accessory)
+            app.finishLaunching()
+            Self.didFinishAppKitLaunch = true
+        }
+        defer {
+            if let previousFrontmostApp, previousFrontmostApp.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                previousFrontmostApp.activate()
+            }
+        }
+
+        func pumpEvents(_ seconds: TimeInterval) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                if let event = app.nextEvent(matching: .any, until: deadline, inMode: .default, dequeue: true) {
+                    app.sendEvent(event)
+                    app.updateWindows()
+                }
+            }
+        }
+
+        func sendSpacebar(to window: NSWindow) throws {
+            let keyDown = try XCTUnwrap(
+                NSEvent.keyEvent(
+                    with: .keyDown,
+                    location: .zero,
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    characters: " ",
+                    charactersIgnoringModifiers: " ",
+                    isARepeat: false,
+                    keyCode: 49
+                )
+            )
+            let keyUp = try XCTUnwrap(
+                NSEvent.keyEvent(
+                    with: .keyUp,
+                    location: .zero,
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    characters: " ",
+                    charactersIgnoringModifiers: " ",
+                    isARepeat: false,
+                    keyCode: 49
+                )
+            )
+            window.sendEvent(keyDown)
+            window.sendEvent(keyUp)
+            pumpEvents(0.05)
+        }
+
+        func makeKeyWindow<V: View>(_ rootView: V, width: CGFloat, height: CGFloat) -> NSWindow {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            window.alphaValue = 0
+            let host = NSHostingView(rootView: rootView)
+            host.frame = NSRect(x: 0, y: 0, width: width, height: height)
+            window.contentView = host
+            host.layoutSubtreeIfNeeded()
+            window.recalculateKeyViewLoop()
+            window.makeKeyAndOrderFront(nil)
+            app.activate(ignoringOtherApps: true)
+            pumpEvents(0.12)
+            host.layoutSubtreeIfNeeded()
+            return window
+        }
+
+        var focusableSwitchValue = true
+        let focusableSwitchWindow = makeKeyWindow(
+            Toggle("按键映射", isOn: Binding(get: { focusableSwitchValue }, set: { focusableSwitchValue = $0 }))
+                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true, allowsKeyboardFocus: true)),
+            width: 240,
+            height: 80
+        )
+        defer { focusableSwitchWindow.orderOut(nil) }
+        XCTAssertTrue(focusableSwitchWindow.isKeyWindow)
+        try sendSpacebar(to: focusableSwitchWindow)
+        XCTAssertFalse(
+            focusableSwitchValue,
+            "allowsKeyboardFocus: true control probe must toggle on Spacebar to prove real AppKit key dispatch"
+        )
+
+        var nonFocusableSwitchValue = true
+        let nonFocusableSwitchWindow = makeKeyWindow(
+            Toggle("按键映射", isOn: Binding(get: { nonFocusableSwitchValue }, set: { nonFocusableSwitchValue = $0 }))
+                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true, allowsKeyboardFocus: false)),
+            width: 240,
+            height: 80
+        )
+        defer { nonFocusableSwitchWindow.orderOut(nil) }
+        XCTAssertTrue(nonFocusableSwitchWindow.isKeyWindow)
+        XCTAssertTrue(nonFocusableSwitchWindow.firstResponder === nonFocusableSwitchWindow)
+        nonFocusableSwitchWindow.selectNextKeyView(nil)
+        pumpEvents(0.04)
+        try sendSpacebar(to: nonFocusableSwitchWindow)
+        XCTAssertTrue(nonFocusableSwitchValue)
+
+        let dir = try makeIsolatedTempDir("spacebar-kill-switch")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = CoreStore(isolatedDirectory: dir.path)
+        defer { store.stopEventLoops() }
+
+        store.dispatch("header", ["SetExecutionEnabled": true])
+        var connectedModel = store.model
+        connectedModel.showConnectButton = false
+        connectedModel.deviceConnected = true
+        store.commitDomainSlices(from: connectedModel)
+        XCTAssertFalse(store.header.showConnectButton)
+        XCTAssertTrue(store.header.hostExecutionEnabled)
+        XCTAssertTrue(store.statusMenu.hostExecutionEnabled)
+
+        let workbenchWindow = makeKeyWindow(
+            ClassicWorkbenchView(store: store).frame(width: 1180, height: 740),
+            width: 1180,
+            height: 740
+        )
+        defer { workbenchWindow.orderOut(nil) }
+        XCTAssertTrue(workbenchWindow.isKeyWindow)
+        try sendSpacebar(to: workbenchWindow)
+        XCTAssertTrue(store.header.hostExecutionEnabled)
+        XCTAssertTrue(store.statusMenu.hostExecutionEnabled)
+        workbenchWindow.selectNextKeyView(nil)
+        pumpEvents(0.04)
+        try sendSpacebar(to: workbenchWindow)
+        XCTAssertTrue(store.header.hostExecutionEnabled)
+        XCTAssertTrue(store.statusMenu.hostExecutionEnabled)
+
+        let popoverWindow = makeKeyWindow(
+            StatusMenuPopoverView(store: store, onOpenMainWindow: {}).frame(width: 348, height: 520),
+            width: 348,
+            height: 520
+        )
+        defer { popoverWindow.orderOut(nil) }
+        XCTAssertTrue(popoverWindow.isKeyWindow)
+        try sendSpacebar(to: popoverWindow)
+        XCTAssertTrue(store.header.hostExecutionEnabled)
+        XCTAssertTrue(store.statusMenu.hostExecutionEnabled)
+        popoverWindow.selectNextKeyView(nil)
+        pumpEvents(0.04)
+        try sendSpacebar(to: popoverWindow)
+        XCTAssertTrue(store.header.hostExecutionEnabled)
+        XCTAssertTrue(store.statusMenu.hostExecutionEnabled)
     }
 
     func testHexColorCacheParsingFallbackAndBoundedEviction() throws {

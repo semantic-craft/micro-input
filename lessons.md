@@ -1,5 +1,11 @@
 # 项目教训
 
+## 全局按键映射开关禁止进入键盘焦点链，且菜单栏图标须同步暂停三态
+
+- 起因与后果：`NeutralSwitchToggleStyle` 内部以 `Button` 叠加 `.focusEffectDisabled()` 实现，仅隐藏蓝色焦点框却仍让 AppKit 将主工作台与菜单栏弹层中的全局「按键映射」开关选为窗口 `initialFirstResponder`，窗口位于前台时按下空格会静默关闭整盘 `host_execution_enabled`；同时 `StatusItemIcon` 仅区分 `hasCaution: Bool` 且 `MicroInputApp.swift` 未观察 `store.statusMenu.hostExecutionEnabled`，导致按键映射被暂停后菜单栏图标与悬浮提示仍呈正常状态，用户难以及时察觉。
+- 修复：将 `StatusItemIcon` 迁出 `UITheme.swift` 至 `KeycapGlyphView.swift` 并升级为 3 态枚举 `Presentation`（`.caution` > `.paused` > `.active`），为 `.paused` 提供半透明键体配右上角双竖线暂停徽标及本地化悬浮提示；`NeutralSwitchToggleStyle` 新增 `allowsKeyboardFocus: Bool`，在 `false` 分支脱离 `Button` 并保留 `.contentShape(Rectangle())`、`.onTapGesture` 与无障碍按钮语义；主工作台与菜单栏弹层两处全局开关全部启用 `allowsKeyboardFocus: false`，`MicroInputApp.swift` 在 `openMainWindow()` 中调用 `win.makeFirstResponder(nil)` 并通过 `observeStoreStatusItemState()` 联动观察 `hostExecutionEnabled`；`scripts/check-boundaries.py` 新增 `R-C15` 静态门禁守卫开关焦点隔离与状态栏三态绑定。
+- 验证点：`scripts/tests/test_boundaries_launcher.py` 覆盖 `R-C15` 正负用例；`DesignSystemVerificationTests` 与 `MicroInputTests` 覆盖 `StatusItemIcon.presentation` 优先级、中英文 `toolTip`、6 态模板缓存与 TIFF 渲染差异，以及真实 `NSWindow` + `NSHostingView` 派发空格 `NSEvent`（`keyCode: 49`）对照回归；全量通过 `scripts/check`。Seen 1x（2026-11-20）。
+
 ## 听写租约须以容器身份核销、与非听写控制解耦，并通过常驻菜单栏告警提供清理重试
 
 - 起因与后果：在 Antigravity / DSH 等单窗口 Electron 应用中启动语音听写后，切换会话或自动生成标题会原地改写 `AXWindow.AXTitle`；旧版 `uncleared_targets` 按完整 `ManagedWindowIdentity`（含易变标题）比较，且 `capture_window_for_key` / `capture_full_window_for_key` 复制了听写租约检查，导致用户手动停录或切会话后不仅语音键与发送键报 `blocked:uncleared_dictation_target_changed`，连旋钮模型选择、内置浏览器与侧栏开关也被一并锁死，关闭重开映射触发 `stop_owned_dictations()` 时又因 `CapturedWindow::validate` 严格比对旧标题返回 `blocked:target_window_changed` / `unconfirmed:dictation_target_changed` 形成死锁；同时 `mi-core` 将原始 `blocked:`/`unconfirmed:` 令牌直接写入窗口底栏且缺乏菜单栏常驻提示与手动重试入口，主窗收起时用户无从感知与自愈。

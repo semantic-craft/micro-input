@@ -57,7 +57,7 @@ public struct StatusMenuPopoverView: View {
                         set: { store.dispatch("status_menu", ["SetHostExecutionEnabled": $0]) }
                     )
                 )
-                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true))
+                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true, allowsKeyboardFocus: false))
                 .fixedSize()
             }
 

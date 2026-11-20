@@ -1469,27 +1469,72 @@ final class MicroInputTests: XCTestCase {
 
     @MainActor
     func testStatusItemIconCautionCachingAndHostCautionSliceIsolation() throws {
-        let zhNormal = StatusItemIcon.make(locale: .zhHans, hasCaution: false)
-        let zhNormalAgain = StatusItemIcon.make(locale: .zhHans)
-        let zhCaution = StatusItemIcon.make(locale: .zhHans, hasCaution: true)
-        let zhCautionAgain = StatusItemIcon.make(locale: .zhHans, hasCaution: true)
-        let enNormal = StatusItemIcon.make(locale: .en, hasCaution: false)
-        let enCaution = StatusItemIcon.make(locale: .en, hasCaution: true)
+        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: true, hasCaution: false), .active)
+        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: false, hasCaution: false), .paused)
+        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: true, hasCaution: true), .caution)
+        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: false, hasCaution: true), .caution)
 
-        XCTAssertTrue(zhNormal === zhNormalAgain)
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .zhHans, hostExecutionEnabled: true, hostCautionNotice: nil),
+            "Micro Input 按键与会话控制"
+        )
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .en, hostExecutionEnabled: true, hostCautionNotice: nil),
+            "Micro Input Keypad & Session Control"
+        )
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .zhHans, hostExecutionEnabled: false, hostCautionNotice: nil),
+            "已暂停软件按键映射，点击菜单栏重新启用"
+        )
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .en, hostExecutionEnabled: false, hostCautionNotice: nil),
+            "Key mapping paused. Click the menu bar icon to re-enable."
+        )
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .zhHans, hostExecutionEnabled: false, hostCautionNotice: "告警提示"),
+            "告警提示"
+        )
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .en, hostExecutionEnabled: true, hostCautionNotice: "Caution notice"),
+            "Caution notice"
+        )
+
+        let zhActive = StatusItemIcon.make(locale: .zhHans, presentation: .active)
+        let zhActiveAgain = StatusItemIcon.make(locale: .zhHans)
+        let zhPaused = StatusItemIcon.make(locale: .zhHans, presentation: .paused)
+        let zhPausedAgain = StatusItemIcon.make(locale: .zhHans, presentation: .paused)
+        let zhCaution = StatusItemIcon.make(locale: .zhHans, presentation: .caution)
+        let zhCautionAgain = StatusItemIcon.make(locale: .zhHans, presentation: .caution)
+        let enActive = StatusItemIcon.make(locale: .en, presentation: .active)
+        let enPaused = StatusItemIcon.make(locale: .en, presentation: .paused)
+        let enCaution = StatusItemIcon.make(locale: .en, presentation: .caution)
+
+        XCTAssertTrue(zhActive === zhActiveAgain)
+        XCTAssertTrue(zhPaused === zhPausedAgain)
         XCTAssertTrue(zhCaution === zhCautionAgain)
-        XCTAssertTrue(enNormal === StatusItemIcon.make(locale: .en))
-        XCTAssertTrue(enCaution === StatusItemIcon.make(locale: .en, hasCaution: true))
-        XCTAssertFalse(zhNormal === zhCaution)
-        XCTAssertFalse(enNormal === enCaution)
-        XCTAssertFalse(zhNormal === enNormal)
+        XCTAssertTrue(enActive === StatusItemIcon.make(locale: .en))
+        XCTAssertTrue(enPaused === StatusItemIcon.make(locale: .en, presentation: .paused))
+        XCTAssertTrue(enCaution === StatusItemIcon.make(locale: .en, presentation: .caution))
 
-        for icon in [zhNormal, zhCaution, enNormal, enCaution] {
+        let allSix = [zhActive, zhPaused, zhCaution, enActive, enPaused, enCaution]
+        for i in 0..<allSix.count {
+            for j in (i + 1)..<allSix.count {
+                XCTAssertFalse(allSix[i] === allSix[j])
+            }
+        }
+        let descriptions = Set(allSix.compactMap(\.accessibilityDescription))
+        XCTAssertEqual(descriptions.count, 6)
+
+        for icon in allSix {
             XCTAssertTrue(icon.isTemplate)
             XCTAssertFalse((icon.accessibilityDescription ?? "").isEmpty)
         }
-        XCTAssertNotEqual(zhNormal.tiffRepresentation, zhCaution.tiffRepresentation)
-        XCTAssertNotEqual(enNormal.tiffRepresentation, enCaution.tiffRepresentation)
+        XCTAssertNotEqual(zhActive.tiffRepresentation, zhPaused.tiffRepresentation)
+        XCTAssertNotEqual(zhActive.tiffRepresentation, zhCaution.tiffRepresentation)
+        XCTAssertNotEqual(zhPaused.tiffRepresentation, zhCaution.tiffRepresentation)
+        XCTAssertNotEqual(enActive.tiffRepresentation, enPaused.tiffRepresentation)
+        XCTAssertNotEqual(enActive.tiffRepresentation, enCaution.tiffRepresentation)
+        XCTAssertNotEqual(enPaused.tiffRepresentation, enCaution.tiffRepresentation)
 
         let baseParsed = CoreStore.parseProjection([
             "header": [
