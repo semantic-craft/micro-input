@@ -4,9 +4,9 @@
 
 ## 当前版本与架构基线
 
-- **最新发行标签**：[v0.11.3](releases/v0.11.3.md)（`CFBundleShortVersionString = 0.11.3`；历次发行说明归档于 [releases/](releases/v0.11.3.md)）。
-- **主线演进（v0.11.3 基线）**：在 v0.11.2 基础上合入工作台 `LightingBeginPreview` 到原生 `Preview::begin_native` 的工程接线（`LightingPreviewState` 状态机、RAII `VendorBridgePreviewLease` 仲裁、`LightingEditorSheet` 单色预览开关）与 `executor.rs` 80ms 超时单测并发加固（PR #166）。
-- **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C14`。
+- **最新发行标签**：[v0.11.4](releases/v0.11.4.md)（`CFBundleShortVersionString = 0.11.4`；历次发行说明归档于 [releases/](releases/v0.11.4.md)）。
+- **主线演进（v0.11.4 基线）**：在 v0.11.3 工作台原生灯光预览接线基础上合入全局「按键映射」开关焦点隔离、菜单栏暂停三态图标与悬浮提示，以及静态门禁 `R-C15`（PR #167）。
+- **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C15`。
 
 ## 已实现与已验证能力
 
@@ -37,7 +37,7 @@
 ## 验证入口与已知未决边界
 
 ```sh
-scripts/check            # Python 单测 + cargo fmt + Rust/Swift 全量测试 + 构建 + R-C01..R-C14 门禁
+scripts/check            # Python 单测 + cargo fmt + Rust/Swift 全量测试 + 构建 + R-C01..R-C15 门禁
 MI_AUTO_HOST_READY=0 scripts/verify-offline  # 全量检查 + 6 个隔离合成 QA 场景与清理校验
 ```
 
