@@ -186,7 +186,7 @@ struct WorkbenchHeaderBarView: View {
                     set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
                 )
             )
-            .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true))
+            .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true, allowsKeyboardFocus: false))
             .fixedSize()
 
             HStack(spacing: 6) {

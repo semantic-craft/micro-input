@@ -462,6 +462,189 @@ def find_unguarded_ffi_entrypoints(rel_path: str, text: str) -> list[str]:
     return unguarded
 
 
+def _advance_swift_trivia_or_string(src: str, idx: int) -> int | None:
+    n = len(src)
+    ch = src[idx]
+    if ch in ' \t\r\n':
+        return idx + 1
+    if src.startswith('//', idx):
+        end = src.find('\n', idx + 2)
+        return n if end == -1 else end + 1
+    if src.startswith('/*', idx):
+        depth = 1
+        j = idx + 2
+        while j < n and depth > 0:
+            if src.startswith('/*', j):
+                depth += 1
+                j += 2
+            elif src.startswith('*/', j):
+                depth -= 1
+                j += 2
+            else:
+                j += 1
+        return j
+    if ch == '"':
+        return _advance_quoted_string(src, idx)
+    return None
+
+
+def _blank_swift_comments(src: str) -> str:
+    n = len(src)
+    out: list[str] = []
+    i = 0
+    while i < n:
+        if src.startswith('//', i) or src.startswith('/*', i):
+            skipped = _advance_swift_trivia_or_string(src, i)
+            assert skipped is not None
+            out.append(re.sub(r'[^\n]', ' ', src[i:skipped]))
+            i = skipped
+            continue
+        if src[i] == '"':
+            skipped = _advance_quoted_string(src, i)
+            out.append(src[i:skipped])
+            i = skipped
+            continue
+        out.append(src[i])
+        i += 1
+    return ''.join(out)
+
+
+def _find_swift_matching(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
+    n = len(src)
+    depth = 1
+    i = open_idx + 1
+    while i < n and depth > 0:
+        skipped = _advance_swift_trivia_or_string(src, i)
+        if skipped is not None:
+            i = skipped
+            continue
+        if src[i] == open_ch:
+            depth += 1
+        elif src[i] == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n - 1
+
+
+def _extract_swift_modifier_chain(src: str, start_idx: int) -> str:
+    n = len(src)
+    pos = start_idx
+    while pos < n and src[pos] in ' \t\r\n':
+        pos += 1
+    if pos < n and src[pos] == '{':
+        pos = _find_swift_matching(src, pos, '{', '}') + 1
+    chain_start = pos
+    while pos < n:
+        ws_pos = pos
+        while ws_pos < n:
+            if src[ws_pos] in ' \t\r\n':
+                ws_pos += 1
+            elif src.startswith('//', ws_pos) or src.startswith('/*', ws_pos):
+                skipped = _advance_swift_trivia_or_string(src, ws_pos)
+                ws_pos = n if skipped is None else skipped
+            else:
+                break
+        if ws_pos >= n or src[ws_pos] != '.':
+            break
+        pos = ws_pos + 1
+        while pos < n and _is_ident_char(src[pos]):
+            pos += 1
+        while pos < n and src[pos] in ' \t':
+            pos += 1
+        if pos < n and src[pos] == '(':
+            pos = _find_swift_matching(src, pos, '(', ')') + 1
+        while pos < n and src[pos] in ' \t':
+            pos += 1
+        if pos < n and src[pos] == '{':
+            pos = _find_swift_matching(src, pos, '{', '}') + 1
+    return src[chain_start:pos]
+
+
+def find_kill_switch_focus_violations(ui_sources: dict[str, str], ui_theme_src: str) -> list[str]:
+    violations: list[str] = []
+    for rel_path, raw_src in sorted(ui_sources.items()):
+        src = _blank_swift_comments(raw_src)
+        for match in re.finditer(r'\bToggle\s*\(', src):
+            open_paren = match.end() - 1
+            close_paren = _find_swift_matching(src, open_paren, '(', ')')
+            toggle_args = src[open_paren : close_paren + 1]
+            if 'SetExecutionEnabled' not in toggle_args and 'SetHostExecutionEnabled' not in toggle_args:
+                continue
+            modifier_chain = _extract_swift_modifier_chain(src, close_paren + 1)
+            if not re.search(
+                r'\.toggleStyle\s*\(\s*NeutralSwitchToggleStyle\s*\([^)]*\ballowsKeyboardFocus\s*:\s*false\b',
+                modifier_chain,
+            ):
+                lineno = src.count('\n', 0, match.start()) + 1
+                violations.append(
+                    f'{rel_path}:{lineno}: global key-mapping Toggle must specify NeutralSwitchToggleStyle(..., allowsKeyboardFocus: false)'
+                )
+
+    clean_theme = _blank_swift_comments(ui_theme_src)
+    body_match = re.search(r'\bstruct\s+NeutralSwitchBody\b[^{]*\{', clean_theme)
+    if not body_match:
+        violations.append('UITheme.swift must define struct NeutralSwitchBody')
+        return violations
+
+    body_open = body_match.end() - 1
+    body_close = _find_swift_matching(clean_theme, body_open, '{', '}')
+    body_src = clean_theme[body_open : body_close + 1]
+    if_match = re.search(r'\bif\s+(!)?\s*allowsKeyboardFocus\b[^{]*\{', body_src)
+    if not if_match:
+        violations.append('UITheme.swift NeutralSwitchBody must branch on allowsKeyboardFocus')
+        return violations
+
+    if_open = if_match.end() - 1
+    if_close = _find_swift_matching(body_src, if_open, '{', '}')
+    if_block = body_src[if_open : if_close + 1]
+    else_match = re.match(r'\s*else\s*\{', body_src[if_close + 1 :])
+    else_block: str | None = None
+    if else_match:
+        else_open = if_close + 1 + else_match.end() - 1
+        else_close = _find_swift_matching(body_src, else_open, '{', '}')
+        else_block = body_src[else_open : else_close + 1]
+
+    non_focus_block = if_block if if_match.group(1) else else_block
+    if non_focus_block is None:
+        violations.append('UITheme.swift NeutralSwitchBody must implement a non-focus branch for allowsKeyboardFocus == false')
+    else:
+        for required in ('.onTapGesture', '.contentShape(Rectangle())', '.accessibilityAction'):
+            if required not in non_focus_block:
+                violations.append(
+                    f'UITheme.swift NeutralSwitchBody non-focus branch must include {required}'
+                )
+        if re.search(r'\bButton\b', non_focus_block):
+            violations.append(
+                'UITheme.swift NeutralSwitchBody non-focus branch must not wrap switch content in Button'
+            )
+    return violations
+
+
+def find_status_item_state_violations(swift_app_src: str) -> list[str]:
+    violations: list[str] = []
+    clean_app = _blank_swift_comments(swift_app_src)
+    tracking_blocks: list[str] = []
+    for match in re.finditer(r'\bwithObservationTracking\s*\{', clean_app):
+        open_brace = match.end() - 1
+        close_brace = _find_swift_matching(clean_app, open_brace, '{', '}')
+        tracking_blocks.append(clean_app[open_brace : close_brace + 1])
+    if not any('store.statusMenu.hostExecutionEnabled' in block for block in tracking_blocks):
+        violations.append(
+            'MicroInputApp.swift must observe store.statusMenu.hostExecutionEnabled inside withObservationTracking'
+        )
+    if 'StatusItemIcon.presentation(' not in clean_app:
+        violations.append(
+            'MicroInputApp.swift must derive status item icon state via StatusItemIcon.presentation('
+        )
+    if 'StatusItemIcon.toolTip(' not in clean_app:
+        violations.append(
+            'MicroInputApp.swift must derive status item tooltip via StatusItemIcon.toolTip('
+        )
+    return violations
+
+
 def run_boundary_checks(root: Path = ROOT) -> None:
     sources = list((root / 'crates').rglob('*.rs'))
     found = set()
@@ -979,6 +1162,25 @@ def run_boundary_checks(root: Path = ROOT) -> None:
     assert not prod_qa_leaks, (
         'Production isolation violation (synthetic/QA/flash/recording host leak):\n  '
         + '\n  '.join(prod_qa_leaks)
+    )
+
+    ui_sources = {
+        p.relative_to(root).as_posix(): p.read_text(encoding='utf-8')
+        for p in sorted((root / 'app/MicroInput/Sources/MicroInputUI').glob('*.swift'))
+    }
+    assert 'SetExecutionEnabled' in classic_workbench_src and 'SetHostExecutionEnabled' in status_menu_src, (
+        'R-C15 violation: expected global key-mapping kill-switch Toggles in ClassicWorkbenchView.swift and ModalsAndStatusMenuView.swift'
+    )
+    rc15_violations = (
+        find_kill_switch_focus_violations(
+            ui_sources,
+            ui_sources['app/MicroInput/Sources/MicroInputUI/UITheme.swift'],
+        )
+        + find_status_item_state_violations(swift_app_src)
+    )
+    assert not rc15_violations, (
+        'R-C15 violation (global key-mapping kill-switch focus isolation and paused status item state):\n  '
+        + '\n  '.join(rc15_violations)
     )
 
     print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

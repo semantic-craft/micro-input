@@ -93,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var lastRenderedLocale: ResolvedLocale = .zhHans
     private var lastRenderedHostCaution: String? = nil
     private var lastRenderedCanRetryHostCleanup: Bool = false
+    private var lastRenderedHostExecutionEnabled: Bool = false
     let store: CoreStore
     let navigation = WorkbenchNavigationModel()
     let launchAtLogin: LaunchAtLoginController
@@ -144,12 +145,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         lastRenderedLocale = store.locale
         lastRenderedHostCaution = store.statusMenu.hostCautionNotice
         lastRenderedCanRetryHostCleanup = store.statusMenu.canRetryHostCleanup
+        lastRenderedHostExecutionEnabled = store.statusMenu.hostExecutionEnabled
         setupMainMenu()
         setupStatusItem()
         updater.startIfPermitted()
         installHostObservers(isVerifyMode: isVerifyMode)
         observeStoreLocale()
-        observeStoreHostCaution()
+        observeStoreStatusItemState()
         if !silentBoot {
             openMainWindow()
         }
@@ -284,35 +286,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func observeStoreHostCaution() {
+    private func observeStoreStatusItemState() {
         withObservationTracking {
             _ = store.statusMenu.hostCautionNotice
             _ = store.statusMenu.canRetryHostCleanup
+            _ = store.statusMenu.hostExecutionEnabled
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let nextNotice = self.store.statusMenu.hostCautionNotice
                 let nextCanRetry = self.store.statusMenu.canRetryHostCleanup
+                let nextHostExecutionEnabled = self.store.statusMenu.hostExecutionEnabled
                 if self.lastRenderedHostCaution != nextNotice
                     || self.lastRenderedCanRetryHostCleanup != nextCanRetry
+                    || self.lastRenderedHostExecutionEnabled != nextHostExecutionEnabled
                 {
                     self.lastRenderedHostCaution = nextNotice
                     self.lastRenderedCanRetryHostCleanup = nextCanRetry
+                    self.lastRenderedHostExecutionEnabled = nextHostExecutionEnabled
                     self.refreshStatusItemAppearance()
                     if self.popover.isShown {
                         self.syncPopoverContentSize()
                     }
                 }
-                self.observeStoreHostCaution()
+                self.observeStoreStatusItemState()
             }
         }
     }
 
     private func refreshStatusItemAppearance() {
         guard let button = statusItem?.button else { return }
+        let hostExecutionEnabled = store.statusMenu.hostExecutionEnabled
         let notice = store.statusMenu.hostCautionNotice
-        button.image = StatusItemIcon.make(locale: store.locale, hasCaution: notice != nil)
-        button.toolTip = notice ?? store.tr("Micro Input 按键与会话控制")
+        let presentation = StatusItemIcon.presentation(
+            hostExecutionEnabled: hostExecutionEnabled,
+            hasCaution: notice != nil
+        )
+        button.image = StatusItemIcon.make(locale: store.locale, presentation: presentation)
+        button.toolTip = StatusItemIcon.toolTip(
+            locale: store.locale,
+            hostExecutionEnabled: hostExecutionEnabled,
+            hostCautionNotice: notice
+        )
     }
 
     private func refreshLocalizedAppKitChrome() {
@@ -515,6 +530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 win.deminiaturize(nil)
             }
             win.makeKeyAndOrderFront(nil)
+            win.makeFirstResponder(nil)
             NSApp.activate(ignoringOtherApps: true)
             store.dispatchRaw(["domain": "main_window_active_changed", "action": ["active": true]])
             return
@@ -540,6 +556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             )
         )
         win.makeKeyAndOrderFront(nil)
+        win.makeFirstResponder(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.mainWindow = win
         store.dispatchRaw(["domain": "main_window_active_changed", "action": ["active": true]])

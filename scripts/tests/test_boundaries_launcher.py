@@ -284,3 +284,135 @@ pub unsafe extern "C" fn guarded_ok<'a>(_x: &'a u8) -> i32 {
         self.assertTrue(any("qa-runner" in d for d in dirty))
         self.assertTrue(any("synthetic-backend" in d for d in dirty))
         self.assertTrue(any("test-util" in d for d in dirty))
+
+    def test_rc15_kill_switch_focus_and_status_item_state_guards(self):
+        good_ui_sources = {
+            "app/MicroInput/Sources/MicroInputUI/ClassicWorkbenchView.swift": """
+                Toggle(
+                    store.tr("按键映射"),
+                    isOn: Binding(
+                        get: { h.hostExecutionEnabled },
+                        set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
+                    )
+                )
+                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true, allowsKeyboardFocus: false))
+                .fixedSize()
+            """,
+            "app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift": """
+                Toggle(
+                    store.tr("按键映射"),
+                    isOn: Binding(
+                        get: { sm.hostExecutionEnabled },
+                        set: { store.dispatch("status_menu", ["SetHostExecutionEnabled": $0]) }
+                    )
+                )
+                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true, allowsKeyboardFocus: false))
+            """,
+            "app/MicroInput/Sources/MicroInputUI/CreatorMicroBoardView.swift": """
+                Button(store.tr("开启按键映射")) {
+                    store.dispatch("header", ["SetExecutionEnabled": true])
+                }
+            """,
+        }
+        good_theme = """
+        private struct NeutralSwitchBody: View {
+            var body: some View {
+                Group {
+                    if allowsKeyboardFocus {
+                        Button { configuration.isOn.toggle() } label: { switchContent }
+                            .buttonStyle(.plain)
+                            .focusEffectDisabled()
+                            .contentShape(Rectangle())
+                    } else {
+                        switchContent
+                            .contentShape(Rectangle())
+                            .onTapGesture { if isEnabled { configuration.isOn.toggle() } }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityAction { if isEnabled { configuration.isOn.toggle() } }
+                    }
+                }
+            }
+        }
+        """
+        self.assertEqual(module.find_kill_switch_focus_violations(good_ui_sources, good_theme), [])
+
+        missing_focus_flag = {
+            "app/MicroInput/Sources/MicroInputUI/ClassicWorkbenchView.swift": """
+                Toggle(
+                    store.tr("按键映射"),
+                    isOn: Binding(
+                        get: { h.hostExecutionEnabled },
+                        set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
+                    )
+                )
+                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true))
+            """,
+            "app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift": """
+                Toggle(
+                    store.tr("按键映射"),
+                    isOn: Binding(
+                        get: { sm.hostExecutionEnabled },
+                        set: { store.dispatch("status_menu", ["SetHostExecutionEnabled": $0]) }
+                    )
+                )
+                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true, allowsKeyboardFocus: true))
+            """,
+        }
+        focus_violations = module.find_kill_switch_focus_violations(missing_focus_flag, good_theme)
+        self.assertEqual(len(focus_violations), 2)
+        self.assertTrue(any("ClassicWorkbenchView.swift" in v for v in focus_violations))
+        self.assertTrue(any("ModalsAndStatusMenuView.swift" in v for v in focus_violations))
+
+        bad_theme = """
+        private struct NeutralSwitchBody: View {
+            var body: some View {
+                if allowsKeyboardFocus {
+                    Button { configuration.isOn.toggle() } label: { switchContent }
+                } else {
+                    Button { configuration.isOn.toggle() } label: { switchContent }
+                }
+            }
+        }
+        """
+        theme_violations = module.find_kill_switch_focus_violations(good_ui_sources, bad_theme)
+        self.assertTrue(any(".onTapGesture" in v for v in theme_violations))
+        self.assertTrue(any(".contentShape(Rectangle())" in v for v in theme_violations))
+        self.assertTrue(any(".accessibilityAction" in v for v in theme_violations))
+        self.assertTrue(any("must not wrap switch content in Button" in v for v in theme_violations))
+
+        good_app = """
+        private func observeStoreStatusItemState() {
+            withObservationTracking {
+                _ = store.statusMenu.hostCautionNotice
+                _ = store.statusMenu.canRetryHostCleanup
+                _ = store.statusMenu.hostExecutionEnabled
+            } onChange: {}
+        }
+        private func refreshStatusItemAppearance() {
+            let presentation = StatusItemIcon.presentation(hostExecutionEnabled: store.statusMenu.hostExecutionEnabled, hasCaution: false)
+            button.image = StatusItemIcon.make(locale: store.locale, presentation: presentation)
+            button.toolTip = StatusItemIcon.toolTip(locale: store.locale, hostExecutionEnabled: store.statusMenu.hostExecutionEnabled, hostCautionNotice: nil)
+        }
+        """
+        self.assertEqual(module.find_status_item_state_violations(good_app), [])
+
+        missing_observer_app = """
+        func applicationDockMenu() {
+            _ = store.statusMenu.hostExecutionEnabled
+        }
+        private func observeStoreHostCaution() {
+            withObservationTracking {
+                _ = store.statusMenu.hostCautionNotice
+                _ = store.statusMenu.canRetryHostCleanup
+            } onChange: {}
+        }
+        private func refreshStatusItemAppearance() {
+            button.image = StatusItemIcon.make(locale: store.locale, presentation: .active)
+            button.toolTip = store.tr("Micro Input 按键与会话控制")
+        }
+        """
+        app_violations = module.find_status_item_state_violations(missing_observer_app)
+        self.assertTrue(any("store.statusMenu.hostExecutionEnabled" in v for v in app_violations))
+        self.assertTrue(any("StatusItemIcon.presentation(" in v for v in app_violations))
+        self.assertTrue(any("StatusItemIcon.toolTip(" in v for v in app_violations))

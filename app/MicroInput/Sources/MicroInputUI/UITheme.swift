@@ -566,41 +566,61 @@ public struct CapsuleMenuLabel: View {
 
 public struct NeutralSwitchToggleStyle: ToggleStyle {
     public let showsLabel: Bool
-    public init(showsLabel: Bool = false) { self.showsLabel = showsLabel }
+    public let allowsKeyboardFocus: Bool
+    public init(showsLabel: Bool = false, allowsKeyboardFocus: Bool = true) {
+        self.showsLabel = showsLabel
+        self.allowsKeyboardFocus = allowsKeyboardFocus
+    }
     public func makeBody(configuration: Configuration) -> some View {
-        NeutralSwitchBody(showsLabel: showsLabel, configuration: configuration)
+        NeutralSwitchBody(showsLabel: showsLabel, allowsKeyboardFocus: allowsKeyboardFocus, configuration: configuration)
     }
 }
 
 private struct NeutralSwitchBody: View {
     let showsLabel: Bool
+    let allowsKeyboardFocus: Bool
     let configuration: ToggleStyle.Configuration
     @Environment(\.isEnabled) private var isEnabled
 
-    var body: some View {
-        Button { configuration.isOn.toggle() } label: {
-            HStack(spacing: 8) {
-                if showsLabel {
-                    configuration.label
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(UITheme.textPrimary)
-                }
-                ZStack(alignment: configuration.isOn ? .trailing : .leading) {
-                    Capsule()
-                        .fill(configuration.isOn ? UITheme.controlPrimaryFill : UITheme.switchOffFill)
-                        .frame(width: 40, height: 24)
-                    Circle()
-                        .fill(configuration.isOn ? UITheme.switchThumbOnFill : UITheme.switchThumbOffFill)
-                        .frame(width: 20, height: 20)
-                        .shadow(color: Color.black.opacity(0.14), radius: 1.5, x: 0, y: 0.5)
-                        .padding(2)
-                }
-                .animation(.easeInOut(duration: 0.15), value: configuration.isOn)
+    private var switchContent: some View {
+        HStack(spacing: 8) {
+            if showsLabel {
+                configuration.label
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(UITheme.textPrimary)
             }
-            .contentShape(Rectangle())
+            ZStack(alignment: configuration.isOn ? .trailing : .leading) {
+                Capsule()
+                    .fill(configuration.isOn ? UITheme.controlPrimaryFill : UITheme.switchOffFill)
+                    .frame(width: 40, height: 24)
+                Circle()
+                    .fill(configuration.isOn ? UITheme.switchThumbOnFill : UITheme.switchThumbOffFill)
+                    .frame(width: 20, height: 20)
+                    .shadow(color: Color.black.opacity(0.14), radius: 1.5, x: 0, y: 0.5)
+                    .padding(2)
+            }
+            .animation(.easeInOut(duration: 0.15), value: configuration.isOn)
         }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
+        .contentShape(Rectangle())
+    }
+
+    var body: some View {
+        Group {
+            if allowsKeyboardFocus {
+                Button { configuration.isOn.toggle() } label: { switchContent }
+                    .buttonStyle(.plain)
+                    .focusEffectDisabled()
+                    .contentShape(Rectangle())
+            } else {
+                switchContent
+                    .contentShape(Rectangle())
+                    .onTapGesture { if isEnabled { configuration.isOn.toggle() } }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityValue(configuration.isOn ? "1" : "0")
+                    .accessibilityAction { if isEnabled { configuration.isOn.toggle() } }
+            }
+        }
         .opacity(isEnabled ? 1.0 : 0.42)
     }
 }
@@ -785,39 +805,6 @@ public struct PopoverActionRow: View {
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .onHover { isHovered = $0 }
-    }
-}
-
-@MainActor
-public enum StatusItemIcon {
-    private static let zhNormal = build(locale: .zhHans, hasCaution: false), enNormal = build(locale: .en, hasCaution: false)
-    private static let zhCaution = build(locale: .zhHans, hasCaution: true), enCaution = build(locale: .en, hasCaution: true)
-
-    public static func make(locale: ResolvedLocale = .zhHans, hasCaution: Bool = false) -> NSImage { hasCaution ? (locale == .en ? enCaution : zhCaution) : (locale == .en ? enNormal : zhNormal) }
-
-    private static func build(locale: ResolvedLocale, hasCaution: Bool) -> NSImage {
-        let image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
-            NSColor.black.set()
-            let strokePath: (NSBezierPath, CGFloat) -> Void = { $0.lineWidth = $1; $0.stroke() }
-            let fillRect: (CGFloat, CGFloat, CGFloat, CGFloat, CGFloat) -> Void = { x, y, w, h, r in
-                NSBezierPath(roundedRect: NSRect(x: x, y: y, width: w, height: h), xRadius: r, yRadius: r).fill()
-            }
-            strokePath(NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 18, height: 13), xRadius: 2, yRadius: 2), 1.25)
-            for y in [7.0, 10.5] { for x in [3.5, 7.0, 10.5] { fillRect(x, y, 2, 2, 0.35) } }
-            fillRect(5, 4.5, 7.5, 1.25, 0.4)
-            strokePath(NSBezierPath(ovalIn: NSRect(x: 14, y: 10, width: 3, height: 3)), 1)
-            fillRect(14.5, 5, 2, 3, 0.4)
-            if hasCaution {
-                NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
-                NSBezierPath(ovalIn: NSRect(x: 14.25, y: 11.75, width: 5.75, height: 5.75)).fill()
-                NSGraphicsContext.current?.cgContext.setBlendMode(.normal); NSColor.black.set()
-                NSBezierPath(ovalIn: NSRect(x: 15.25, y: 12.75, width: 3.75, height: 3.75)).fill()
-            }
-            return true
-        }
-        image.isTemplate = true
-        image.accessibilityDescription = locale == .en ? (hasCaution ? "Micro Input Keypad (Attention Needed)" : "Micro Input Keypad") : (hasCaution ? "Micro Input 键盘（需关注）" : "Micro Input 键盘")
-        return image
     }
 }
 

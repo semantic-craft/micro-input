@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 public enum CodexKeycapId: String, CaseIterable, Identifiable {
@@ -497,5 +498,104 @@ public struct CodexKeycapGlyphView: View, @MainActor Equatable {
             }
         }
         .frame(width: size, height: size)
+    }
+}
+
+@MainActor
+public enum StatusItemIcon {
+    public enum Presentation: Equatable, Sendable {
+        case active
+        case paused
+        case caution
+    }
+
+    private static let zhActive = build(locale: .zhHans, presentation: .active)
+    private static let enActive = build(locale: .en, presentation: .active)
+    private static let zhPaused = build(locale: .zhHans, presentation: .paused)
+    private static let enPaused = build(locale: .en, presentation: .paused)
+    private static let zhCaution = build(locale: .zhHans, presentation: .caution)
+    private static let enCaution = build(locale: .en, presentation: .caution)
+
+    public static func presentation(hostExecutionEnabled: Bool, hasCaution: Bool) -> Presentation {
+        if hasCaution {
+            return .caution
+        }
+        return hostExecutionEnabled ? .active : .paused
+    }
+
+    public static func toolTip(
+        locale: ResolvedLocale,
+        hostExecutionEnabled: Bool,
+        hostCautionNotice: String?
+    ) -> String {
+        if let hostCautionNotice {
+            return hostCautionNotice
+        }
+        if !hostExecutionEnabled {
+            return L10n.tr("已暂停软件按键映射，点击菜单栏重新启用", locale)
+        }
+        return L10n.tr("Micro Input 按键与会话控制", locale)
+    }
+
+    public static func make(locale: ResolvedLocale = .zhHans, presentation: Presentation = .active) -> NSImage {
+        switch (locale, presentation) {
+        case (.zhHans, .active): return zhActive
+        case (.en, .active): return enActive
+        case (.zhHans, .paused): return zhPaused
+        case (.en, .paused): return enPaused
+        case (.zhHans, .caution): return zhCaution
+        case (.en, .caution): return enCaution
+        }
+    }
+
+    private static func build(locale: ResolvedLocale, presentation: Presentation) -> NSImage {
+        let image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
+            let baseColor = presentation == .paused ? NSColor.black.withAlphaComponent(0.42) : NSColor.black
+            baseColor.set()
+            let strokePath: (NSBezierPath, CGFloat) -> Void = { $0.lineWidth = $1; $0.stroke() }
+            let fillRect: (CGFloat, CGFloat, CGFloat, CGFloat, CGFloat) -> Void = { x, y, w, h, r in
+                NSBezierPath(roundedRect: NSRect(x: x, y: y, width: w, height: h), xRadius: r, yRadius: r).fill()
+            }
+            strokePath(NSBezierPath(roundedRect: NSRect(x: 1, y: 2.5, width: 18, height: 13), xRadius: 2, yRadius: 2), 1.25)
+            for y in [7.0, 10.5] { for x in [3.5, 7.0, 10.5] { fillRect(x, y, 2, 2, 0.35) } }
+            fillRect(5, 4.5, 7.5, 1.25, 0.4)
+            strokePath(NSBezierPath(ovalIn: NSRect(x: 14, y: 10, width: 3, height: 3)), 1)
+            fillRect(14.5, 5, 2, 3, 0.4)
+
+            switch presentation {
+            case .active:
+                break
+            case .paused:
+                NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
+                NSBezierPath(roundedRect: NSRect(x: 13.5, y: 11.0, width: 6.5, height: 7.0), xRadius: 1.5, yRadius: 1.5).fill()
+                NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+                NSColor.black.set()
+                fillRect(14.5, 12.0, 1.5, 5.0, 0.5)
+                fillRect(17.5, 12.0, 1.5, 5.0, 0.5)
+            case .caution:
+                NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
+                NSBezierPath(ovalIn: NSRect(x: 14.25, y: 11.75, width: 5.75, height: 5.75)).fill()
+                NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+                NSColor.black.set()
+                NSBezierPath(ovalIn: NSRect(x: 15.25, y: 12.75, width: 3.75, height: 3.75)).fill()
+            }
+            return true
+        }
+        image.isTemplate = true
+        switch (locale, presentation) {
+        case (.zhHans, .active):
+            image.accessibilityDescription = "Micro Input 键盘"
+        case (.en, .active):
+            image.accessibilityDescription = "Micro Input Keypad"
+        case (.zhHans, .paused):
+            image.accessibilityDescription = "Micro Input 键盘（已暂停按键映射）"
+        case (.en, .paused):
+            image.accessibilityDescription = "Micro Input Keypad (Key Mapping Paused)"
+        case (.zhHans, .caution):
+            image.accessibilityDescription = "Micro Input 键盘（需关注）"
+        case (.en, .caution):
+            image.accessibilityDescription = "Micro Input Keypad (Attention Needed)"
+        }
+        return image
     }
 }
