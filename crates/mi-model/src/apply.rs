@@ -116,8 +116,6 @@ fn unique<'a>(items: Vec<&'a RawValue>, id: &Value) -> Result<&'a RawValue, Stri
     }
     Ok(matching[0])
 }
-/// RawValue borrows ranges directly from `input` (serde_json 1.0.154, raw_value feature).
-/// Strict device parsing has already rejected duplicate members and invalid row shapes.
 fn splice(
     input: &[u8],
     pid: &Value,
@@ -205,7 +203,6 @@ impl Pending {
         }
         let keymap = bytes(current, "keymap")?.ok_or("没有 keymap 文件")?;
         let smart = bytes(current, "smart_actions")?;
-        // Require exact baseline bytes as well as matching list digests.
         let baseline = doc.baseline.as_ref().ok_or("没有设备基线")?;
         if bytes(baseline, "keymap")?.as_ref() != Some(&keymap)
             || bytes(baseline, "smart_actions")? != smart
@@ -634,7 +631,6 @@ impl Pending {
                             Rainbow => key != "color",
                             Breath => true,
                         };
-                    // Unknown original effects were rejected above.
                     if !valid || !enabled || !crate::lighting::known_value(key, &b[key]) {
                         return Err("未知字段、超界参数或禁用参数发生变化".into());
                     }

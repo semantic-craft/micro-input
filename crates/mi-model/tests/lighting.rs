@@ -257,8 +257,6 @@ fn three_way_lighting_merge_and_new_baseline_do_not_repeat_applied_differences()
     let cmp = Comparison::new(&merged, &config, baseline(changed.as_bytes())).unwrap();
     assert!(!cmp.can_merge());
 }
-// Frozen pre-lighting v2 layer decoder and the old round-trip rule. Do not replace
-// OldLayer with the current LayerNode: that would stop testing old-reader behavior.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct OldLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]

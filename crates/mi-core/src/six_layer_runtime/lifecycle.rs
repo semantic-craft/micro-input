@@ -456,8 +456,6 @@ pub async fn resume(
         installation.target = target.clone();
         saved.installation = Some(installation.clone());
         save(&document_dir.join("six-layer-runtime.json"), &saved)?;
-        // The board is already direct-coded. A failed reload must leave swallowing
-        // rules in place, including when the previous rule had been removed.
         let readiness = wait_ready(&baseline, &patch, &target)?;
         let mut running = new_running(
             receiver,

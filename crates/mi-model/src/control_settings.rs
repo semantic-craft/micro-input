@@ -63,8 +63,6 @@ impl Draft {
                     settings.encoder_hold_action_id = old.encoder_hold_action_id.clone();
                 }
             }
-            // Never remove a slot when reducing the active count or switching modes.
-            // Dormant originals and independent assignments remain addressable.
             let required_slots = if settings.joystick_mode == "logical_sectors" {
                 16 + settings.active_sectors as usize
             } else if matches!(settings.joystick_mode.as_str(), "mouse" | "scroll") {

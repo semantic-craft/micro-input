@@ -112,7 +112,6 @@ pub fn is_unmatched_response(
     {
         return Ok(true);
     }
-    // Check ID aliases before a method mismatch can discard a matching packet.
     alias(&v, "id", "i")?;
     Ok(alias(&v, "method", "m")?
         .and_then(Value::as_str)
@@ -216,7 +215,6 @@ pub trait Framer: Send {
     fn feed(&mut self, report: &[u8]) -> Result<Vec<Line>, ProtoError>;
     fn clear(&mut self);
 }
-// TODO(UNKNOWN-01): candidate backend has E-075 API evidence; current-firmware long reports await application acceptance.
 pub struct UnimplementedFramer;
 impl Framer for UnimplementedFramer {
     fn encode(&self, _: &[u8]) -> Result<Vec<Report>, ProtoError> {
@@ -227,12 +225,10 @@ impl Framer for UnimplementedFramer {
     }
     fn clear(&mut self) {}
 }
-// TODO(UNKNOWN-03): error and identity response schemas are opaque; never interpret success fields.
 #[derive(Debug, Clone)]
 pub enum Identity {
     Unknown(Value),
 }
-// TODO(UNKNOWN-07): notification parameters unknown; variants describe names only, never execute.
 #[derive(Debug, Clone)]
 pub enum HostNotification {
     InsertText(Value),
@@ -269,7 +265,6 @@ pub enum HostAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // E-077: native 0.6.3 replies echo the requested read-only method.
     #[test]
     fn response_can_echo_method_without_becoming_a_device_request() {
         assert!(
@@ -309,7 +304,6 @@ mod tests {
             "{\"id\":1,\"result\":\"中😀\"}\r\n{\"m\":\"kb.radial\"}{\"i\":2,\"result\":null}";
         let mut reader = NativeFramer::default();
         let mut out = vec![];
-        // Force UTF-8 and string punctuation across report boundaries.
         for part in source.as_bytes().chunks(2) {
             let mut report = vec![0; 64];
             report[0] = 6;
@@ -358,7 +352,6 @@ mod tests {
             assert!(validate_read_only(&RpcRequest::new(method, params, 0).unwrap()).is_err());
         }
     }
-    // R-D05/R-D13: a device request carrying our ID is never a response.
     #[test]
     fn strict_response_envelopes_and_compact_ids() {
         assert!(matches!(

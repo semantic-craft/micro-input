@@ -358,7 +358,6 @@ mod tests {
         let select = request(&store, json!({"kind":"select","profile_id":ids[0]}));
         store.update_routing(select).unwrap();
         assert_eq!(store.host_revision(), 1);
-        // The HUD must keep physical left-to-right order, not the former inverted IDs.
         let keys = store.routing_state()["keys"].as_array().unwrap().clone();
         assert_eq!(keys[0]["binding_id"], "AG00");
         assert_eq!(keys[0]["control"], "row0-col0-left");
@@ -505,7 +504,6 @@ mod tests {
             }
         }
 
-        // Verify built-in prompt templates, navigation, submit, and custom text payload redaction
         let ag_pid = ids
             .iter()
             .find(|pid| store.draft.document.editable.graph.profiles[*pid].name == "Antigravity")

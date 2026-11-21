@@ -39,7 +39,6 @@ def main():
     loader.exec_module(kit)
     kit.verify(args.kit)
     target = json.loads(kit.read_regular(args.kit / 'plan.json'))['target']
-    # No caller-provided RPC, payload, backup or target path reaches the wire.
     env.update(MI_HARDWARE_OPERATOR='I_AUTHORIZE_H0_READONLY_BACKUP' if args.execute == 'h0' else 'I_AUTHORIZE_H1_EXACT_TEMPFILE',
                MI_HARDWARE_PATH=args.device_path, MI_HARDWARE_TARGET=target)
     if args.execute == 'h1':
@@ -70,8 +69,6 @@ def main():
     for sig in (signal.SIGTERM, signal.SIGHUP): signal.signal(sig, interrupt)
     journal('prepared')
     if args.execute == 'h1':
-        # Exclusive durable claim: even interruption before open consumes this kit.
-        # Never automatically clear a claim after success or an unknown outcome.
         claim = args.kit.parent / (target + '.h1-claimed.json')
         kit.write_new(claim, kit.encoded({'target': target, 'supervisor': str(directory)}))
         fd = os.open(claim.parent, os.O_RDONLY)

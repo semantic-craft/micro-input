@@ -2,7 +2,6 @@ use super::*;
 use mi_proto::{Line, Report};
 use mi_transport::MockLink;
 use serde_json::json;
-// TEST ONLY: one raw JSON object per report is a made-up format, NOT a device protocol.
 struct TestFramer;
 impl Framer for TestFramer {
     fn encode(&self, p: &[u8]) -> Result<Vec<Report>, ProtoError> {
@@ -190,7 +189,6 @@ async fn notification_after_response_in_same_report_is_not_lost() {
     ));
 }
 
-// R-D13: notifications belong to the session, including between requests.
 #[tokio::test]
 async fn idle_notifications_are_received_without_a_request() {
     let (s, l, _) = setup(100);
@@ -231,7 +229,6 @@ async fn production_exit_rejects_forbidden_parameters_without_sending() {
     s.shutdown().await;
 }
 
-// R-D09/D01: status success is sufficient; absent version triggers explicit fallback.
 #[tokio::test]
 async fn identity_preserves_unknown_indices_and_falls_back_only_when_needed() {
     let (l, mut requests) = MockLink::new();
@@ -354,7 +351,6 @@ async fn exhausted_request_preserves_reader_join_for_lifecycle_shutdown() {
         SessionConfig::default(),
     );
     delayed.started.notified().await;
-    // The full 999-request boundary is covered separately; isolate cleanup here.
     session.queue.lock().await.next_id = 999;
     assert!(matches!(
         session.read_identity_info().await,
@@ -479,8 +475,6 @@ async fn vendor_binding_candidate_is_readable_without_claiming_physical_input() 
 async fn candidate_variants_preserve_binding_identity_and_do_not_merge_or_count_actions() {
     let (s, link, mut requests) = setup(500);
     let mut monitor = s.subscribe_input();
-    // The public source's wide-key sequence remains four separate binding events.
-    // Release-before-press, duplicate presses, and AG13/14's release remain diagnostics.
     let inputs = [
         ("AG11", 1),
         ("AG10", 1),
@@ -579,7 +573,6 @@ async fn malformed_and_other_generation_inputs_remain_unknown_without_false_rele
     s.shutdown().await;
 }
 
-// Test-only logical decoding; this is not a Creator Micro wire schema.
 struct SyntheticInputDecoder;
 impl crate::InputDecoder for SyntheticInputDecoder {
     fn decode(&self, _: &HostNotification) -> Option<(crate::InputEventKind, String)> {
@@ -603,7 +596,6 @@ async fn input_gap_clears_pressed_state_and_requires_new_subscription() {
             .send(br#"{"m":"test.synthetic"}"#.to_vec())
             .unwrap();
     }
-    // A response behind the flood is a public barrier that the single reader consumed it.
     let session = s.clone();
     let barrier =
         tokio::spawn(async move { session.request(Method::SysVersion, Value::Null).await });
@@ -779,7 +771,6 @@ async fn waiting_for_session_end_observes_disconnect_without_polling() {
         .await
         .unwrap()
         .unwrap();
-    // Calling after shutdown must not miss the earlier notification.
     tokio::time::timeout(Duration::from_millis(100), session.wait_disconnected())
         .await
         .unwrap();
@@ -882,8 +873,6 @@ async fn cancelling_incomplete_send_invalidates_session() {
 }
 
 #[tokio::test]
-// Physical 0.6.3 capture, 2026-11-03: operator pressed left once, then right once.
-// Candidate and mapped subscriptions both retain AG00 then AG01; only the old slot mapping was reversed.
 async fn verified_input_maps_observed_row0_order_joystick_sectors_and_merges_wide_key() {
     let (s, link, _) = setup(500);
     let mut monitor = s.subscribe_verified_input();
@@ -921,7 +910,6 @@ async fn verified_input_maps_observed_row0_order_joystick_sectors_and_merges_wid
     assert_eq!(e4.kind, crate::InputEventKind::Released);
     assert_eq!(e4.logical_switch.as_deref(), Some("logical-1"));
 
-    // AG11 press + AG10 press + AG11 release + AG10 release -> 1 Pressed + 1 Released on logical-10
     let wide_press = monitor.next().await.unwrap();
     assert_eq!(wide_press.kind, crate::InputEventKind::Pressed);
     assert_eq!(wide_press.binding_id.as_deref(), Some("AG10"));
@@ -972,29 +960,22 @@ async fn verified_input_decodes_stock_codex_act_enc_and_radial_joystick() {
     let (s, link, _) = setup(500);
     let mut monitor = s.subscribe_verified_input();
     for raw in [
-        // ACT10 + ACT11 wide key on stock Codex layer coalesces into AG10 (logical-10)
         json!({"m":"v.oai.hid","p":{"k":"ACT10","act":1}}),
         json!({"m":"v.oai.hid","p":{"k":"ACT11","act":1}}),
         json!({"m":"v.oai.hid","p":{"k":"ACT10","act":0}}),
         json!({"m":"v.oai.hid","p":{"k":"ACT11","act":0}}),
-        // ENC_CC with act=2 (firmware 0.6.3 encoder step pulse) -> AG13 (logical-13)
         json!({"m":"v.oai.hid","p":{"k":"ENC_CC","act":2}}),
-        // ENC_CLK press + release -> ENC_CLK (logical-15)
         json!({"m":"v.oai.hid","p":{"k":"ENC_CLK","act":1}}),
         json!({"m":"v.oai.hid","p":{"k":"ENC_CLK","act":0}}),
-        // v.oai.rad continuous radial joystick in normalized turns [0.0, 1.0):
-        // East (a=0.0, d=0.9), repeated East (a=0.05, d=0.95, ignored), center release (d=0.05)
         json!({"m":"v.oai.rad","p":{"a":0.0,"d":0.9}}),
         json!({"m":"v.oai.rad","p":{"a":0.05,"d":0.95}}),
         json!({"m":"v.oai.rad","p":{"a":0.0,"d":0.05}}),
-        // South (a=0.25 -> AG17), West (a=0.5 -> AG16), North (a=0.75 -> AG15)
         json!({"m":"v.oai.rad","p":{"a":0.25,"d":0.9}}),
         json!({"m":"v.oai.rad","p":{"a":0.25,"d":0.05}}),
         json!({"m":"v.oai.rad","p":{"a":0.5,"d":0.9}}),
         json!({"m":"v.oai.rad","p":{"a":0.5,"d":0.05}}),
         json!({"m":"v.oai.rad","p":{"a":0.75,"d":0.9}}),
         json!({"m":"v.oai.rad","p":{"a":0.75,"d":0.05}}),
-        // Out-of-range angle (a=5.0) must be rejected as UnknownNotification
         json!({"m":"v.oai.rad","p":{"a":5.0,"d":0.95}}),
     ] {
         link.inject.send(raw.to_string().into_bytes()).unwrap();
@@ -1061,8 +1042,6 @@ async fn verified_input_decodes_stock_codex_act_enc_and_radial_joystick() {
     assert_eq!(invalid_rad.kind, crate::InputEventKind::UnknownNotification);
     assert!(!invalid_rad.action_eligible);
 
-    // Sector-to-sector roll without returning to center (North AG15 -> East AG18),
-    // followed by release at d=0.25 (< 0.35 threshold).
     for raw in [
         json!({"m":"v.oai.rad","p":{"a":0.75,"d":0.9}}),
         json!({"m":"v.oai.rad","p":{"a":0.0,"d":0.9}}),
@@ -1131,7 +1110,6 @@ async fn ingress_watermark_precedes_decode_and_preserves_unread_radial_state() {
     session.shutdown().await;
 }
 
-// Candidate bytes can be inspected and framed offline, but cannot reach a native link.
 #[tokio::test]
 async fn encoded_mutation_candidates_cannot_bypass_production_exit() {
     use mi_proto::lighting_candidate::{

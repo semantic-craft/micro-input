@@ -142,8 +142,6 @@ pub fn export(draft: &Draft, pid: Option<&str>, lid: Option<&str>) -> Result<Str
         doc.editable.source_refs.retain(|id, _| ids.contains(id));
     }
     doc.validate()?;
-    // The immutable source archive is deliberately preserved, including unknown raw values.
-    // UI must disclose that scoped exports still contain this complete archive.
     let p = Preset {
         format: "micro-input-preset".into(),
         version: 1,
@@ -225,10 +223,7 @@ pub fn import(text: &str) -> Result<Draft, String> {
         .into_iter()
         .map(|(id, v)| (map[&id].clone(), v))
         .collect();
-    // An imported baseline is history, never authority for the connected device.
     let mut old_origin = doc.origin.clone();
-    // Store the source payload once: duplicating it in the history wrapper would make
-    // otherwise valid exported files exceed the document budget when imported.
     let config = old_origin
         .as_object_mut()
         .ok_or("来源记录格式无效")?
@@ -246,7 +241,6 @@ pub fn import(text: &str) -> Result<Draft, String> {
 }
 pub fn starter() -> Result<String, String> {
     let mut d = Draft::default();
-    // Build a fresh original preset, without carrying the bundled demo's unknown bindings.
     let ids = d.document.editable.graph.profile_order.clone();
     for id in ids {
         d.delete_profile(&id)?;
@@ -944,7 +938,6 @@ fn legacy_agent_specs() -> Vec<AgentProfileSpec> {
 pub const LOCAL_CODEX_PROFILE_NAME: &str = "Codex · Micro Input";
 
 fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
-    // Retain the exact old built-ins only as migration fingerprints.
     let mut legacy_specs = legacy_agent_specs();
     let mut specs = legacy_specs.clone();
     for (name, adapter, bundle) in [
@@ -982,7 +975,6 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
         }
     }
 
-    // Desktop targets are bound explicitly; no inferred approval/send shortcuts.
     {
         let (name, adapter, bundle) = ("Codex", "codex", "com.openai.codex");
         let assignments = vec![
@@ -1993,8 +1985,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     let (specs, legacy_specs) = agent_starter_specs();
     let mut created_ids = Vec::new();
     let mut work = draft.clone();
-    // Retire only unchanged source profiles from the exact bundled fixture, even
-    // when other profiles have since been added. Preserve edited and imported data.
     let mut seed = crate::demo().map_err(|e| format!("{e:?}"))?;
     if let Some(read_at) = draft.document.origin["config"]["read_at"].as_u64() {
         seed.read_at = read_at;
@@ -3472,8 +3462,6 @@ mod agent_migration_tests {
             "{native_name} default layer must be a protected KV_OAI_* layer"
         );
 
-        // Downgrade DeepSeek Coder (DSH) to pre-Slice-B 9-slot push-to-talk state (slots 0..=8, no dial),
-        // and customize Herdr by adding a joystick prompt slot (slot 16 -> prompt-continue).
         let (_, legacy_specs) = agent_starter_specs();
         let pre_dial_dsh = legacy_specs
             .iter()

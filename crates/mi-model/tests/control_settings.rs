@@ -285,7 +285,6 @@ fn set_control_settings_preserves_encoder_hold_and_orphan_gc_plus_copy_layer_res
         .actions
         .contains_key(&hold_uuid));
 
-    // Updating joystick_mode with encoder_hold_action_id: None must preserve existing encoder_hold_action_id.
     draft
         .set_control_settings(
             &pid,
@@ -307,7 +306,6 @@ fn set_control_settings_preserves_encoder_hold_and_orphan_gc_plus_copy_layer_res
         Some(hold_uuid.as_str())
     );
 
-    // duplicate_layer must clone encoder_hold_action_id to an independent action UUID.
     let copied_lid = draft.duplicate_layer(&pid, &lid, "副本层").unwrap();
     let copied_hold_uuid = draft.document.editable.graph.layers[&copied_lid]
         .control_settings
@@ -320,7 +318,6 @@ fn set_control_settings_preserves_encoder_hold_and_orphan_gc_plus_copy_layer_res
         "agent-model-picker-open"
     );
 
-    // Unassigning encoder hold on original layer removes orphan hold_uuid while keeping copied_hold_uuid.
     draft.unassign_encoder_hold(&pid_val, &lid_val).unwrap();
     assert!(!draft
         .document

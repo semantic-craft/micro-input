@@ -261,7 +261,6 @@ mod tests {
         history.visit(codex.clone());
         assert_eq!(history.back(|_| true), Some(other_app.clone()));
 
-        // Re-visiting the current place after stepping back must NOT drop the forward stack.
         history.visit(other_app);
         assert!(history.can_go_forward(|_| true));
         assert_eq!(history.forward(|_| true), Some(codex));
@@ -308,7 +307,6 @@ mod tests {
         assert_eq!(history.forward(is_available), None);
         assert_eq!(history.current(), Some(&codex));
 
-        // When no earlier place is available, cursor stays put.
         assert!(!history.can_go_back(|_| false));
         assert_eq!(history.back(|_| false), None);
         assert_eq!(history.current(), Some(&codex));
@@ -335,13 +333,11 @@ mod tests {
     #[test]
     fn four_app_places_disambiguate_same_name_across_different_workspaces_and_instances() {
         let mut history = NavigationHistory::new();
-        // Antigravity: same conversation ID in two different workspaces
         let ag_ws1 = NavigationPlace::antigravity("conv-1", "/path/workspace-alpha");
         let ag_ws2 = NavigationPlace::antigravity("conv-1", "/path/workspace-beta");
         assert_ne!(ag_ws1, ag_ws2);
         assert_ne!(ag_ws1.target_id(), ag_ws2.target_id());
 
-        // DSH: same session ID across two different workspaces or hosts
         let dsh_ws1 = NavigationPlace::dsh("sess-1", "workspace-alpha", "host-1");
         let dsh_ws2 = NavigationPlace::dsh("sess-1", "workspace-beta", "host-1");
         let dsh_host2 = NavigationPlace::dsh("sess-1", "workspace-alpha", "host-2");
@@ -350,7 +346,6 @@ mod tests {
         assert_ne!(dsh_ws1.target_id(), dsh_ws2.target_id());
         assert_ne!(dsh_ws1.target_id(), dsh_host2.target_id());
 
-        // Visiting each place records distinct history entries without collision
         for p in [&ag_ws1, &ag_ws2, &dsh_ws1, &dsh_ws2] {
             history.visit((*p).clone());
         }

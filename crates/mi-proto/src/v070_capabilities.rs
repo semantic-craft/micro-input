@@ -709,7 +709,6 @@ mod tests {
         let fast = MouseSpeedPreset::Fast.to_mouse_config();
         assert_eq!(fast.stick_speed, 30);
         assert_eq!(fast.stick_regulator, 10);
-        // Standard effective stick gain (24/10 = 2.40) is exactly 20% slower than Fast (30/10 = 3.00).
         assert_eq!(standard.stick_speed * 5, fast.stick_speed * 4);
         assert_eq!(
             MouseSpeedPreset::parse("FAST").unwrap(),

@@ -692,7 +692,6 @@ fn six_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
     let ids = preset::install_agent_starter_profiles(&mut d).unwrap();
     assert_eq!(ids.len(), 6);
 
-    // Bind Slice C & D actions (navigation, prompts, submit) onto Antigravity before exporting
     let ag_pid = ids[0].clone();
     let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
     d.set_control_settings(
@@ -720,7 +719,6 @@ fn six_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
             .unwrap();
     }
 
-    // 1. Full document export/import round-trip
     let doc_text = preset::export(&d, None, None).unwrap();
     let doc_imported = preset::import(&doc_text).unwrap();
     assert_eq!(doc_imported.config.profiles.len(), 6);
@@ -812,7 +810,6 @@ fn six_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
         })
     );
 
-    // 2. Profile-scoped and Layer-scoped export/import round-trip
     for scope_layer in [None, Some(ag_lid.as_str())] {
         let scoped_text = preset::export(&d, Some(&ag_pid), scope_layer).unwrap();
         let scoped_imported = preset::import(&scoped_text).unwrap();
@@ -1061,7 +1058,6 @@ fn coding_agent_legacy_encoder_upgrades_losslessly_and_preserves_custom_encoder_
         .clone();
     let codex_lid = d.document.editable.graph.profiles[&codex_pid].layer_order[0].clone();
 
-    // Simulate a pre-change Antigravity profile with legacy desktop-prev-chat / next-chat / search and no encoder_hold_action_id.
     d.unassign_encoder_hold(&json!(ag_pid), &json!(ag_lid))
         .unwrap();
     for (slot, id, cmd) in [
@@ -1084,7 +1080,6 @@ fn coding_agent_legacy_encoder_upgrades_losslessly_and_preserves_custom_encoder_
         .unwrap();
     }
 
-    // Simulate user-customized encoder slot 13 on Codex · Micro Input (must NOT be overwritten).
     d.unassign_encoder_hold(&json!(codex_pid), &json!(codex_lid))
         .unwrap();
     d.assign(
@@ -1140,7 +1135,6 @@ fn coding_agent_legacy_encoder_upgrades_losslessly_and_preserves_custom_encoder_
             command: "search".into(),
         })
     );
-    // Customized Codex encoder slot 13 remains untouched.
     let codex_slot13_aid = d.document.editable.graph.layers[&codex_lid]
         .controls
         .values()
@@ -1171,8 +1165,6 @@ fn coding_agent_v080_encoder_defaults_upgrade_to_v090_and_preserve_custom_hold()
         .clone();
     let dsh_lid = d.document.editable.graph.profiles[&dsh_pid].layer_order[0].clone();
 
-    // 1. Simulate exact unmodified v0.8.0 Antigravity profile:
-    // Slot 13: prev, Slot 14: next, Slot 15: confirm, Hold: model-picker-open.
     d.assign(
         &json!(ag_pid),
         &json!(ag_lid),
@@ -1199,7 +1191,6 @@ fn coding_agent_v080_encoder_defaults_upgrade_to_v090_and_preserve_custom_hold()
     )
     .unwrap();
 
-    // 2. Simulate customized hold action on DSH (e.g. user assigned custom script).
     d.assign_encoder_hold(
         &json!(dsh_pid),
         &json!(dsh_lid),
@@ -1226,7 +1217,6 @@ fn coding_agent_v080_encoder_defaults_upgrade_to_v090_and_preserve_custom_hold()
 
     preset::install_agent_starter_profiles(&mut d).unwrap();
 
-    // Antigravity v0.8.0 upgraded to v0.9.0 defaults.
     assert!(!preset::coding_agent_layer_needs_encoder_migration(
         &d.document,
         "Antigravity",
@@ -1377,7 +1367,6 @@ fn antigravity_v160_migrates_back_to_session_top_six_and_side_panel_joystick_whi
         .clone();
     let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
 
-    // Starter defaults use top-6 session keys + 4-sector left/right side panel joystick.
     for slot in 0..6u32 {
         assert_eq!(
             mi_model::host_router::resolve_host_action(
@@ -1413,7 +1402,6 @@ fn antigravity_v160_migrates_back_to_session_top_six_and_side_panel_joystick_whi
     assert_eq!(cs.joystick_mode, "logical_sectors");
     assert_eq!(cs.active_sectors, 4);
 
-    // 1. Simulate unmodified PR #160 Antigravity layer (subagent + mouse-click:left + unbound 2..5 + mouse).
     d.assign(
         &json!(ag_pid),
         &json!(ag_lid),
@@ -1464,7 +1452,6 @@ fn antigravity_v160_migrates_back_to_session_top_six_and_side_panel_joystick_whi
     .unwrap();
 
     preset::install_agent_starter_profiles(&mut d).unwrap();
-    // Re-running starter installer migrates #160 Antigravity back to session top-6 + side-panel joystick.
     for slot in 0..6u32 {
         assert_eq!(
             mi_model::host_router::resolve_host_action(
@@ -1494,7 +1481,6 @@ fn antigravity_v160_migrates_back_to_session_top_six_and_side_panel_joystick_whi
         })
     );
 
-    // 2. User-customized Antigravity top-6 and custom joystick binding must NOT be overwritten.
     d.assign(
         &json!(ag_pid),
         &json!(ag_lid),
@@ -1538,7 +1524,6 @@ fn antigravity_v160_migrates_back_to_session_top_six_and_side_panel_joystick_whi
         })
     );
 
-    // 3. Legacy Antigravity logical_sectors with Shortcut Cmd+[/] on nav-back/forward migrates joystick while keeping bottom-row edits.
     let mut legacy_nav = Draft::default();
     preset::install_agent_starter_profiles(&mut legacy_nav).unwrap();
     let legacy_ag_pid = legacy_nav
@@ -1639,8 +1624,6 @@ fn antigravity_v160_migrates_back_to_session_top_six_and_side_panel_joystick_whi
         })
     );
 
-    // 4. Live-observed `mouse` + leftover `agent-model-picker-*` in 16..=19 migrates to
-    // logical_sectors side-panel bindings, while explicit `host-mouse-move-*` stays untouched.
     let mut mouse_leftover = Draft::default();
     let ml_ids = preset::install_agent_starter_profiles(&mut mouse_leftover).unwrap();
     let ml_pid = ml_ids

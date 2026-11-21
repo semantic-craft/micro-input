@@ -57,7 +57,6 @@ fn local_target_already_saved_only_repairs_record_and_clears_old_undo_on_reopen(
     r.advance(Phase::Writing, 1).unwrap();
     r.advance(Phase::Verifying, 1).unwrap();
     r.advance(Phase::Verified, 1).unwrap();
-    // Crash between document rename and completion record: only status needs repair.
     let path = dir.path().join("draft.json");
     fs::copy(p.record_path().join("document-target.json"), &path).unwrap();
     let inode = fs::metadata(&path).unwrap().ino();
@@ -80,7 +79,6 @@ fn malformed_state_original_backup_and_future_local_document_are_rejected() {
     let r = OperationRecord::begin(&p).unwrap();
     let mut raw = json!(r.status());
     raw["phase"] = json!("Verified");
-    // Updating a state label without its digest does not manufacture successful evidence.
     let status = p.record_path().join("status.json");
     let saved = fs::read(&status).unwrap();
     let mut env: serde_json::Value = serde_json::from_slice(&saved).unwrap();

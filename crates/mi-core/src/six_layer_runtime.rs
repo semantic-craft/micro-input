@@ -830,8 +830,6 @@ fn steady_state_recheck(
 impl Drop for RunningSixLayer {
     fn drop(&mut self) {
         self.retire();
-        // The monitor only owns immutable evidence and its old receiver, so it
-        // may finish a bounded CLI check without delaying the workbench thread.
         self.monitor.take();
         self.executor.take();
     }

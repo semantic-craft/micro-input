@@ -416,8 +416,6 @@ impl WorkbenchStore {
                 let join_handle = self.tokio_runtime.spawn(async move {
                     let _phase = handle.end_future().await;
                     drop(handle);
-                    // Drop the vendor bridge lease only after Preview::end() finishes so
-                    // background thstatus or session rotation cannot interleave with shutdown.
                     drop(lease);
                     let _ = inbox.send(HardwareLoopEvent::LightingPreviewEnded { generation });
                 });

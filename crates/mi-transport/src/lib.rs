@@ -398,7 +398,6 @@ impl MacTransport {
                                 let _ = events.send(());
                             }
                         });
-                        // Keep HID opening out of the IOKit matching callback and off the UI loop.
                         unsafe {
                             mi_watch(
                                 Arc::as_ptr(&thread_stop),
@@ -409,7 +408,6 @@ impl MacTransport {
                         drop(changes);
                     });
                 } else {
-                    // The callback only borrows this sender while mi_watch owns the run loop.
                     unsafe {
                         mi_watch(
                             Arc::as_ptr(&thread_stop),
@@ -493,7 +491,6 @@ extern "C" fn discovered(
     path: *const std::ffi::c_char,
     serial: *const std::ffi::c_char,
 ) {
-    // The native adapter owns these values for the duration of this synchronous callback.
     unsafe {
         let string = |p| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
         let serial_raw = if serial.is_null() {
@@ -544,7 +541,6 @@ fn enumerate_mac() -> Result<Vec<HidCandidate>, TransportError> {
     Ok(devices)
 }
 
-// TODO(UNKNOWN-05): USB source is OS-derived; BLE and cross-interface physical identity remain unverified.
 impl HidTransport for MacTransport {
     fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
         #[cfg(target_os = "macos")]
@@ -611,10 +607,6 @@ struct HidOpenRequest<D> {
     reply: std::sync::mpsc::SyncSender<Result<D, TransportError>>,
 }
 
-/// hidapi's process-global IOHIDManager is scheduled on its initializing thread's
-/// CFRunLoop. Restore/apply workers are short lived, so they must never own it.
-/// The static production sender keeps this one opening thread alive for the
-/// process; discovery and each HidDevice's reader retain their existing owners.
 #[cfg(target_os = "macos")]
 struct HidOpenOwner<D> {
     requests: std::sync::mpsc::SyncSender<HidOpenRequest<D>>,
@@ -630,7 +622,6 @@ impl<D: Send + 'static> HidOpenOwner<D> {
             .name("mi-hid-open".into())
             .spawn(move || {
                 while let Ok(request) = pending.recv() {
-                    // A dropped requester also drops its returned handle here.
                     let _ = request.reply.send(open(&request.path, request.exclusive));
                 }
             })
@@ -671,8 +662,6 @@ fn open_hid_device(
                     );
                 }
                 let api = api.as_ref().unwrap();
-                // Darwin's open option is global; this owner serializes the
-                // option/open/restore sequence, including unsuccessful opens.
                 let previous = api.get_open_exclusive();
                 api.set_open_exclusive(exclusive);
                 let device = api.open_path(path);
@@ -788,8 +777,6 @@ impl HidLink for MacLink {
         let closed = Arc::clone(&self.closed);
         let reports = reports.to_vec();
         tokio::task::spawn_blocking(move || {
-            // A read_timeout holds this same mutex. Acquire it once for the whole
-            // RPC so the 20ms reader cannot insert gaps between 61-byte pieces.
             let guard = owner.device.lock().unwrap();
             if closed.load(Ordering::Acquire) {
                 return Err(TransportError::Disconnected);
@@ -1278,7 +1265,6 @@ mod tests {
             serial_number: None,
         };
         assert!(is_candidate(&d));
-        // R-D01: a vendor page alone cannot identify the RPC interface.
         d.usage = 2;
         assert!(!is_candidate(&d));
         d.usage = 1;
@@ -1333,7 +1319,6 @@ mod tests {
             .handoff("unit-a", |_| panic!("must reuse staged unit-a"))
             .unwrap();
 
-        // Plugging in a second Creator Micro 2 retains unit-a's lease rather than tearing it down.
         let both = vec![cand_a.clone(), cand_b.clone()];
         let retained_path = retained_or_unique_vendor(&lease, &both);
         assert_eq!(retained_path, Some("unit-a"));
@@ -1343,11 +1328,9 @@ mod tests {
         assert_eq!(dev_a.drops.load(Ordering::Acquire), 0);
         link_a.write(b"still-alive").await.unwrap();
 
-        // Requesting an unverified/absent path retains unit-a's lease as well.
         lease.retain_stage(retained_or_unique_vendor(&lease, &both));
         assert_eq!(dev_a.drops.load(Ordering::Acquire), 0);
 
-        // Explicit handoff to unit-b switches ownership cleanly and releases unit-a.
         let requested_b = both
             .iter()
             .find(|d| d.path == "unit-b" && is_exclusive_vendor_candidate(d))
@@ -1363,7 +1346,6 @@ mod tests {
         assert!(link_a.write(b"stale-a").await.is_err());
         link_b.write(b"active-b").await.unwrap();
 
-        // Unplugging unit-b when unit-a remains moves unique stage to unit-a.
         let remaining_path = retained_or_unique_vendor(&lease, std::slice::from_ref(&cand_a));
         assert_eq!(remaining_path, Some("unit-a"));
         lease
@@ -1478,7 +1460,6 @@ mod tests {
     }
 }
 
-// R-D13/D05: explicit test-only OS discovery boundary; no physical open is possible.
 #[cfg(feature = "synthetic-backend")]
 pub struct SyntheticDiscovery {
     files: Arc<Mutex<Option<SyntheticFiles>>>,
@@ -1653,7 +1634,6 @@ impl HidTransport for SyntheticDiscovery {
         }
         let inject = self.input_inject.lock().unwrap();
         let inject = inject.as_ref().ok_or(TransportError::Disconnected)?;
-        // Test-only unknown notification. This does not specify a physical control schema.
         let bytes = br#"{"m":"test.synthetic","p":"private payload must not cross FFI"}"#;
         for _ in 0..count {
             for part in bytes.chunks(61) {
@@ -1670,7 +1650,6 @@ impl HidTransport for SyntheticDiscovery {
         Ok(())
     }
     fn emit_synthetic_input_case(&self, input_case: u8) -> Result<(), TransportError> {
-        // Original synthetic protocol facts, not captured device or manufacturer payloads.
         let messages = match input_case {
             0 => vec![
                 serde_json::json!({"m":"v.oai.hid","p":{"k":"AG00","act":1}}),
@@ -1840,103 +1819,100 @@ impl SyntheticFiles {
         use serde_json::json;
         use sha1::{Digest, Sha1};
         let params = &request["params"];
-        let result: Result<serde_json::Value, ()> = (|| {
-            match request["method"].as_str() {
-                Some("synthetic.lights.read" | "synthetic.lights.set") => {
-                    if self.fail_preview {
-                        return Err(());
-                    }
-                    if self.preview_lights.is_null() {
-                        let source: serde_json::Value =
-                            serde_json::from_slice(&self.keymap).map_err(|_| ())?;
-                        self.preview_lights = source["profiles"][0]["layers"][0]["lights"].clone();
-                    }
-                    if request["method"] == "synthetic.lights.set" {
-                        if params["target"].as_u64() != Some(self.preview_target)
-                            || params.get("expected") != Some(&self.preview_lights)
-                        {
-                            return Err(());
-                        }
-                        self.preview_lights = params["lights"].clone();
-                    }
-                    Ok(json!({"target":self.preview_target,"lights":self.preview_lights}))
+        let result: Result<serde_json::Value, ()> = (|| match request["method"].as_str() {
+            Some("synthetic.lights.read" | "synthetic.lights.set") => {
+                if self.fail_preview {
+                    return Err(());
                 }
-
-                Some("fs.list") => {
-                    let mut files = vec![
-                        json!({"name":"keymap.json","size":self.keymap.len(),"checksum":format!("{:x}",Sha1::digest(&self.keymap))}),
-                    ];
-                    if self.missing_keymap {
-                        files.clear();
-                    } else if self.bad_checksum {
-                        files[0]["checksum"] = json!("0000000000000000000000000000000000000000");
-                    }
-                    if let Some(smart) = &self.smart_actions {
-                        files.push(json!({"name":"smart_actions.json","size":smart.len(),"checksum":format!("{:x}",Sha1::digest(smart))}));
-                    }
-                    Ok(json!(files))
+                if self.preview_lights.is_null() {
+                    let source: serde_json::Value =
+                        serde_json::from_slice(&self.keymap).map_err(|_| ())?;
+                    self.preview_lights = source["profiles"][0]["layers"][0]["lights"].clone();
                 }
-                Some("fs.readbin") => {
-                    if self.fail_read {
-                        return Err(());
-                    }
-                    let bytes = match params["file"].as_str() {
-                        Some("keymap.json") => &self.keymap,
-                        Some("smart_actions.json") => self.smart_actions.as_ref().ok_or(())?,
-                        _ => return Err(()),
-                    };
-                    let offset =
-                        usize::try_from(params["offset"].as_u64().ok_or(())?).map_err(|_| ())?;
-                    let len = usize::try_from(params["len"].as_u64().ok_or(())?).map_err(|_| ())?;
-                    if len == 0 || len > 3072 || offset > bytes.len() {
-                        return Err(());
-                    }
-                    Ok(
-                        json!({"total_size":bytes.len(),"data":STANDARD.encode(&bytes[offset..offset.saturating_add(len).min(bytes.len())])}),
-                    )
-                }
-                Some("fs.writebin") => {
-                    if params.as_object().is_none_or(|p| p.len() != 5)
-                        || params["file"] != "keymap.json"
-                        || params["append"] != true
+                if request["method"] == "synthetic.lights.set" {
+                    if params["target"].as_u64() != Some(self.preview_target)
+                        || params.get("expected") != Some(&self.preview_lights)
                     {
                         return Err(());
                     }
-                    let offset =
-                        usize::try_from(params["offset"].as_u64().ok_or(())?).map_err(|_| ())?;
-                    let complete = params["completed"].as_bool().ok_or(())?;
-                    let data = STANDARD
-                        .decode(params["data"].as_str().ok_or(())?)
-                        .map_err(|_| ())?;
-                    if self.reject_offset == Some(offset)
-                        || data.is_empty()
-                        || data.len() > 3072
-                        || offset.saturating_add(data.len()) > 4 * 1024 * 1024
-                        || (offset != 0 && offset != self.next_offset)
-                    {
-                        return Err(());
-                    }
-                    // Original synthetic failure model: visible partial overwrite, no atomicity promise.
-                    if offset == 0 {
-                        if !self.ignore_writes {
-                            self.keymap.clear();
-                        }
-                        self.next_offset = 0;
-                    }
-                    if !self.ignore_writes {
-                        self.keymap.extend_from_slice(&data);
-                    }
-                    self.next_offset = offset + data.len();
-                    if complete {
-                        self.next_offset = 0;
-                        if self.corrupt_completed && !self.ignore_writes {
-                            self.keymap.push(b'!');
-                        }
-                    }
-                    Ok(serde_json::Value::Null)
+                    self.preview_lights = params["lights"].clone();
                 }
-                _ => Err(()),
+                Ok(json!({"target":self.preview_target,"lights":self.preview_lights}))
             }
+
+            Some("fs.list") => {
+                let mut files = vec![
+                    json!({"name":"keymap.json","size":self.keymap.len(),"checksum":format!("{:x}",Sha1::digest(&self.keymap))}),
+                ];
+                if self.missing_keymap {
+                    files.clear();
+                } else if self.bad_checksum {
+                    files[0]["checksum"] = json!("0000000000000000000000000000000000000000");
+                }
+                if let Some(smart) = &self.smart_actions {
+                    files.push(json!({"name":"smart_actions.json","size":smart.len(),"checksum":format!("{:x}",Sha1::digest(smart))}));
+                }
+                Ok(json!(files))
+            }
+            Some("fs.readbin") => {
+                if self.fail_read {
+                    return Err(());
+                }
+                let bytes = match params["file"].as_str() {
+                    Some("keymap.json") => &self.keymap,
+                    Some("smart_actions.json") => self.smart_actions.as_ref().ok_or(())?,
+                    _ => return Err(()),
+                };
+                let offset =
+                    usize::try_from(params["offset"].as_u64().ok_or(())?).map_err(|_| ())?;
+                let len = usize::try_from(params["len"].as_u64().ok_or(())?).map_err(|_| ())?;
+                if len == 0 || len > 3072 || offset > bytes.len() {
+                    return Err(());
+                }
+                Ok(
+                    json!({"total_size":bytes.len(),"data":STANDARD.encode(&bytes[offset..offset.saturating_add(len).min(bytes.len())])}),
+                )
+            }
+            Some("fs.writebin") => {
+                if params.as_object().is_none_or(|p| p.len() != 5)
+                    || params["file"] != "keymap.json"
+                    || params["append"] != true
+                {
+                    return Err(());
+                }
+                let offset =
+                    usize::try_from(params["offset"].as_u64().ok_or(())?).map_err(|_| ())?;
+                let complete = params["completed"].as_bool().ok_or(())?;
+                let data = STANDARD
+                    .decode(params["data"].as_str().ok_or(())?)
+                    .map_err(|_| ())?;
+                if self.reject_offset == Some(offset)
+                    || data.is_empty()
+                    || data.len() > 3072
+                    || offset.saturating_add(data.len()) > 4 * 1024 * 1024
+                    || (offset != 0 && offset != self.next_offset)
+                {
+                    return Err(());
+                }
+                if offset == 0 {
+                    if !self.ignore_writes {
+                        self.keymap.clear();
+                    }
+                    self.next_offset = 0;
+                }
+                if !self.ignore_writes {
+                    self.keymap.extend_from_slice(&data);
+                }
+                self.next_offset = offset + data.len();
+                if complete {
+                    self.next_offset = 0;
+                    if self.corrupt_completed && !self.ignore_writes {
+                        self.keymap.push(b'!');
+                    }
+                }
+                Ok(serde_json::Value::Null)
+            }
+            _ => Err(()),
         })();
         if request["method"] == "fs.writebin"
             && result.is_ok()

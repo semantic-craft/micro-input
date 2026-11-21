@@ -1382,7 +1382,6 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.canvas.encoderHoldLabel, "搜索会话")
         XCTAssertEqual(store.canvas.encoderPressLabel, "搜索会话")
 
-        // Switch top-right joystick to 0.7.0 hardware MOUSE mode and verify encoderHoldLabel survives
         store.dispatch("canvas", ["SelectSurface": "Joystick"])
         store.dispatch("inspector", ["SetJoystickMode": "mouse"])
         XCTAssertEqual(store.canvas.joystickModeLabel, "硬件指针")

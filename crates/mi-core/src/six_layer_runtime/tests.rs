@@ -910,8 +910,6 @@ fn saved_state_migrates_antigravity_v160_top_six_and_mouse_joystick_to_session_a
         true,
     )
     .unwrap();
-    // Simulate saved #160 Antigravity plan (subagent + mouse-click:left + blanks + MOUSE joystick)
-    // while the live document has already migrated to Antigravity session top-6 + logical_sectors.
     let ag_host = plan
         .hosts
         .iter_mut()
@@ -957,7 +955,6 @@ fn saved_state_migrates_antigravity_v160_top_six_and_mouse_joystick_to_session_a
     };
 
     assert!(saved.migrate_saved_encoder_defaults(&draft.document));
-    // Second call must be idempotent.
     assert!(!saved.migrate_saved_encoder_defaults(&draft.document));
 
     let migrated_ag = saved
@@ -2363,7 +2360,6 @@ fn enc_clk_press_and_release_edges_emit_input_events_across_l1_vendor_and_l2_l3_
         handle_vendor_slot_notification(&received, mask, &receiver, true);
     };
 
-    // Layer 1 Vendor: ENC_CLK press (act: 1) -> release (act: 0), duplicate release ignored.
     send_vendor(
         r#"{"m":"v.oai.hid","p":{"k":"ENC_CLK","act":1}}"#,
         &mut mask,
@@ -2390,7 +2386,6 @@ fn enc_clk_press_and_release_edges_emit_input_events_across_l1_vendor_and_l2_l3_
     assert_eq!(l1_release_input.board_layer, Some(1));
     assert_eq!(l1_release_input.kind, mi_session::InputEventKind::Released);
 
-    // Layers 2/3/4 Karabiner direct controls (15, 35, 55): press + to_after_key_up release.
     for &(control_id, expected_layer) in &[(15u8, 2u8), (35u8, 3u8), (55u8, 4u8)] {
         let sock = std::os::unix::net::UnixDatagram::unbound().unwrap();
         let press_payload = serde_json::to_vec(&mi_transport::ActivationPayload::new(
@@ -2437,8 +2432,6 @@ fn six_layer_encoder_hold_opens_model_picker_navigates_flicks_and_confirms_witho
 ) {
     let receiver = UserCommandReceiver::bind().unwrap();
     let mut plan = test_plan();
-    // Configure a normal short-press action on L2 ENC_CLK (slot 15) to prove hold never leaks short-press,
-    // and leave AG18 (slot 19) unassigned so this test isolates captures_sectors == false vs assigned controls.
     plan.hosts[0].actions[15] = Some(ResolvedHostAction::AgentCommand {
         adapter: "antigravity".into(),
         command: "submit".into(),
@@ -2469,19 +2462,12 @@ fn six_layer_encoder_hold_opens_model_picker_navigates_flicks_and_confirms_witho
         received_at: at,
     };
 
-    // Sequence:
-    // 1) Hold ENC_CLK (control 15 on L2) >= 350ms -> opens model picker (zero short-press leak)
-    // 2) Turn CW (control 14) -> model-picker-next
-    // 3) Radial East AG18 (control 19) -> model-picker-effort-right
-    // 4) Horizontal mouse flick left (-34, 2) -> model-picker-effort-left
-    // 5) Tap ENC_CLK (< 350ms) -> model-picker-confirm (exits active picker)
-    // 6) Subsequent Tap ENC_CLK (< 350ms) -> normal short-press ("submit")
     let mut steps = std::collections::VecDeque::from([
         Some(mk_ev(1, 15, false, base)),
         Some(mk_ev(2, 15, true, base + Duration::from_millis(380))),
         Some(mk_ev(3, 14, false, base + Duration::from_millis(400))),
         Some(mk_ev(4, 19, false, base + Duration::from_millis(420))),
-        None, // allow loop iteration to drain queued mouse delta while picker is active
+        None,
         Some(mk_ev(5, 15, false, base + Duration::from_millis(450))),
         Some(mk_ev(6, 15, true, base + Duration::from_millis(520))),
         Some(mk_ev(7, 15, false, base + Duration::from_millis(560))),
@@ -2574,8 +2560,6 @@ fn six_layer_custom_and_unassigned_encoder_hold_and_live_board_layer_override() 
     let receiver = UserCommandReceiver::bind().unwrap();
     receiver.arm().unwrap();
     let mut stale_plan = test_plan();
-    // Simulate a stale saved six-layer-runtime.json where L2 had no encoder_hold_action
-    // and slot 15 had an old action.
     stale_plan.hosts[0].encoder_hold_action = None;
     stale_plan.hosts[0].actions[15] = Some(ResolvedHostAction::OpenUrl {
         url: "https://stale.example/slot15".into(),
@@ -2594,8 +2578,6 @@ fn six_layer_custom_and_unassigned_encoder_hold_and_live_board_layer_override() 
         received_at: at,
     };
 
-    // Case 1: Unassigned EncoderHold on live L2 -> ENC_CLK fires slot 15 immediately on Pressed
-    // with zero release delay and zero ModelPickerOpen.
     let mut l2_unassigned_actions: [Option<ResolvedHostAction>; SLOTS_PER_LAYER] =
         std::array::from_fn(|_| None);
     l2_unassigned_actions[15] = Some(ResolvedHostAction::OpenUrl {
@@ -2617,9 +2599,7 @@ fn six_layer_custom_and_unassigned_encoder_hold_and_live_board_layer_override() 
         None,
     );
     let mut steps = std::collections::VecDeque::from([
-        // Only Pressed (no Released yet) -> must execute slot 15 immediately!
         Some(mk_ev(1, 15, false, base)),
-        // Subsequent Released at +500ms -> must be ignored without firing ModelPickerOpen or double-firing slot 15!
         Some(mk_ev(2, 15, true, base + Duration::from_millis(500))),
     ]);
     let stop = AtomicBool::new(false);
@@ -2672,8 +2652,6 @@ fn six_layer_custom_and_unassigned_encoder_hold_and_live_board_layer_override() 
     );
     assert!(capture_transitions.is_empty());
 
-    // Case 2: Custom non-picker EncoderHold on a Locked non-Agent profile -> fires custom action
-    // at >= 350ms without entering model picker mode or capturing mouse, and consumes Released.
     let mut custom_actions: [Option<ResolvedHostAction>; SLOTS_PER_LAYER] =
         std::array::from_fn(|_| None);
     custom_actions[14] = Some(ResolvedHostAction::OpenUrl {
@@ -2698,7 +2676,6 @@ fn six_layer_custom_and_unassigned_encoder_hold_and_live_board_layer_override() 
     let mut steps2 = std::collections::VecDeque::from([
         Some(mk_ev(10, 15, false, base)),
         Some(mk_ev(11, 15, true, base + Duration::from_millis(400))),
-        // Subsequent CW turn must use normal slot 14 (NOT ModelPickerNext)!
         Some(mk_ev(12, 14, false, base + Duration::from_millis(430))),
     ]);
     let stop2 = AtomicBool::new(false);
@@ -3280,7 +3257,7 @@ fn six_layer_sector_press_during_search_overlay_cancels_overlay() {
     let mut steps = std::collections::VecDeque::from([
         Some(mk_ev(1, 15, false, base)),
         Some(mk_ev(2, 15, true, base + Duration::from_millis(450))),
-        None, // inject mouse delta during active search
+        None,
         Some(mk_ev(3, 19, false, base + Duration::from_millis(500))),
         Some(mk_ev(4, 14, false, base + Duration::from_millis(550))),
     ]);
@@ -3572,32 +3549,27 @@ fn runtime_state_load_and_backup_path_containment_enforce_private_fs_boundaries(
     fs::set_permissions(&doc_dir, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&external_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
-    // Missing file returns default state.
     let state_path = doc_dir.join("six-layer-runtime.json");
     assert_eq!(load(&state_path).unwrap().version, 1);
 
-    // Symlinked six-layer-runtime.json is rejected.
     let target = doc_dir.join("real.json");
     fs::write(&target, br#"{"version":1}"#).unwrap();
     symlink(&target, &state_path).unwrap();
     assert!(load(&state_path).is_err());
     fs::remove_file(&state_path).unwrap();
 
-    // Oversized six-layer-runtime.json is rejected before reading into heap.
     let big = fs::File::create(&state_path).unwrap();
     big.set_len(2 * 1024 * 1024).unwrap();
     drop(big);
     assert!(load(&state_path).is_err());
     fs::remove_file(&state_path).unwrap();
 
-    // World-writable parent dir is rejected by load.
     fs::set_permissions(&doc_dir, fs::Permissions::from_mode(0o777)).unwrap();
     fs::write(&state_path, br#"{"version":1}"#).unwrap();
     assert!(load(&state_path).is_err());
     fs::set_permissions(&doc_dir, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(load(&state_path).unwrap().version, 1);
 
-    // Backup containment accepts private backup inside document_dir.
     let valid_backup = doc_dir.join("six-layer-recovery/b1");
     fs::create_dir_all(&valid_backup).unwrap();
     fs::set_permissions(
@@ -3608,17 +3580,14 @@ fn runtime_state_load_and_backup_path_containment_enforce_private_fs_boundaries(
     fs::set_permissions(&valid_backup, fs::Permissions::from_mode(0o700)).unwrap();
     assert!(lifecycle::validate_backup_within_document_dir(&doc_dir, &valid_backup).is_ok());
 
-    // Backup outside document_dir is rejected.
     let ext_backup = external_dir.join("b2");
     fs::create_dir_all(&ext_backup).unwrap();
     fs::set_permissions(&ext_backup, fs::Permissions::from_mode(0o700)).unwrap();
     assert!(lifecycle::validate_backup_within_document_dir(&doc_dir, &ext_backup).is_err());
 
-    // Traversal escaping document_dir is rejected.
     let traversal = doc_dir.join("../external/b2");
     assert!(lifecycle::validate_backup_within_document_dir(&doc_dir, &traversal).is_err());
 
-    // Symlinked backup inside document_dir pointing outside is rejected.
     let sym_backup = doc_dir.join("six-layer-recovery/sym");
     symlink(&ext_backup, &sym_backup).unwrap();
     assert!(lifecycle::validate_backup_within_document_dir(&doc_dir, &sym_backup).is_err());

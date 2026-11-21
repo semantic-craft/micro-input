@@ -225,7 +225,6 @@ mod tests {
             status: SlotStatus::NeedsInteraction,
             updated_at: 900,
         };
-        // Candidate that matches the pinned target must not duplicate into recent slots
         let c3 = RecentCandidate {
             place: pinned_target.clone(),
             title: "Pinned Duplicate".into(),
@@ -241,25 +240,20 @@ mod tests {
 
         table.sync_recent(&[c1.clone(), c2.clone(), c3, c4.clone()]);
 
-        // Slot 0 remains pinned
         assert!(table.is_pinned(0));
         assert_eq!(table.active_place(0), Some(&pinned_target));
         assert_eq!(table.get(0).unwrap().title, "Pinned Task");
 
-        // Slot 1 gets c1
         assert_eq!(table.get(1).unwrap().mode, SlotMode::Recent);
         assert_eq!(table.active_place(1), Some(&c1.place));
         assert_eq!(table.get(1).unwrap().title, "AG Task 1");
         assert_eq!(table.get(1).unwrap().status, SlotStatus::Running);
 
-        // Slot 2 gets c2
         assert_eq!(table.active_place(2), Some(&c2.place));
         assert_eq!(table.get(2).unwrap().status, SlotStatus::NeedsInteraction);
 
-        // Slot 3 gets c4 (c3 was skipped because it's pinned in slot 0)
         assert_eq!(table.active_place(3), Some(&c4.place));
 
-        // Slots 4 and 5 are empty
         assert_eq!(table.active_place(4), None);
         assert_eq!(table.active_place(5), None);
     }

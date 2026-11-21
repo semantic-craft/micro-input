@@ -58,7 +58,6 @@ struct Envelope {
     sha256: String,
     status: Status,
 }
-// Private decoding, not a public way to construct a sendable candidate.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Frozen {
@@ -178,8 +177,6 @@ fn atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 pub(crate) fn same_device(a: &Value, b: &Value) -> Result<(), String> {
     let x = &a["device_identity"];
     let y = &b["device_identity"];
-    // A live native connection may restore its own exact backup. Interface paths
-    // never authorize restoration after reconnect/restart or to another session.
     let a_fw = a["firmware"].as_str();
     let b_fw = b["firmware"].as_str();
     if a_fw.is_some_and(crate::is_supported_native_firmware)
@@ -460,7 +457,7 @@ impl OperationRecord {
         if !self.status.device_verified {
             return Err("没有持久核验结果；先独立读回核对".into());
         }
-        self.save()?; // Persist known verification before touching the document.
+        self.save()?;
         let plan = self.plan()?;
         let target = self.target()?;
         let _lock = crate::storage::Lock::acquire(plan.document_path.with_extension("lock"))?;

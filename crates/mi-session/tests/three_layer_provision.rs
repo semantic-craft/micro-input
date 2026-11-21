@@ -852,7 +852,6 @@ async fn prepare_six_layer_write_with_layer_modes_compiles_mixed_radial_and_mous
     drop(session);
     let _ = worker.await.unwrap();
 
-    // 0.6.3 must fail closed rather than silently downgrading requested MOUSE layers.
     let dir_063 = tempfile::tempdir().unwrap();
     let (session_063, worker_063) =
         spawn_mock_device_with_version(SIX_SOURCE.to_vec(), true, 1, "0.6.3");
@@ -893,7 +892,6 @@ async fn restore_backup_rejects_symlinks_fifos_oversized_files_tampered_manifest
 
     let (session, worker) = spawn_mock_device(compiled_six.keymap.clone(), true, 1);
 
-    // 1. Symlinked keymap.json is rejected.
     let sym_dir = tempfile::tempdir().unwrap();
     let alt = sym_dir.path().join("alt-keymap.json");
     std::fs::write(&alt, SIX_SOURCE).unwrap();
@@ -909,7 +907,6 @@ async fn restore_backup_rejects_symlinks_fifos_oversized_files_tampered_manifest
         .await
         .is_err());
 
-    // 2. Named FIFO at keymap.json is rejected non-blockingly.
     let fifo_dir = tempfile::tempdir().unwrap();
     let fifo_keymap = fifo_dir.path().join("keymap.json");
     let mkfifo_status = std::process::Command::new("/usr/bin/mkfifo")
@@ -927,7 +924,6 @@ async fn restore_backup_rejects_symlinks_fifos_oversized_files_tampered_manifest
         .await
         .is_err());
 
-    // 3. Oversized (> 4 MiB) keymap.json is rejected before reading into heap.
     let big_dir = tempfile::tempdir().unwrap();
     let big_file = std::fs::File::create(big_dir.path().join("keymap.json")).unwrap();
     big_file
@@ -946,7 +942,6 @@ async fn restore_backup_rejects_symlinks_fifos_oversized_files_tampered_manifest
         .to_string();
     assert!(err.contains("超过大小上限"), "{err}");
 
-    // 4. Tampered manifest.json SHA-256 is rejected.
     let manifest_dir = tempfile::tempdir().unwrap();
     std::fs::write(manifest_dir.path().join("keymap.json"), SIX_SOURCE).unwrap();
     std::fs::write(
@@ -971,8 +966,6 @@ async fn restore_backup_rejects_symlinks_fifos_oversized_files_tampered_manifest
         .to_string();
     assert!(err.contains("keymap_sha256"), "{err}");
 
-    // 4b. Tampered keymap.json cannot bypass keymap_sha256 even if previous-planned-keymap.json
-    // matches manifest.keymap_sha256 and previous_planned_keymap_sha256 is absent.
     let sha256_hex = |bytes: &[u8]| -> String {
         let digest = sha2::Sha256::digest(bytes);
         let mut out = String::with_capacity(digest.len() * 2);
@@ -1012,7 +1005,6 @@ async fn restore_backup_rejects_symlinks_fifos_oversized_files_tampered_manifest
         .to_string();
     assert!(err.contains("keymap_sha256"), "{err}");
 
-    // 5. Malformed original keymap.json is rejected before staging.
     let bad_schema_dir = tempfile::tempdir().unwrap();
     std::fs::write(
         bad_schema_dir.path().join("keymap.json"),
@@ -1032,7 +1024,6 @@ async fn restore_backup_rejects_symlinks_fifos_oversized_files_tampered_manifest
         .to_string();
     assert!(err.contains("原始恢复键位校验失败"), "{err}");
 
-    // 6. World-writable backup directory is rejected by verify_existing_private_dir.
     let loose_dir = tempfile::tempdir().unwrap();
     let loose_sub = loose_dir.path().join("loose");
     std::fs::create_dir_all(&loose_sub).unwrap();

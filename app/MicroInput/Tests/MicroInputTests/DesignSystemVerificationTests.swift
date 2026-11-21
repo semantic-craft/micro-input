@@ -490,7 +490,6 @@ final class DesignSystemVerificationTests: XCTestCase {
         store.dispatch("status_menu", ["SetRadialMenuEnabled": false])
         XCTAssertFalse(store.statusMenu.radialMenuEnabled)
 
-        // Render encoder hold & hardware mouse joystick inspector and 4x4 cheat-sheet without clipping
         store.dispatch("canvas", ["SelectSurface": "EncoderHold"])
         let (encWin, encHost) = makeHostedWindow(
             ClassicWorkbenchView(store: store),

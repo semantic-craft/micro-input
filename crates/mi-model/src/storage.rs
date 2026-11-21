@@ -986,7 +986,6 @@ impl HostPreferencesStore {
                         serde_json::from_slice(bytes).map_err(|_| "偏好文件损坏；原件保留")?;
                     match header.get("schema_version").and_then(|v| v.as_u64()) {
                         Some(1) => {
-                            // An explicit null is not an absent array.
                             if header
                                 .get("hardware_profile_slots")
                                 .is_some_and(|v| v.is_null())
@@ -1096,7 +1095,6 @@ impl HostPreferencesStore {
             .map_err(|_| "收藏存在未完成保存文件；原件保留")?;
         let result = (|| -> Result<(), String> {
             file.write_all(&bytes).map_err(|e| e.to_string())?;
-            // Board edits and migration are durable recovery boundaries; runtime routing keeps its atomic rename latency.
             if durable || self.pending_defaults || self.migration_backup.is_some() {
                 file.sync_all().map_err(|e| e.to_string())?;
             }

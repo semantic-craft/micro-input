@@ -163,8 +163,6 @@ pub fn check_passthrough_health(
             bound_ag_count: 0,
         };
     };
-    // Native firmware device.status reports 1-based layer_index (1 for layers[0], 2 for layers[1]),
-    // whereas synthetic-0.6.3 fixtures and 0-based unit tests use 0 for layers[0].
     let layer_idx = if crate::is_supported_native_firmware(version) {
         active_layer.saturating_sub(1) as usize
     } else {
@@ -929,7 +927,6 @@ pub fn verified_bindings(config: &DeviceConfig, identity: &HostIdentityStatus) -
             allowed.insert(format!("AG{n:02}"));
         }
     }
-    // Retain factory ACT aliases without accepting movement or duplicate switches.
     for n in 0..13 {
         if allowed.contains(&format!("AG{n:02}")) {
             allowed.insert(format!("ACT{n:02}"));

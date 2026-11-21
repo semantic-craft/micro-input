@@ -238,7 +238,6 @@ impl Draft {
                 {
                     return Err("新增动作覆盖已有对象或没有分支引用".into());
                 }
-                // Shared macros are created/edited only through the existing macro library.
                 if is_local_macro(&a) || is_local_multi(&a) {
                     return Err("宏与 Multi 必须引用现有共享对象".into());
                 }
