@@ -122,9 +122,11 @@ mod tests;
 mod workbench_actions;
 #[cfg(test)]
 pub(crate) use antigravity_daemon::classify_antigravity_trajectory_summaries;
-pub use antigravity_daemon::codex_observations_to_catalog;
 use antigravity_daemon::ensure_private_document_dir;
 pub(crate) use antigravity_daemon::poll_antigravity_daemon_candidates_with_frontmost;
+pub use antigravity_daemon::{
+    codex_observations_to_catalog, codex_observations_to_catalog_with_ack,
+};
 use inspector_editor_actions::resolve_merged_bottom_slot;
 pub use lighting_preview_store::{
     LightingPreviewBeginFuture, LightingPreviewEndFuture, LightingPreviewHandle,
@@ -159,13 +161,13 @@ pub struct HardwareAutoAcceptanceReceipt {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LiveSessionSource {
+pub enum LiveSessionSource {
     Antigravity,
     Codex,
 }
 
 impl LiveSessionSource {
-    fn agent(self) -> CanonicalAgent {
+    pub fn agent(self) -> CanonicalAgent {
         match self {
             Self::Antigravity => CanonicalAgent::Antigravity,
             Self::Codex => CanonicalAgent::Codex,
@@ -195,6 +197,7 @@ pub enum HardwareLoopEvent {
     },
     LiveCandidatesUpdated {
         epoch: u64,
+        source: LiveSessionSource,
         catalog: Option<NavigationCatalog>,
     },
     V070CapabilityOutcome {
@@ -490,6 +493,7 @@ pub struct WorkbenchStore {
     pub ptt_controller: DictationControllerState,
     pub lighting_arbiter: FourAppLightingArbiter,
     pub slot_table: FourAppSlotTable,
+    pub codex_slot_table: FourAppSlotTable,
     pub app_cache: Arc<AppBundleCache>,
     pub panel_host: Arc<dyn PassivePanelHost>,
     pub status_item_host: Arc<dyn StatusItemHost>,
@@ -653,6 +657,7 @@ impl WorkbenchStore {
             ptt_controller: DictationControllerState::default(),
             lighting_arbiter: FourAppLightingArbiter::new(),
             slot_table: FourAppSlotTable::new(),
+            codex_slot_table: FourAppSlotTable::new(),
             app_cache,
             panel_host,
             status_item_host,
@@ -787,8 +792,6 @@ impl WorkbenchStore {
         if store.config.auto_connect_usb
             && env::var("MI_AUTO_HOST_READY").ok().as_deref() != Some("0")
         {
-            store.lighting_popover.only_glow_on_attention_or_completed = false;
-            store.lighting_arbiter.only_glow_on_attention_or_completed = false;
             store.initialize_auto_host_ready(preserve_saved_host_state);
             store.sync_live_session_source();
             store.start_mac_usb_discovery_watcher();
@@ -1869,7 +1872,7 @@ impl WorkbenchStore {
             six_layer_user_pinned: self.six_layer_user_pinned,
             six_layer_view: &self.six_layer_view,
             slot_role_overrides: &self.slot_role_overrides,
-            slot_table: &self.slot_table,
+            slot_table: self.active_slot_table(),
             status_menu_open: self.status_menu_open,
             status_message: &self.status_message,
             ui_language: self.document_store.ui_language(),
@@ -1918,6 +1921,7 @@ impl WorkbenchStore {
             if self.six_layer_running.is_some() {
                 self.sync_six_layer_routing_context();
             }
+            self.refresh_four_app_lighting();
         }
         self.six_layer_view = self.six_layer_running.as_ref().map(|running| {
             let observed_layer = running.observed_layer.load(Ordering::Acquire);

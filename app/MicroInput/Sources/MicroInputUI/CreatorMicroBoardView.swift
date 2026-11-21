@@ -469,89 +469,57 @@ struct SimpleLightingControlCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 SettingsSectionHeader(store.tr("会话灯光")) {
                     HStack(spacing: 8) {
+                        if ss.attentionCount > 0 {
+                            Circle().fill(Color(hex: "#FFAA00")).frame(width: 6, height: 6)
+                            Text(locale == .en ? "\(ss.attentionCount) Needs Response" : "\(ss.attentionCount) 待回应")
+                                .font(UITheme.micro).foregroundStyle(UITheme.textPrimary)
+                            Text("·").foregroundStyle(UITheme.textMuted)
+                        }
                         Circle()
                             .fill(ss.unreadCompletedCount > 0 ? UITheme.textPrimary : UITheme.textMuted.opacity(0.55))
                             .frame(width: 6, height: 6)
                         Text(locale == .en ? "Unread \(ss.unreadCompletedCount)" : "未读 \(ss.unreadCompletedCount)")
-                            .font(UITheme.micro)
-                            .foregroundStyle(UITheme.textSecondary)
+                            .font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
                         Text("·").foregroundStyle(UITheme.textMuted)
                         Circle()
                             .fill(ss.workingCount > 0 ? UITheme.statusSuccess : UITheme.textMuted.opacity(0.55))
                             .frame(width: 6, height: 6)
                         Text(locale == .en ? "Running \(ss.workingCount)" : "进行中 \(ss.workingCount)")
-                            .font(UITheme.micro)
-                            .foregroundStyle(UITheme.textSecondary)
+                            .font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
                     }
                 }
 
                 SettingsCard {
-                    SettingsRow(
+                    lightingSwitchRow(
                         store.tr("开启灯光"),
                         subtitle: compact ? nil : store.tr("启用小键盘会话状态灯与环境底光反馈"),
-                        showsDivider: lp.lightingEnabled
-                    ) {
-                        Toggle(
-                            "",
-                            isOn: Binding(
-                                get: { lp.lightingEnabled },
-                                set: { store.dispatch("session_strip", ["SetLightingEnabled": $0]) }
-                            )
-                        )
-                        .labelsHidden()
-                        .toggleStyle(NeutralSwitchToggleStyle())
-                    }
+                        showsDivider: lp.lightingEnabled,
+                        value: lp.lightingEnabled
+                    ) { store.dispatch("session_strip", ["SetLightingEnabled": $0]) }
 
                     if lp.lightingEnabled {
-                        SettingsRow(
+                        lightingSwitchRow(
                             store.tr("随会话状态变色"),
                             subtitle: compact ? nil : store.tr("按进行中、待确认与已完成状态自动切换灯光颜色"),
-                            showsDivider: true
-                        ) {
-                            Toggle(
-                                "",
-                                isOn: Binding(
-                                    get: { lp.autoSessionColor },
-                                    set: { store.dispatch("session_strip", ["SetAutoSessionColor": $0]) }
-                                )
-                            )
-                            .labelsHidden()
-                            .toggleStyle(NeutralSwitchToggleStyle())
-                        }
-
-                        SettingsRow(
-                            store.tr("进行中的会话使用呼吸灯"),
-                            subtitle: compact ? nil : store.tr("任务运行期间以柔和呼吸灯效提示后台进展"),
-                            showsDivider: true
-                        ) {
-                            Toggle(
-                                "",
-                                isOn: Binding(
-                                    get: { lp.glowOnWorking },
-                                    set: { store.dispatch("session_strip", ["SetGlowOnWorking": $0]) }
-                                )
-                            )
-                            .labelsHidden()
-                            .toggleStyle(NeutralSwitchToggleStyle())
-                        }
+                            showsDivider: true,
+                            value: lp.autoSessionColor
+                        ) { store.dispatch("session_strip", ["SetAutoSessionColor": $0]) }
 
                         let showSessionSaRgbSync = !compact
                             && (store.v070Hardware.supported || store.v070Hardware.sessionSaRgbSyncEnabled)
-                        SettingsRow(
-                            store.tr("仅在有新完成或进行中的会话时亮起"),
-                            subtitle: compact ? nil : store.tr("无未读或运行中任务时保持安静熄灯"),
-                            showsDivider: showSessionSaRgbSync
-                        ) {
-                            Toggle(
-                                "",
-                                isOn: Binding(
-                                    get: { lp.onlyGlowOnAttentionOrCompleted },
-                                    set: { store.dispatch("session_strip", ["SetOnlyGlowOnAttentionOrCompleted": $0]) }
-                                )
-                            )
-                            .labelsHidden()
-                            .toggleStyle(NeutralSwitchToggleStyle())
-                        }
+                        lightingSwitchRow(
+                            store.tr("仅点亮待响应会话"),
+                            subtitle: compact ? nil : store.tr("待审批呼吸并点亮底光，已完成常亮"),
+                            showsDivider: true,
+                            value: lp.onlyGlowOnAttentionOrCompleted
+                        ) { store.dispatch("session_strip", ["SetOnlyGlowOnAttentionOrCompleted": $0]) }
+
+                        lightingSwitchRow(
+                            store.tr("进行中的会话也亮呼吸灯"),
+                            subtitle: compact ? nil : store.tr("任务运行期间以柔和呼吸灯效提示后台进展"),
+                            showsDivider: showSessionSaRgbSync,
+                            value: lp.glowOnWorking
+                        ) { store.dispatch("session_strip", ["SetGlowOnWorking": $0]) }
 
                         if showSessionSaRgbSync {
                             SettingsRow(
@@ -669,6 +637,20 @@ struct SimpleLightingControlCard: View {
             }
         }
     }
+
+    private func lightingSwitchRow(
+        _ title: String,
+        subtitle: String?,
+        showsDivider: Bool,
+        value: Bool,
+        onChange: @escaping (Bool) -> Void
+    ) -> some View {
+        SettingsRow(title, subtitle: subtitle, showsDivider: showsDivider) {
+            Toggle("", isOn: Binding(get: { value }, set: onChange))
+                .labelsHidden()
+                .toggleStyle(NeutralSwitchToggleStyle())
+        }
+    }
 }
 
 private struct BoardKeycapCellButton: View, @MainActor Equatable {
@@ -742,10 +724,11 @@ private struct BoardKeycapCellButton: View, @MainActor Equatable {
     private var taskKeycapSurface: some View {
         let status = sessionSlot?.kind ?? "Idle"
         let hasActiveState = (sessionSlot?.isUnreadBlueDot == true)
-            || (sessionSlot?.isWorkingAnimated == true)
+            || (sessionSlot?.isWorkingAnimated == true && sessionSlot?.ledColorHex != "#000000")
             || (status == "NeedsAttention")
+            || (status == "Error")
         let ledColor = Color(hex: sessionSlot?.ledColorHex ?? "#36526D")
-        let fillSurface = (sessionSlot?.isUnreadBlueDot == true || status == "NeedsAttention")
+        let fillSurface = (sessionSlot?.isUnreadBlueDot == true || status == "NeedsAttention" || status == "Error")
             ? UITheme.accentSoft
             : UITheme.subtleSurface
         let borderColor: Color = {
@@ -844,12 +827,22 @@ struct CreatorMicroSessionListView: View {
                     Text(store.tr("会话"))
                         .font(UITheme.sectionHeader)
                         .foregroundStyle(UITheme.textPrimary)
-                    if sessions.workingCount > 0 || sessions.unreadCompletedCount > 0 {
-                        Text(locale == .en
-                            ? "Running \(sessions.workingCount) · Completed \(sessions.unreadCompletedCount)"
-                            : "进行中 \(sessions.workingCount) · 已完成 \(sessions.unreadCompletedCount)")
+                    if sessions.attentionCount > 0 || sessions.workingCount > 0 || sessions.unreadCompletedCount > 0 {
+                        let statusText: String = {
+                            var parts: [String] = []
+                            if sessions.attentionCount > 0 {
+                                parts.append(locale == .en ? "\(sessions.attentionCount) Needs Response" : "\(sessions.attentionCount) 待回应")
+                            }
+                            if sessions.workingCount > 0 || sessions.unreadCompletedCount > 0 {
+                                parts.append(locale == .en
+                                    ? "Running \(sessions.workingCount) · Completed \(sessions.unreadCompletedCount)"
+                                    : "进行中 \(sessions.workingCount) · 已完成 \(sessions.unreadCompletedCount)")
+                            }
+                            return parts.joined(separator: " · ")
+                        }()
+                        Text(statusText)
                             .font(UITheme.caption)
-                            .foregroundStyle(UITheme.textSecondary)
+                            .foregroundStyle(sessions.attentionCount > 0 ? UITheme.textPrimary : UITheme.textSecondary)
                     }
                     Spacer()
                     if sessions.unreadCompletedCount > 0 {

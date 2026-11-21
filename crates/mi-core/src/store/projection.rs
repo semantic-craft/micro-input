@@ -1492,6 +1492,7 @@ impl ProjectionInputs<'_> {
             }
         }
 
+        let attention_count = attention_pills.len();
         let unread_completed_count = completed_blue_dot_pills.len();
         let working_count = working_pills.len();
 
@@ -1568,6 +1569,7 @@ impl ProjectionInputs<'_> {
             completed_blue_dot_pills,
             working_pills,
             attention_pills,
+            attention_count,
             unread_completed_count,
             working_count,
             top_six_bound_as_session_keys,

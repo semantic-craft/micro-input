@@ -16,9 +16,9 @@ pub mod status_item;
 pub use app_cache::{AppBundleCache, AppBundleInfo, OTHER_APPS_WILDCARD_BUNDLE_ID};
 pub use ax_dictation::DictationAdapter;
 pub use codex_sessions::{
-    build_codex_thread_deeplink, observe_codex_threads, read_codex_thread_fingerprint,
-    verify_codex_window_readback, CodexObservedStatus, CodexThreadFingerprint,
-    CodexThreadObservation, CodexWindowSnapshot,
+    apply_codex_window_signals, build_codex_thread_deeplink, observe_codex_threads,
+    read_codex_thread_fingerprint, verify_codex_window_readback, CodexLiveWindowSignals,
+    CodexObservedStatus, CodexThreadFingerprint, CodexThreadObservation, CodexWindowSnapshot,
 };
 pub use diagnostics::{write_private_json, DiagnosticRedactor};
 pub use executor::{
@@ -31,7 +31,7 @@ pub use executor::{
 };
 pub use instance_lock::DocumentInstanceLock;
 pub use managed_controls::{CodexReasoningAction, ModelPickerConfirmResult, SubagentOpenResult};
-pub use native_ax::observe_codex_window_state;
+pub use native_ax::{observe_codex_live_window_signals, observe_codex_window_state};
 pub use passive_panel::{
     NoopPassivePanelHost, PassivePanelEvent, PassivePanelFrameSpec, PassivePanelHost,
     PassivePanelRole, PassivePanelStyleSpec, ScreenGeometry, ScreenPoint, ScreenRect, ScreenSize,

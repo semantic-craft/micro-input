@@ -35,6 +35,8 @@ impl WorkbenchStore {
         self.document_store
             .save_board_configuration(plan, preview, usb)
             .map_err(WorkbenchError::Storage)?;
+        self.sync_six_layer_routing_context();
+        self.refresh_four_app_lighting();
         self.commit_local_update();
         Ok(())
     }
@@ -1035,7 +1037,7 @@ impl WorkbenchStore {
                 self.document_store
                     .update(|draft| draft.assign(&json!(pid), &json!(lid), slot, action))
                     .map_err(WorkbenchError::Storage)?;
-                self.sync_v070_session_sa_rgb();
+                self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -1107,14 +1109,14 @@ impl WorkbenchStore {
                 if slot_index >= SLOT_COUNT {
                     return Ok(());
                 }
-                let slot = self.slot_table.slot_table().slots()[slot_index].clone();
+                let slot = self.active_slot_table().slot_table().slots()[slot_index].clone();
                 let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
                 if slot.mode == mi_model::slot_table::SlotMode::Pinned {
-                    self.slot_table
+                    self.active_slot_table_mut()
                         .unpin_slot(slot_index, &acks)
                         .map_err(WorkbenchError::Storage)?;
                 } else if let Some(place) = slot.place {
-                    self.slot_table
+                    self.active_slot_table_mut()
                         .pin_slot(
                             slot_index,
                             place,
@@ -1124,6 +1126,7 @@ impl WorkbenchStore {
                         )
                         .map_err(WorkbenchError::Storage)?;
                 }
+                self.refresh_navigation_revision();
                 self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())
@@ -1133,11 +1136,13 @@ impl WorkbenchStore {
                 Ok(())
             }
             SessionStripAction::AcknowledgeAllCompleted => {
+                let acks_before = &self.lighting_arbiter.acknowledged_watermarks;
                 let to_ack: Vec<_> = self
                     .slot_table
                     .candidates()
                     .iter()
-                    .filter(|c| c.has_unviewed_completion_timestamp())
+                    .chain(self.codex_slot_table.candidates().iter())
+                    .filter(|c| c.is_unacknowledged(acks_before) && !c.watermark.is_empty())
                     .map(|c| (c.place.clone(), c.watermark.clone()))
                     .collect();
                 for (place, wm) in to_ack {
@@ -1145,6 +1150,8 @@ impl WorkbenchStore {
                 }
                 let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
                 self.slot_table.refresh_with_watermarks(&acks);
+                self.codex_slot_table.refresh_with_watermarks(&acks);
+                self.refresh_navigation_revision();
                 self.lighting_popover.manual_preview_phase = None;
                 self.lighting_arbiter.manual_preview_phase = None;
                 self.refresh_four_app_lighting();
@@ -1173,7 +1180,7 @@ impl WorkbenchStore {
                     self.slot_role_overrides.remove(&(pid.clone(), slot));
                     self.keycap_overrides.remove(&(pid.clone(), slot));
                 }
-                self.sync_v070_session_sa_rgb();
+                self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -1272,7 +1279,7 @@ impl WorkbenchStore {
                 self.bottom_row_layout = BottomRowLayout::Split;
                 self.merge_wide_key.store(false, Ordering::SeqCst);
                 self.normalize_surface_for_current_layer();
-                self.sync_v070_session_sa_rgb();
+                self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -1348,16 +1355,171 @@ impl WorkbenchStore {
         }
     }
 
-    pub fn ingest_four_app_candidates(&mut self, candidates: Vec<FourAppLiveCandidate>) {
+    pub fn ingest_candidates_for_source(
+        &mut self,
+        source: LiveSessionSource,
+        candidates: Vec<FourAppLiveCandidate>,
+    ) {
         let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
-        self.slot_table.update_candidates(candidates, &acks);
+        self.slot_table_for_source_mut(source)
+            .update_candidates(candidates, &acks);
+        self.refresh_navigation_revision();
         self.refresh_four_app_lighting();
         self.commit_runtime_update();
     }
 
+    pub fn ingest_four_app_candidates(&mut self, candidates: Vec<FourAppLiveCandidate>) {
+        let default_source = self.desired_live_session_source();
+        if candidates.is_empty() {
+            self.ingest_candidates_for_source(default_source, candidates);
+            return;
+        }
+        let source_for = |place: &NavigationPlace| match place {
+            NavigationPlace::Codex { .. } => LiveSessionSource::Codex,
+            NavigationPlace::Antigravity { .. } => LiveSessionSource::Antigravity,
+            _ => default_source,
+        };
+        let all_codex = candidates
+            .iter()
+            .all(|c| source_for(&c.place) == LiveSessionSource::Codex);
+        let none_codex = candidates
+            .iter()
+            .all(|c| source_for(&c.place) != LiveSessionSource::Codex);
+        if all_codex {
+            self.ingest_candidates_for_source(LiveSessionSource::Codex, candidates);
+        } else if none_codex {
+            self.ingest_candidates_for_source(LiveSessionSource::Antigravity, candidates);
+        } else {
+            let (codex_cands, ag_cands): (Vec<_>, Vec<_>) = candidates
+                .into_iter()
+                .partition(|c| source_for(&c.place) == LiveSessionSource::Codex);
+            let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
+            self.codex_slot_table.update_candidates(codex_cands, &acks);
+            self.slot_table.update_candidates(ag_cands, &acks);
+            self.refresh_navigation_revision();
+            self.refresh_four_app_lighting();
+            self.commit_runtime_update();
+        }
+    }
+
+    pub(crate) fn six_layer_slot_snapshots(
+        &self,
+        acks: &BTreeMap<String, String>,
+    ) -> (
+        [crate::lighting_arbiter::FourAppSlotSnapshot; SLOT_COUNT],
+        [crate::lighting_arbiter::FourAppSlotSnapshot; SLOT_COUNT],
+        [crate::lighting_arbiter::FourAppSlotSnapshot; SLOT_COUNT],
+        u8,
+    ) {
+        let empty_snapshot = || crate::lighting_arbiter::FourAppSlotSnapshot {
+            app: String::new(),
+            title: String::new(),
+            status: "idle".to_string(),
+            place: None,
+            watermark: String::new(),
+        };
+        let preferred_layer = self
+            .six_layer_running
+            .as_ref()
+            .map(|r| r.observed_layer.load(Ordering::Acquire))
+            .filter(|l| (1..=3).contains(l))
+            .unwrap_or(2);
+        let Some(plan) = self
+            .six_layer_running
+            .as_ref()
+            .map(|r| &r.installation.plan)
+            .or_else(|| self.six_layer_state.installation.as_ref().map(|i| &i.plan))
+        else {
+            return (
+                std::array::from_fn(|_| empty_snapshot()),
+                std::array::from_fn(|_| empty_snapshot()),
+                std::array::from_fn(|_| empty_snapshot()),
+                preferred_layer,
+            );
+        };
+        let ctx = crate::six_layer_runtime::RoutingContext {
+            mode: self.build_six_layer_routing_mode(),
+            bundle_id: self.foreground_bundle_id.clone(),
+        };
+        let board_ctx = crate::six_layer_runtime::RoutingContext {
+            mode: self.build_board_layers_routing_mode(),
+            bundle_id: None,
+        };
+        let is_pinned_mode = matches!(
+            ctx.mode,
+            crate::six_layer_runtime::SixLayerRoutingMode::ManualPinned(_)
+                | crate::six_layer_runtime::SixLayerRoutingMode::Locked(_)
+        );
+        let board_slot_binds_session_open = |control_layer: u8, slot_idx: usize| -> bool {
+            if let Some((_, ResolvedHostAction::AgentCommand { command, .. })) =
+                board_ctx.resolve_control(plan, control_layer, slot_idx)
+            {
+                return command
+                    .strip_prefix("slot-open:")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .is_some_and(|idx| idx < SLOT_COUNT);
+            }
+            control_layer == 1
+                && slot_idx < SLOT_COUNT
+                && matches!(
+                    &board_ctx.mode,
+                    crate::six_layer_runtime::SixLayerRoutingMode::BoardLayers {
+                        layer_one: None,
+                        ..
+                    }
+                )
+                && matches!(
+                    plan.desired
+                        .route(mi_model::board_layers::BoardLayer::ALL[0]),
+                    mi_model::board_layers::BoardLayerRoute::Native {
+                        owner: mi_model::board_layers::NativeLayerOwner::Codex,
+                        ..
+                    }
+                )
+        };
+        let ag_snapshots = self.slot_table.lighting_snapshots(acks);
+        let codex_snapshots = self.codex_slot_table.lighting_snapshots(acks);
+        let snapshots_for_layer = |control_layer: u8| {
+            std::array::from_fn(|slot_idx| {
+                if is_pinned_mode && !board_slot_binds_session_open(control_layer, slot_idx) {
+                    return empty_snapshot();
+                }
+                let Some((profile_id, action)) = ctx.resolve_control(plan, control_layer, slot_idx)
+                else {
+                    return empty_snapshot();
+                };
+                let ResolvedHostAction::AgentCommand { adapter, command } = action else {
+                    return empty_snapshot();
+                };
+                let Some(target_idx) = command
+                    .strip_prefix("slot-open:")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .filter(|&idx| idx < SLOT_COUNT)
+                else {
+                    return empty_snapshot();
+                };
+                let source = if adapter == "codex" {
+                    LiveSessionSource::Codex
+                } else {
+                    self.source_for_profile_id(profile_id)
+                };
+                match source {
+                    LiveSessionSource::Codex => codex_snapshots[target_idx].clone(),
+                    LiveSessionSource::Antigravity => ag_snapshots[target_idx].clone(),
+                }
+            })
+        };
+        (
+            snapshots_for_layer(1),
+            snapshots_for_layer(2),
+            snapshots_for_layer(3),
+            preferred_layer,
+        )
+    }
+
     pub fn refresh_four_app_lighting(&mut self) {
         let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
-        let snapshots = self.slot_table.lighting_snapshots(&acks);
+        let snapshots = self.active_slot_table().lighting_snapshots(&acks);
         let live_phase = self.derive_live_lighting_phase(&acks);
         let is_protected = self.is_active_lighting_protected();
         let preview_busy = self.is_lighting_preview_busy();
@@ -1376,14 +1538,45 @@ impl WorkbenchStore {
             if result == LightingUpdateResult::DeviceBusy {
                 self.lighting_arbiter.invalidate_hardware_cache();
             } else {
+                let (l1_slots, l2_slots, l3_slots, preferred_layer) =
+                    self.six_layer_slot_snapshots(&acks);
                 let running = &self.six_layer_running;
-                let _ = self
-                    .lighting_arbiter
-                    .sync_six_layer_hardware(|digest, entries| {
+                let _ = self.lighting_arbiter.sync_six_layer_hardware_for_layers(
+                    &l1_slots,
+                    &l2_slots,
+                    &l3_slots,
+                    preferred_layer,
+                    |digest, entries| {
                         Ok(running
                             .as_ref()
                             .and_then(|r| r.queue_session_lighting(digest, entries)))
-                    });
+                    },
+                );
+                if self.lighting_arbiter.manual_preview_phase.is_none()
+                    && self.lighting_arbiter.lighting_enabled
+                    && !is_protected
+                    && self.lighting_arbiter.brightness_scale > 0.0
+                {
+                    if let Some(sa_color) = self
+                        .lighting_arbiter
+                        .last_six_layer_entries()
+                        .and_then(|entries| entries.iter().find(|e| e.sa && e.c != 0 && e.b > 0.0))
+                        .map(|e| e.c)
+                    {
+                        let clamped = self.lighting_arbiter.brightness_scale.clamp(0.15, 1.0);
+                        let (ug_brightness, ug_speed) = if sa_color == 0xFF2200 {
+                            ((1.0 * clamped).min(1.0), 0.85)
+                        } else {
+                            ((0.95 * clamped).min(1.0), 0.75)
+                        };
+                        if let Some(dz) = self.lighting_arbiter.dual_zone_feedback.as_mut() {
+                            dz.underglow_color = format!("#{:06X}", sa_color & 0xFF_FFFF);
+                            dz.underglow_effect = "breath".into();
+                            dz.underglow_brightness = ug_brightness;
+                            dz.underglow_speed = ug_speed;
+                        }
+                    }
+                }
             }
             self.sync_v070_session_sa_rgb();
             return;

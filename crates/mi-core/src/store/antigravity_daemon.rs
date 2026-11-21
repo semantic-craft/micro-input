@@ -35,28 +35,92 @@ impl WorkbenchStore {
             .filter(|pid| profiles.contains_key(pid))
     }
 
-    pub(crate) fn desired_live_session_source(&self) -> LiveSessionSource {
-        let profiles = &self
-            .document_store
-            .host_store()
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles;
-        let profile_name = |pid: &str| profiles.get(pid).map(|p| p.name.as_str());
-        let active_id = self
-            .effective_resolved_active_profile_id()
-            .or_else(|| self.selected_profile_id.clone());
-        let active_name = active_id
-            .as_deref()
-            .and_then(|id| self.runtime_action_profile_id(id))
-            .and_then(profile_name);
-        if active_name == Some(mi_model::preset::LOCAL_CODEX_PROFILE_NAME) {
+    pub fn slot_table_for_source(&self, source: LiveSessionSource) -> &FourAppSlotTable {
+        match source {
+            LiveSessionSource::Antigravity => &self.slot_table,
+            LiveSessionSource::Codex => &self.codex_slot_table,
+        }
+    }
+
+    pub fn slot_table_for_source_mut(
+        &mut self,
+        source: LiveSessionSource,
+    ) -> &mut FourAppSlotTable {
+        match source {
+            LiveSessionSource::Antigravity => &mut self.slot_table,
+            LiveSessionSource::Codex => &mut self.codex_slot_table,
+        }
+    }
+
+    pub fn active_slot_table(&self) -> &FourAppSlotTable {
+        self.slot_table_for_source(self.desired_live_session_source())
+    }
+
+    pub fn active_slot_table_mut(&mut self) -> &mut FourAppSlotTable {
+        let source = self.desired_live_session_source();
+        self.slot_table_for_source_mut(source)
+    }
+
+    pub fn source_for_profile_id(&self, profile_id: &str) -> LiveSessionSource {
+        if profile_id == "codex" {
+            return LiveSessionSource::Codex;
+        }
+        if profile_id == "workbench" {
+            return self.desired_live_session_source();
+        }
+        let host_doc = &self.document_store.host_store().draft.document;
+        let draft_doc = &self.document_store.draft.document;
+        if let Some(resolved) = self.runtime_action_profile_id(profile_id) {
+            if host_doc
+                .editable
+                .graph
+                .profiles
+                .get(resolved)
+                .is_some_and(|p| {
+                    p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME
+                        || CanonicalAgent::from_profile_name(&p.name) == Some(CanonicalAgent::Codex)
+                })
+            {
+                return LiveSessionSource::Codex;
+            }
+        }
+        if mi_model::board_layers::native_owner(host_doc, profile_id)
+            == Some(NativeLayerOwner::Codex)
+            || mi_model::board_layers::native_owner(draft_doc, profile_id)
+                == Some(NativeLayerOwner::Codex)
+            || draft_doc
+                .editable
+                .graph
+                .profiles
+                .get(profile_id)
+                .is_some_and(|p| {
+                    p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME
+                        || CanonicalAgent::from_profile_name(&p.name) == Some(CanonicalAgent::Codex)
+                })
+        {
             LiveSessionSource::Codex
         } else {
             LiveSessionSource::Antigravity
         }
+    }
+
+    pub(crate) fn desired_live_session_source(&self) -> LiveSessionSource {
+        if let Some(active_id) = self
+            .effective_resolved_active_profile_id()
+            .or_else(|| self.selected_profile_id.clone())
+        {
+            return self.source_for_profile_id(&active_id);
+        }
+        if self.document_store.locked_profile_id().is_none()
+            && !self.six_layer_user_pinned
+            && self
+                .six_layer_running
+                .as_ref()
+                .is_some_and(|r| r.observed_layer.load(Ordering::Acquire) == 1)
+        {
+            return LiveSessionSource::Codex;
+        }
+        LiveSessionSource::Antigravity
     }
 
     pub(crate) fn sync_live_session_source(&mut self) -> bool {
@@ -76,9 +140,7 @@ impl WorkbenchStore {
         if !changed {
             return false;
         }
-        let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
-        self.update_navigation_catalog(None);
-        self.slot_table.retain_agent_slots(desired.agent(), &acks);
+        self.sync_active_navigation_catalog_mirror();
         self.refresh_navigation_revision();
         self.refresh_four_app_lighting();
         self.commit_runtime_update();
@@ -96,29 +158,32 @@ impl WorkbenchStore {
             let mut seen_running_ids = BTreeSet::new();
             let mut completed_transition_watermarks = BTreeMap::new();
             loop {
-                let (source, source_gen) = {
+                let source_gen = {
                     let (lock, _) = &*live_source;
-                    let guard = lock.lock().unwrap();
-                    (guard.source, guard.generation)
+                    lock.lock().unwrap().generation
                 };
                 let epoch = epoch_source.load(Ordering::Acquire);
-                let catalog = match source {
-                    LiveSessionSource::Antigravity => poll_antigravity_daemon_candidates(
-                        &mut seen_running_ids,
-                        &mut completed_transition_watermarks,
-                    ),
-                    LiveSessionSource::Codex => poll_codex_session_candidates(),
-                };
-                let still_current = {
-                    let (lock, _) = &*live_source;
-                    let guard = lock.lock().unwrap();
-                    guard.source == source && guard.generation == source_gen
-                };
-                if !still_current {
-                    continue;
-                }
+                let ag_catalog = poll_antigravity_daemon_candidates(
+                    &mut seen_running_ids,
+                    &mut completed_transition_watermarks,
+                );
                 if tx
-                    .send(HardwareLoopEvent::LiveCandidatesUpdated { epoch, catalog })
+                    .send(HardwareLoopEvent::LiveCandidatesUpdated {
+                        epoch,
+                        source: LiveSessionSource::Antigravity,
+                        catalog: ag_catalog,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                let codex_catalog = poll_codex_session_candidates();
+                if tx
+                    .send(HardwareLoopEvent::LiveCandidatesUpdated {
+                        epoch,
+                        source: LiveSessionSource::Codex,
+                        catalog: codex_catalog,
+                    })
                     .is_err()
                 {
                     break;
@@ -340,6 +405,66 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
     seen_running_ids: &mut BTreeSet<String>,
     completed_transition_watermarks: &mut BTreeMap<String, String>,
 ) -> ClassifiedAntigravityTrajectories {
+    let mut parent_map: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut waiting_sources: Vec<&str> = Vec::new();
+    for (cid, item) in summaries {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let ann = obj.get("annotations").and_then(Value::as_object);
+        if ann.and_then(|a| a.get("archived")).and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let killed = obj.get("killed").and_then(Value::as_bool).unwrap_or(false);
+        if killed {
+            continue;
+        }
+        if let Some(parent_id) = obj
+            .get("trajectoryMetadata")
+            .and_then(Value::as_object)
+            .and_then(|m| m.get("parentConversationId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            parent_map.insert(cid.as_str(), parent_id);
+        }
+        let waiting_steps = obj
+            .get("waitingSteps")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        let status_str = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("CASCADE_RUN_STATUS_IDLE");
+        if waiting_steps
+            || matches!(
+                status_str,
+                "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT"
+                    | "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION"
+            )
+        {
+            waiting_sources.push(cid.as_str());
+        }
+    }
+
+    let mut descendant_waiting_cids: BTreeSet<String> = BTreeSet::new();
+    for start_cid in waiting_sources {
+        let mut visited = BTreeSet::new();
+        visited.insert(start_cid);
+        let mut current = start_cid;
+        for _ in 0..8 {
+            let Some(&parent) = parent_map.get(current) else {
+                break;
+            };
+            if !visited.insert(parent) {
+                break;
+            }
+            descendant_waiting_cids.insert(parent.to_string());
+            current = parent;
+        }
+    }
+
     let mut candidates = Vec::new();
     let mut project_ids = BTreeMap::new();
     let mut frontmost_acknowledged = None;
@@ -471,14 +596,19 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
 
         let last_modified_ms = parse_iso8601_utc_ms(last_mod_str);
         let raw_view_ms = parse_iso8601_utc_ms(view_str);
-        let watermark = if marked_unread {
+        let descendant_waiting = !killed && descendant_waiting_cids.contains(cid.as_str());
+        let has_waiting = waiting_steps || descendant_waiting;
+        let mut watermark = if marked_unread {
             format!("{status_str}:{last_mod_str}:{term_str}:unread")
         } else {
             format!("{status_str}:{last_mod_str}:{term_str}")
         };
+        if !waiting_steps && descendant_waiting {
+            watermark.push_str(":subwait");
+        }
 
         let (phase, effective_view_ms) = if !killed
-            && (waiting_steps
+            && (has_waiting
                 || matches!(
                     status_str,
                     "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT"
@@ -498,17 +628,14 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
         {
             seen_running_ids.insert(cid.clone());
             (FourAppSessionKind::Working, raw_view_ms)
-        } else if errored
-            || matches!(
-                status_str,
-                "CASCADE_RUN_STATUS_ERROR" | "CASCADE_RUN_STATUS_FAILED"
-            )
-            || term_str == "ERROR"
-            || term_str.ends_with("_ERROR")
-        {
-            seen_running_ids.remove(cid);
-            (FourAppSessionKind::Error, raw_view_ms)
         } else {
+            let is_errored = errored
+                || matches!(
+                    status_str,
+                    "CASCADE_RUN_STATUS_ERROR" | "CASCADE_RUN_STATUS_FAILED"
+                )
+                || term_str == "ERROR"
+                || term_str.ends_with("_ERROR");
             if seen_running_ids.remove(cid) {
                 completed_transition_watermarks.insert(cid.clone(), watermark.clone());
             }
@@ -524,12 +651,16 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
                 }
                 (FourAppSessionKind::Idle, last_modified_ms.max(raw_view_ms))
             } else if has_unviewed || just_transitioned {
-                let adj_view_ms = if last_modified_ms > raw_view_ms.saturating_add(500) {
-                    raw_view_ms
+                if is_errored {
+                    (FourAppSessionKind::Error, raw_view_ms)
                 } else {
-                    last_modified_ms.saturating_sub(1000)
-                };
-                (FourAppSessionKind::BlueDotCompleted, adj_view_ms)
+                    let adj_view_ms = if last_modified_ms > raw_view_ms.saturating_add(500) {
+                        raw_view_ms
+                    } else {
+                        last_modified_ms.saturating_sub(1000)
+                    };
+                    (FourAppSessionKind::BlueDotCompleted, adj_view_ms)
+                }
             } else {
                 (FourAppSessionKind::Idle, raw_view_ms)
             }
@@ -643,10 +774,23 @@ pub fn codex_observations_to_catalog(
     codex_home: std::path::PathBuf,
     observations: &[mi_macos::CodexThreadObservation],
 ) -> NavigationCatalog {
+    codex_observations_to_catalog_with_ack(codex_home, observations, None)
+}
+
+pub fn codex_observations_to_catalog_with_ack(
+    codex_home: std::path::PathBuf,
+    observations: &[mi_macos::CodexThreadObservation],
+    frontmost_acknowledged: Option<(NavigationPlace, String)>,
+) -> NavigationCatalog {
     let mut candidates = Vec::new();
 
     for obs in observations {
         let (phase, last_modified_ms, last_user_view_ms) = match &obs.status {
+            mi_macos::CodexObservedStatus::NeedsAttention => (
+                FourAppSessionKind::NeedsAttention,
+                obs.updated_at_ms,
+                obs.updated_at_ms,
+            ),
             mi_macos::CodexObservedStatus::Working => (
                 FourAppSessionKind::Working,
                 obs.updated_at_ms,
@@ -709,12 +853,35 @@ pub fn codex_observations_to_catalog(
         observed_at: Instant::now(),
         candidates,
         project_ids: BTreeMap::new(),
-        frontmost_acknowledged: None,
+        frontmost_acknowledged,
     }
 }
 
 pub(crate) fn poll_codex_session_candidates() -> Option<NavigationCatalog> {
     let codex_home = mi_macos::default_codex_home()?;
-    let observations = mi_macos::observe_codex_threads(&codex_home, 64).ok()?;
-    Some(codex_observations_to_catalog(codex_home, &observations))
+    let mut observations = mi_macos::observe_codex_threads(&codex_home, 64).ok()?;
+    let frontmost_acknowledged = if observations.iter().any(|obs| {
+        matches!(
+            obs.status,
+            mi_macos::CodexObservedStatus::Working
+                | mi_macos::CodexObservedStatus::Unread
+                | mi_macos::CodexObservedStatus::Error
+        )
+    }) {
+        mi_macos::observe_codex_live_window_signals()
+            .and_then(|signals| mi_macos::apply_codex_window_signals(&mut observations, &signals))
+            .map(|(thread_id, host_id, workspace_path, watermark)| {
+                (
+                    NavigationPlace::codex(thread_id, host_id, workspace_path),
+                    watermark,
+                )
+            })
+    } else {
+        None
+    };
+    Some(codex_observations_to_catalog_with_ack(
+        codex_home,
+        &observations,
+        frontmost_acknowledged,
+    ))
 }

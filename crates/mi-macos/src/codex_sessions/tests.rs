@@ -137,6 +137,7 @@ pub(crate) mod test_support {
                     ('{UUID_G}', 0),
                     ('{UUID_ARCHIVED}', 1);
                 INSERT INTO thread_read_receipts (thread_id, first_unread_turn, revision, last_published_turn) VALUES
+                    ('{UUID_C}', 'turn-c1', 'rev-0', 'turn-c1'),
                     ('{UUID_D}', 'turn-d1', 'rev-1', 'turn-d1'),
                     ('{UUID_F}', NULL, 'rev-2', 'turn-f1');
                 "
@@ -206,19 +207,18 @@ fn observes_codex_threads_filtering_mapping_statuses_and_watermarks() {
     let ids: Vec<&str> = rows.iter().map(|r| r.thread_id.as_str()).collect();
     assert_eq!(
         ids,
-        vec![UUID_A, UUID_B, UUID_C, UUID_D, UUID_E, UUID_F, UUID_G]
+        vec![UUID_C, UUID_D, UUID_E, UUID_A, UUID_B, UUID_F, UUID_G]
     );
 
-    assert_eq!(rows[0].status, CodexObservedStatus::Working);
-    assert_eq!(rows[0].updated_at_ms, 1_700_000_100_000);
-    assert_eq!(rows[0].watermark, "turn-a1::1700000100000");
-
-    assert_eq!(rows[1].status, CodexObservedStatus::Working);
-    assert_eq!(rows[2].host_id, "remote-ssh:devbox");
-    assert_eq!(rows[2].status, CodexObservedStatus::Error);
-    assert_eq!(rows[3].status, CodexObservedStatus::Unread);
-    assert_eq!(rows[3].watermark, "turn-d1:turn-d1:1700000070000");
-    assert_eq!(rows[4].status, CodexObservedStatus::Unread);
+    assert_eq!(rows[0].host_id, "remote-ssh:devbox");
+    assert_eq!(rows[0].status, CodexObservedStatus::Error);
+    assert_eq!(rows[1].status, CodexObservedStatus::Unread);
+    assert_eq!(rows[1].watermark, "turn-d1:turn-d1:1700000070000");
+    assert_eq!(rows[2].status, CodexObservedStatus::Unread);
+    assert_eq!(rows[3].status, CodexObservedStatus::Working);
+    assert_eq!(rows[3].updated_at_ms, 1_700_000_100_000);
+    assert_eq!(rows[3].watermark, "turn-a1::1700000100000");
+    assert_eq!(rows[4].status, CodexObservedStatus::Working);
     assert_eq!(rows[5].status, CodexObservedStatus::Idle);
     assert_eq!(
         rows[6].status,
@@ -227,6 +227,8 @@ fn observes_codex_threads_filtering_mapping_statuses_and_watermarks() {
 
     let limited = observe_codex_threads(dir.path(), 2).unwrap();
     assert_eq!(limited.len(), 2);
+    assert_eq!(limited[0].thread_id, UUID_C);
+    assert_eq!(limited[1].thread_id, UUID_D);
 }
 
 #[test]
@@ -754,6 +756,12 @@ fn noisy_thread_turns_do_not_evict_older_failed_or_in_progress_threads_and_snipp
     history_sql.push_str(&format!(
         "INSERT INTO thread_turns VALUES ('{older_failed}', 'turn-of-1', 1, 'failed', '{{\"message\":\"old\"}}');\n"
     ));
+    state_sql.push_str(&format!(
+        "INSERT INTO thread_read_receipts VALUES ('{older_failed}', 'turn-of-1', 'rev-of', 'turn-of-1');\n"
+    ));
+    state_sql.push_str(&format!(
+        "INSERT INTO thread_read_receipts VALUES ('{noisy_failed}', 'turn-nf-0', 'rev-nf', 'turn-nf-0');\n"
+    ));
     history_sql.push_str(&format!(
         "INSERT INTO thread_turns VALUES ('{older_working}', 'turn-ow-1', 1, 'inProgress', NULL);\n"
     ));
@@ -794,4 +802,412 @@ fn noisy_thread_turns_do_not_evict_older_failed_or_in_progress_threads_and_snipp
     let idx = dbs.thread_snippets(older_working, 1024).unwrap();
     assert_eq!(idx.snippets.len(), MAX_THREAD_SNIPPETS);
     assert!(idx.snippets.len() <= MAX_THREAD_SNIPPETS);
+}
+
+#[test]
+fn excludes_attached_and_spawned_child_threads_while_retaining_root_threads() {
+    let dir = TempDir::new().unwrap();
+    create_codex_fixture(dir.path());
+
+    let state_db = dir.path().join("state_5.sqlite");
+    exec_sql(
+        &state_db,
+        &format!(
+            "ALTER TABLE threads ADD COLUMN attached_thread_parent_id TEXT;
+             UPDATE threads SET attached_thread_parent_id = '{UUID_C}' WHERE id = '{UUID_A}';
+             UPDATE threads SET attached_thread_parent_id = '' WHERE id = '{UUID_B}';"
+        ),
+    );
+
+    let after_parent_col = observe_codex_threads(dir.path(), 10).unwrap();
+    let ids_col_only: Vec<&str> = after_parent_col
+        .iter()
+        .map(|r| r.thread_id.as_str())
+        .collect();
+    assert!(!ids_col_only.contains(&UUID_A));
+    assert!(ids_col_only.contains(&UUID_B));
+
+    exec_sql(
+        &state_db,
+        &format!(
+            "CREATE TABLE thread_spawn_edges (
+                 parent_thread_id TEXT NOT NULL,
+                 child_thread_id TEXT NOT NULL
+             );
+             INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id)
+             VALUES ('{UUID_C}', '{UUID_D}');"
+        ),
+    );
+
+    let after_both = observe_codex_threads(dir.path(), 10).unwrap();
+    let ids_both: Vec<&str> = after_both.iter().map(|r| r.thread_id.as_str()).collect();
+    assert_eq!(ids_both, vec![UUID_C, UUID_E, UUID_B, UUID_F, UUID_G]);
+}
+
+#[test]
+fn status_priority_rank_orders_attention_error_unread_working_idle_under_limit() {
+    let dir = TempDir::new().unwrap();
+    create_codex_fixture(dir.path());
+    let unique_working = "01a1c5b2-d0fd-7001-96e4-777700000001";
+    exec_sql(
+        &dir.path().join("sqlite").join("codex.db"),
+        &format!(
+            "INSERT INTO local_thread_catalog VALUES \
+             ('local', '{unique_working}', 'Deploy Staging', 100.0, 1700000010.0, '/tmp/ws/deploy', 'vscode', 0, 1700000010.0); \
+             INSERT INTO active_chat_turns VALUES ('default', 'a', 'u', '{unique_working}', 'launch-2', 1700000010000);"
+        ),
+    );
+    exec_sql(
+        &dir.path().join("state_5.sqlite"),
+        &format!("INSERT INTO threads (id, archived) VALUES ('{unique_working}', 0);"),
+    );
+    exec_sql(
+        &dir.path().join("thread_history_1.sqlite"),
+        &format!(
+            "INSERT INTO thread_turns (thread_id, turn_id, rollout_ordinal, status, error_json) \
+             VALUES ('{unique_working}', 'turn-u1', 1, 'inProgress', NULL);"
+        ),
+    );
+
+    let limited = observe_codex_threads(dir.path(), 6).unwrap();
+    let limited_statuses: Vec<CodexObservedStatus> =
+        limited.iter().map(|r| r.status.clone()).collect();
+    assert_eq!(
+        limited_statuses,
+        vec![
+            CodexObservedStatus::Error,
+            CodexObservedStatus::Unread,
+            CodexObservedStatus::Unread,
+            CodexObservedStatus::Working,
+            CodexObservedStatus::Working,
+            CodexObservedStatus::Working,
+        ]
+    );
+
+    let mut all = observe_codex_threads(dir.path(), 10).unwrap();
+    let signals = CodexLiveWindowSignals {
+        is_frontmost: false,
+        toolbar_project: None,
+        active_sidebar_texts: Vec::new(),
+        attention_sidebar_titles: vec!["Deploy Staging".into()],
+        ..Default::default()
+    };
+    assert_eq!(apply_codex_window_signals(&mut all, &signals), None);
+    assert_eq!(all[0].thread_id, unique_working);
+    assert_eq!(all[0].status, CodexObservedStatus::NeedsAttention);
+    assert_eq!(all[0].watermark, "turn-u1::1700000010000:attention");
+    assert_eq!(all[1].status, CodexObservedStatus::Error);
+    assert_eq!(all[2].status, CodexObservedStatus::Unread);
+    assert_eq!(all[4].status, CodexObservedStatus::Working);
+    assert_eq!(all[6].status, CodexObservedStatus::Idle);
+}
+
+#[test]
+fn apply_codex_window_signals_handles_duplicate_working_titles_and_frontmost_unread_acknowledgement(
+) {
+    let obs = |id: &str, title: &str, ws: &str, status: CodexObservedStatus, ts: u64, wm: &str| {
+        CodexThreadObservation {
+            thread_id: id.into(),
+            host_id: "local".into(),
+            display_title: title.into(),
+            workspace_path: ws.into(),
+            status,
+            updated_at_ms: ts,
+            watermark: wm.into(),
+        }
+    };
+
+    let mut duplicate_working = vec![
+        obs(
+            UUID_A,
+            "Same Title",
+            "/tmp/ws/micro-input",
+            CodexObservedStatus::Working,
+            2_000,
+            "wm-a",
+        ),
+        obs(
+            UUID_B,
+            "Same Title",
+            "/tmp/ws/micro-input",
+            CodexObservedStatus::Working,
+            1_000,
+            "wm-b",
+        ),
+    ];
+    let dup_signals = CodexLiveWindowSignals {
+        is_frontmost: false,
+        toolbar_project: None,
+        active_sidebar_texts: Vec::new(),
+        attention_sidebar_titles: vec!["Same Title".into()],
+        ..Default::default()
+    };
+    assert_eq!(
+        apply_codex_window_signals(&mut duplicate_working, &dup_signals),
+        None
+    );
+    assert_eq!(duplicate_working[0].status, CodexObservedStatus::Working);
+    assert_eq!(duplicate_working[1].status, CodexObservedStatus::Working);
+
+    let mut unread_rows = vec![
+        obs(
+            UUID_D,
+            "Unread Receipt",
+            "/tmp/ws/micro-input",
+            CodexObservedStatus::Unread,
+            3_000,
+            "wm-d",
+        ),
+        obs(
+            UUID_E,
+            "Ambiguous Unread",
+            "/tmp/ws/micro-input",
+            CodexObservedStatus::Unread,
+            2_500,
+            "wm-e",
+        ),
+        obs(
+            UUID_F,
+            "Ambiguous Unread",
+            "/tmp/ws/micro-input",
+            CodexObservedStatus::Idle,
+            1_500,
+            "wm-f",
+        ),
+    ];
+
+    let background_signals = CodexLiveWindowSignals {
+        is_frontmost: false,
+        toolbar_project: Some("micro-input".into()),
+        active_sidebar_texts: vec!["Unread Receipt".into()],
+        attention_sidebar_titles: Vec::new(),
+        ..Default::default()
+    };
+    assert_eq!(
+        apply_codex_window_signals(&mut unread_rows, &background_signals),
+        None
+    );
+    assert_eq!(unread_rows[0].status, CodexObservedStatus::Unread);
+
+    let wrong_project_signals = CodexLiveWindowSignals {
+        is_frontmost: true,
+        toolbar_project: Some("other-project".into()),
+        active_sidebar_texts: vec!["Unread Receipt".into()],
+        attention_sidebar_titles: Vec::new(),
+        ..Default::default()
+    };
+    assert_eq!(
+        apply_codex_window_signals(&mut unread_rows, &wrong_project_signals),
+        None
+    );
+    assert_eq!(unread_rows[0].status, CodexObservedStatus::Unread);
+
+    let ambiguous_title_signals = CodexLiveWindowSignals {
+        is_frontmost: true,
+        toolbar_project: Some("micro-input".into()),
+        active_sidebar_texts: vec!["Ambiguous Unread".into()],
+        attention_sidebar_titles: Vec::new(),
+        ..Default::default()
+    };
+    assert_eq!(
+        apply_codex_window_signals(&mut unread_rows, &ambiguous_title_signals),
+        None
+    );
+    assert_eq!(unread_rows[1].status, CodexObservedStatus::Unread);
+
+    let valid_frontmost_signals = CodexLiveWindowSignals {
+        is_frontmost: true,
+        toolbar_project: Some("Micro-Input".into()),
+        active_sidebar_texts: vec!["Unread Receipt".into(), "1m".into()],
+        attention_sidebar_titles: Vec::new(),
+        ..Default::default()
+    };
+    let ack = apply_codex_window_signals(&mut unread_rows, &valid_frontmost_signals);
+    assert_eq!(
+        ack,
+        Some((
+            UUID_D.to_string(),
+            "local".to_string(),
+            "/tmp/ws/micro-input".to_string(),
+            "wm-d".to_string(),
+        ))
+    );
+    assert_eq!(unread_rows[0].thread_id, UUID_E);
+    assert_eq!(unread_rows[0].status, CodexObservedStatus::Unread);
+    assert_eq!(unread_rows[1].thread_id, UUID_D);
+    assert_eq!(unread_rows[1].status, CodexObservedStatus::Idle);
+}
+
+#[test]
+fn read_failed_turn_is_idle_and_frontmost_window_acknowledges_error_thread() {
+    let dir = TempDir::new().unwrap();
+    create_codex_fixture(dir.path());
+    exec_sql(
+        &dir.path().join("state_5.sqlite"),
+        &format!("UPDATE thread_read_receipts SET first_unread_turn = NULL WHERE thread_id = '{UUID_C}';"),
+    );
+
+    let rows = observe_codex_threads(dir.path(), 10).unwrap();
+    let row_c = rows.iter().find(|r| r.thread_id == UUID_C).unwrap();
+    assert_eq!(row_c.status, CodexObservedStatus::Idle);
+
+    let mut errored_rows = vec![CodexThreadObservation {
+        thread_id: UUID_C.into(),
+        host_id: "remote-ssh:devbox".into(),
+        display_title: "Remote Fail".into(),
+        workspace_path: "/srv/app".into(),
+        status: CodexObservedStatus::Error,
+        updated_at_ms: 1_700_000_080_000,
+        watermark: "turn-c1:turn-c1:1700000080000".into(),
+    }];
+    let signals = CodexLiveWindowSignals {
+        is_frontmost: true,
+        toolbar_project: Some("app".into()),
+        active_sidebar_texts: vec!["Remote Fail".into()],
+        attention_sidebar_titles: Vec::new(),
+        attention_windows: vec![(Some("app".into()), Vec::new())],
+    };
+    let ack = apply_codex_window_signals(&mut errored_rows, &signals);
+    assert_eq!(
+        ack,
+        Some((
+            UUID_C.to_string(),
+            "remote-ssh:devbox".to_string(),
+            "/srv/app".to_string(),
+            "turn-c1:turn-c1:1700000080000".to_string(),
+        ))
+    );
+    assert_eq!(errored_rows[0].status, CodexObservedStatus::Idle);
+}
+
+#[test]
+fn multi_window_attention_scopes_by_project_and_child_threads_roll_up_to_root() {
+    let mut multi_ws = vec![
+        CodexThreadObservation {
+            thread_id: UUID_A.into(),
+            host_id: "local".into(),
+            display_title: "Shared Title".into(),
+            workspace_path: "/tmp/ws/repo-a".into(),
+            status: CodexObservedStatus::Working,
+            updated_at_ms: 2_000,
+            watermark: "wm-a".into(),
+        },
+        CodexThreadObservation {
+            thread_id: UUID_B.into(),
+            host_id: "local".into(),
+            display_title: "Shared Title".into(),
+            workspace_path: "/tmp/ws/repo-b".into(),
+            status: CodexObservedStatus::Working,
+            updated_at_ms: 1_900,
+            watermark: "wm-b".into(),
+        },
+    ];
+    let multi_signals = CodexLiveWindowSignals {
+        is_frontmost: false,
+        toolbar_project: Some("repo-a".into()),
+        active_sidebar_texts: Vec::new(),
+        attention_sidebar_titles: vec!["Shared Title".into()],
+        attention_windows: vec![
+            (Some("repo-a".into()), Vec::new()),
+            (Some("repo-b".into()), vec!["Shared Title".into()]),
+        ],
+    };
+    assert_eq!(
+        apply_codex_window_signals(&mut multi_ws, &multi_signals),
+        None
+    );
+    assert_eq!(multi_ws[0].thread_id, UUID_B);
+    assert_eq!(multi_ws[0].status, CodexObservedStatus::NeedsAttention);
+    assert_eq!(multi_ws[0].watermark, "wm-b:attention");
+    assert_eq!(multi_ws[1].thread_id, UUID_A);
+    assert_eq!(multi_ws[1].status, CodexObservedStatus::Working);
+
+    let dir = TempDir::new().unwrap();
+    create_codex_fixture(dir.path());
+    let root_work = "01a1c5b2-d0fd-7001-96e4-dddd00000001";
+    let mid_child = "01a1c5b2-d0fd-7001-96e4-dddd00000002";
+    let leaf_work = "01a1c5b2-d0fd-7001-96e4-dddd00000003";
+    let root_err = "01a1c5b2-d0fd-7001-96e4-dddd00000004";
+    let child_err = "01a1c5b2-d0fd-7001-96e4-dddd00000005";
+    let cyc_a = "01a1c5b2-d0fd-7001-96e4-dddd00000006";
+    let cyc_b = "01a1c5b2-d0fd-7001-96e4-dddd00000007";
+
+    let mut codex_sql = String::from(
+        "DELETE FROM local_thread_catalog; DELETE FROM active_chat_turns; DELETE FROM automation_runs;\n",
+    );
+    let mut state_sql = String::from(
+        "DELETE FROM threads; DELETE FROM thread_read_receipts;\n\
+         ALTER TABLE threads ADD COLUMN attached_thread_parent_id TEXT;\n\
+         CREATE TABLE thread_spawn_edges (parent_thread_id TEXT NOT NULL, child_thread_id TEXT NOT NULL);\n",
+    );
+    let mut history_sql = String::from("DELETE FROM thread_turns; DELETE FROM thread_items;\n");
+
+    for (idx, (id, title)) in [
+        (root_work, "Older Root With Working Grandchild"),
+        (root_err, "Older Root With Errored Child"),
+        (mid_child, "Mid Child"),
+        (leaf_work, "Leaf Working Child"),
+        (child_err, "Errored Child"),
+        (cyc_a, "Cycle A"),
+        (cyc_b, "Cycle B"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ts = 1_700_000_001.0 + (idx as f64);
+        codex_sql.push_str(&format!(
+            "INSERT INTO local_thread_catalog VALUES ('local', '{id}', '{title}', 100.0, {ts}, '/tmp/ws/{idx}', 'vscode', 0, {ts});\n"
+        ));
+    }
+    state_sql.push_str(&format!(
+        "INSERT INTO threads (id, archived, attached_thread_parent_id) VALUES \
+         ('{root_work}', 0, NULL), \
+         ('{mid_child}', 0, '{root_work}'), \
+         ('{leaf_work}', 0, NULL), \
+         ('{root_err}', 0, NULL), \
+         ('{child_err}', 0, '{root_err}'), \
+         ('{cyc_a}', 0, '{cyc_b}'), \
+         ('{cyc_b}', 0, '{cyc_a}');\n\
+         INSERT INTO thread_spawn_edges VALUES ('{mid_child}', '{leaf_work}');\n\
+         INSERT INTO thread_read_receipts VALUES ('{child_err}', 'turn-ce-1', 'rev-ce', 'turn-ce-1');\n"
+    ));
+    history_sql.push_str(&format!(
+        "INSERT INTO thread_turns VALUES \
+         ('{root_work}', 'turn-rw-1', 1, 'completed', NULL), \
+         ('{leaf_work}', 'turn-lw-1', 1, 'inProgress', NULL), \
+         ('{root_err}', 'turn-re-1', 1, 'completed', NULL), \
+         ('{child_err}', 'turn-ce-1', 1, 'failed', '{{\"message\":\"subagent boom\"}}'), \
+         ('{cyc_a}', 'turn-ca-1', 1, 'inProgress', NULL);\n"
+    ));
+    for i in 0..8u32 {
+        let idle_id = format!("01a1c5b2-d0fd-7001-96e4-eeee0000{i:04x}");
+        let ts = 1_700_005_000.0 + f64::from(i);
+        codex_sql.push_str(&format!(
+            "INSERT INTO local_thread_catalog VALUES ('local', '{idle_id}', 'Idle {i}', 100.0, {ts}, '/tmp/ws/idle-{i}', 'vscode', 0, {ts});\n"
+        ));
+        state_sql.push_str(&format!(
+            "INSERT INTO threads (id, archived, attached_thread_parent_id) VALUES ('{idle_id}', 0, NULL);\n"
+        ));
+        history_sql.push_str(&format!(
+            "INSERT INTO thread_turns VALUES ('{idle_id}', 'turn-idle-{i}', 1, 'completed', NULL);\n"
+        ));
+    }
+
+    exec_sql(&dir.path().join("sqlite").join("codex.db"), &codex_sql);
+    exec_sql(&dir.path().join("state_5.sqlite"), &state_sql);
+    exec_sql(&dir.path().join("thread_history_1.sqlite"), &history_sql);
+
+    let observed = observe_codex_threads(dir.path(), 4).unwrap();
+    assert_eq!(observed[0].thread_id, root_err);
+    assert_eq!(observed[0].status, CodexObservedStatus::Error);
+    assert!(observed[0].watermark.ends_with(":suberror:turn-ce-1"));
+    assert_eq!(observed[1].thread_id, root_work);
+    assert_eq!(observed[1].status, CodexObservedStatus::Working);
+    assert!(observed[1].watermark.ends_with(":subwork"));
+    assert!(observed.iter().all(|o| {
+        !matches!(
+            o.thread_id.as_str(),
+            id if id == mid_child || id == leaf_work || id == child_err || id == cyc_a || id == cyc_b
+        )
+    }));
 }

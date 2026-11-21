@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FourAppSessionKind {
     NeedsAttention = 0,
-    BlueDotCompleted = 1,
-    Working = 2,
-    Error = 3,
+    Error = 1,
+    BlueDotCompleted = 2,
+    Working = 3,
     Idle = 4,
 }
 
@@ -55,15 +55,30 @@ impl FourAppLiveCandidate {
             && self.last_modified_ms > self.last_user_view_ms.saturating_add(500)
     }
 
-    pub fn is_unread_blue_dot(&self, acknowledged_watermarks: &BTreeMap<String, String>) -> bool {
-        if !self.has_unviewed_completion_timestamp() {
-            return false;
-        }
+    pub fn is_watermark_acknowledged(
+        &self,
+        acknowledged_watermarks: &BTreeMap<String, String>,
+    ) -> bool {
         let target_id = self.place.target_id();
-        !matches!(
+        matches!(
             acknowledged_watermarks.get(&target_id),
             Some(ack) if !self.watermark.is_empty() && ack == &self.watermark
         )
+    }
+
+    pub fn is_unread_blue_dot(&self, acknowledged_watermarks: &BTreeMap<String, String>) -> bool {
+        self.has_unviewed_completion_timestamp()
+            && !self.is_watermark_acknowledged(acknowledged_watermarks)
+    }
+
+    pub fn is_unacknowledged(&self, acknowledged_watermarks: &BTreeMap<String, String>) -> bool {
+        match self.phase {
+            FourAppSessionKind::BlueDotCompleted => {
+                self.is_unread_blue_dot(acknowledged_watermarks)
+            }
+            FourAppSessionKind::Error => !self.is_watermark_acknowledged(acknowledged_watermarks),
+            _ => false,
+        }
     }
 
     pub fn effective_kind(
@@ -76,6 +91,13 @@ impl FourAppLiveCandidate {
                     FourAppSessionKind::BlueDotCompleted
                 } else {
                     FourAppSessionKind::Idle
+                }
+            }
+            FourAppSessionKind::Error => {
+                if self.is_watermark_acknowledged(acknowledged_watermarks) {
+                    FourAppSessionKind::Idle
+                } else {
+                    FourAppSessionKind::Error
                 }
             }
             other => other,
@@ -179,16 +201,8 @@ impl FourAppSlotTable {
     pub fn refresh_with_watermarks(&mut self, acknowledged_watermarks: &BTreeMap<String, String>) {
         let mut sorted = self.candidates.clone();
         sorted.sort_by(|a, b| {
-            let a_prio = !matches!(
-                a.effective_kind(acknowledged_watermarks),
-                FourAppSessionKind::Idle
-            );
-            let b_prio = !matches!(
-                b.effective_kind(acknowledged_watermarks),
-                FourAppSessionKind::Idle
-            );
-            b_prio
-                .cmp(&a_prio)
+            a.effective_kind(acknowledged_watermarks)
+                .cmp(&b.effective_kind(acknowledged_watermarks))
                 .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
                 .then_with(|| a.place.target_id().cmp(&b.place.target_id()))
         });
@@ -432,7 +446,7 @@ impl Default for SimpleLightingPopoverProjection {
             lighting_enabled: true,
             auto_session_color: true,
             only_glow_on_attention_or_completed: true,
-            glow_on_working: true,
+            glow_on_working: false,
             ambient_color: AmbientColorPreset::OceanBlue,
             working_color: AmbientColorPreset::EmeraldGreen,
             brightness: LightingBrightnessPreset::Standard,
@@ -480,6 +494,8 @@ pub struct SessionStripProjection {
     pub completed_blue_dot_pills: Vec<SessionCapsulePillProjection>,
     pub working_pills: Vec<SessionCapsulePillProjection>,
     pub attention_pills: Vec<SessionCapsulePillProjection>,
+    #[serde(default)]
+    pub attention_count: usize,
     pub unread_completed_count: usize,
     pub working_count: usize,
     pub top_six_bound_as_session_keys: bool,
@@ -511,6 +527,7 @@ impl Default for SessionStripProjection {
             completed_blue_dot_pills: Vec::new(),
             working_pills: Vec::new(),
             attention_pills: Vec::new(),
+            attention_count: 0,
             unread_completed_count: 0,
             working_count: 0,
             top_six_bound_as_session_keys: false,

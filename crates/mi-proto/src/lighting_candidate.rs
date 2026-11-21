@@ -92,6 +92,8 @@ pub struct OaiKeyStatusEntry {
     pub e: u8,
     #[serde(default = "default_key_speed")]
     pub s: f64,
+    #[serde(default)]
+    pub sa: bool,
 }
 
 fn default_key_brightness() -> f64 {
@@ -116,6 +118,7 @@ impl OaiKeyStatusEntry {
             b,
             e,
             s: 0.5,
+            sa: false,
         }
     }
 
@@ -126,7 +129,13 @@ impl OaiKeyStatusEntry {
             b,
             e,
             s,
+            sa: false,
         }
+    }
+
+    pub fn with_ambient_sync(mut self, sa: bool) -> Self {
+        self.sa = sa;
+        self
     }
 
     pub fn firmware_key_id(&self) -> Option<u8> {
@@ -148,6 +157,11 @@ impl OaiKeyStatusEntry {
         {
             return Err(ProtoError::Invalid(
                 "v.oai.thstatus key or color exceeds firmware v0.6.3 policy".into(),
+            ));
+        }
+        if self.sa && (self.c == 0 || self.b <= 0.0 || self.e == 0) {
+            return Err(ProtoError::Invalid(
+                "v.oai.thstatus ambient sync requires active color, brightness, and effect".into(),
             ));
         }
         Ok(())
@@ -177,9 +191,18 @@ pub fn encode_oai_thstatus_candidate(
         sk: bool,
         sa: bool,
     }
+    let mut ambient_sync_count = 0usize;
     let mut wire_entries = Vec::with_capacity(entries.len());
     for entry in entries {
         entry.validate()?;
+        if entry.sa {
+            ambient_sync_count += 1;
+            if ambient_sync_count > 1 {
+                return Err(ProtoError::Invalid(
+                    "v.oai.thstatus supports at most 1 ambient sync entry".into(),
+                ));
+            }
+        }
         let key_id = entry.firmware_key_id().ok_or_else(|| {
             ProtoError::Invalid("v.oai.thstatus key exceeds firmware v0.6.3 policy".into())
         })?;
@@ -191,7 +214,7 @@ pub fn encode_oai_thstatus_candidate(
             e: entry.e,
             s: entry.s,
             sk: false,
-            sa: false,
+            sa: entry.sa,
         });
     }
     #[derive(Serialize)]
@@ -489,5 +512,48 @@ mod tests {
             encode_oai_thstatus_candidate(&[OaiKeyStatusEntry::new("ENC_CLK", 0xFFFFFF)], 42)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn oai_thstatus_encodes_single_ambient_sync_entry_and_rejects_duplicates_or_off_entries() {
+        let parsed_default: OaiKeyStatusEntry =
+            serde_json::from_value(json!({"k": "AG02", "c": 0xFFB800})).unwrap();
+        assert!(!parsed_default.sa);
+
+        let entries = vec![
+            OaiKeyStatusEntry::with_style("AG06", 0xFFB800, 0.90, 4, 0.65).with_ambient_sync(true),
+            OaiKeyStatusEntry::with_style("AG07", 0x00FF66, 0.85, 1, 0.50),
+            OaiKeyStatusEntry::new("AG08", 0),
+        ];
+        let th_bytes = encode_oai_thstatus_candidate(&entries, 18).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&th_bytes).unwrap(),
+            json!({
+                "id": 18,
+                "method": "v.oai.thstatus",
+                "params": [
+                    {"id": 6, "k": "AG06", "c": 0xFFB800, "b": 0.90, "e": 4, "s": 0.65, "sk": false, "sa": true},
+                    {"id": 7, "k": "AG07", "c": 0x00FF66, "b": 0.85, "e": 1, "s": 0.50, "sk": false, "sa": false},
+                    {"id": 8, "k": "AG08", "c": 0, "b": 0.0, "e": 0, "s": 0.5, "sk": false, "sa": false}
+                ]
+            })
+        );
+
+        let two_sa = vec![
+            OaiKeyStatusEntry::new("AG06", 0xFFB800).with_ambient_sync(true),
+            OaiKeyStatusEntry::new("AG07", 0xFF3333).with_ambient_sync(true),
+        ];
+        assert!(encode_oai_thstatus_candidate(&two_sa, 19).is_err());
+
+        for off_entry in [
+            OaiKeyStatusEntry::with_style("AG06", 0, 0.85, 1, 0.5).with_ambient_sync(true),
+            OaiKeyStatusEntry::with_style("AG06", 0xFFB800, 0.0, 1, 0.5).with_ambient_sync(true),
+            OaiKeyStatusEntry::with_style("AG06", 0xFFB800, 0.85, 0, 0.5).with_ambient_sync(true),
+        ] {
+            assert!(
+                encode_oai_thstatus_candidate(&[off_entry.clone()], 20).is_err(),
+                "expected rejection for {off_entry:?}"
+            );
+        }
     }
 }

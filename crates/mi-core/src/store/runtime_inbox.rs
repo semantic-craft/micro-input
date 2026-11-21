@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 
 pub(super) const INPUT_CAPACITY: usize = 256;
 pub(super) const INPUT_BATCH: usize = 32;
-pub(super) const CONTROL_BATCH: usize = 10;
+pub(super) const CONTROL_BATCH: usize = 11;
 pub(super) const CHEAT_SHEET_NOTIF_CAPACITY: usize = 16;
 
 fn detach_if_preview_started(event: HardwareLoopEvent) {
@@ -31,7 +31,8 @@ struct Pending {
     disconnected: Option<HardwareLoopEvent>,
     discovery: Option<HardwareLoopEvent>,
     acceptance: Option<HardwareLoopEvent>,
-    candidates: Option<HardwareLoopEvent>,
+    antigravity_candidates: Option<HardwareLoopEvent>,
+    codex_candidates: Option<HardwareLoopEvent>,
     v070_capability: Option<HardwareLoopEvent>,
     v070_profile_layer: Option<HardwareLoopEvent>,
     encoder_hold_timer: Option<HardwareLoopEvent>,
@@ -129,10 +130,14 @@ impl RuntimeInbox {
                     pending.discovery = Some(event);
                 }
             }
-            event @ HardwareLoopEvent::LiveCandidatesUpdated { epoch, .. } => {
-                if !matches!(&pending.candidates, Some(HardwareLoopEvent::LiveCandidatesUpdated { epoch: old, .. }) if *old > epoch)
+            event @ HardwareLoopEvent::LiveCandidatesUpdated { epoch, source, .. } => {
+                let target = match source {
+                    super::LiveSessionSource::Antigravity => &mut pending.antigravity_candidates,
+                    super::LiveSessionSource::Codex => &mut pending.codex_candidates,
+                };
+                if !matches!(target, Some(HardwareLoopEvent::LiveCandidatesUpdated { epoch: old, .. }) if *old > epoch)
                 {
-                    pending.candidates = Some(event);
+                    *target = Some(event);
                 }
             }
             event @ HardwareLoopEvent::V070CapabilityOutcome { seq, .. } => {
@@ -200,7 +205,8 @@ impl RuntimeInbox {
             pending.disconnected.take(),
             pending.acceptance.take(),
             pending.discovery.take(),
-            pending.candidates.take(),
+            pending.antigravity_candidates.take(),
+            pending.codex_candidates.take(),
             pending.v070_capability.take(),
             pending.v070_profile_layer.take(),
             pending.encoder_hold_timer.take(),
@@ -233,7 +239,8 @@ impl RuntimeInbox {
                     .or_else(|| pending.disconnected.take())
                     .or_else(|| pending.acceptance.take())
                     .or_else(|| pending.discovery.take())
-                    .or_else(|| pending.candidates.take())
+                    .or_else(|| pending.antigravity_candidates.take())
+                    .or_else(|| pending.codex_candidates.take())
                     .or_else(|| pending.v070_capability.take())
                     .or_else(|| pending.v070_profile_layer.take())
                     .or_else(|| pending.encoder_hold_timer.take())
@@ -340,6 +347,14 @@ mod tests {
             inbox
                 .send(HardwareLoopEvent::LiveCandidatesUpdated {
                     epoch,
+                    source: super::super::LiveSessionSource::Antigravity,
+                    catalog: None,
+                })
+                .unwrap();
+            inbox
+                .send(HardwareLoopEvent::LiveCandidatesUpdated {
+                    epoch,
+                    source: super::super::LiveSessionSource::Codex,
                     catalog: None,
                 })
                 .unwrap();
@@ -348,14 +363,26 @@ mod tests {
             .send(HardwareLoopEvent::DiscoveryChanged { epoch: 0 })
             .unwrap();
         let batch = inbox.take_batch();
-        assert_eq!(batch.len(), 2);
+        assert_eq!(batch.len(), 3);
         assert!(matches!(
             batch[0],
             HardwareLoopEvent::DiscoveryChanged { epoch: 999 }
         ));
         assert!(matches!(
             batch[1],
-            HardwareLoopEvent::LiveCandidatesUpdated { epoch: 999, .. }
+            HardwareLoopEvent::LiveCandidatesUpdated {
+                epoch: 999,
+                source: super::super::LiveSessionSource::Antigravity,
+                ..
+            }
+        ));
+        assert!(matches!(
+            batch[2],
+            HardwareLoopEvent::LiveCandidatesUpdated {
+                epoch: 999,
+                source: super::super::LiveSessionSource::Codex,
+                ..
+            }
         ));
         inbox.close();
         assert!(

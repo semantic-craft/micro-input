@@ -1,88 +1,38 @@
-use serde_json::Value;
+mod readback;
+mod sqlite_ro;
+
+pub use readback::{
+    build_codex_thread_deeplink, read_codex_thread_fingerprint, verify_codex_window_readback,
+};
+#[cfg(test)]
+use readback::{MAX_ITEM_JSON_BYTES, MAX_THREAD_CORPUS_BYTES, MAX_THREAD_SNIPPETS};
+#[cfg(test)]
+use sqlite_ro::{
+    checked_sqlite_text_len, sqlite3, sqlite3_exec, sqlite3_free, sqlite3_open_v2, SQLITE_OK,
+};
+use sqlite_ro::{validate_codex_dir, SqliteDb};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
-use std::ffi::c_void;
-use std::ffi::{c_char, c_int, c_uchar, CStr, CString};
+use std::ffi::{c_char, c_int, CStr, CString};
 use std::path::Path;
-
-const SQLITE_OK: c_int = 0;
-const SQLITE_ROW: c_int = 100;
-const SQLITE_DONE: c_int = 101;
-const SQLITE_NULL: c_int = 5;
-const SQLITE_OPEN_READONLY: c_int = 0x0000_0001;
-const SQLITE_OPEN_NOFOLLOW: c_int = 0x0100_0000;
-const SQLITE_TRANSIENT: isize = -1;
-const MAX_SNIPPETS: usize = 8;
-const MAX_SNIPPET_CHARS: usize = 80;
-const MIN_SUBSTRING_SNIPPET_CHARS: usize = 12;
-const MAX_ITEM_JSON_BYTES: usize = 262_144;
-const MAX_THREAD_CORPUS_BYTES: usize = 65_536;
-const MAX_THREAD_SNIPPETS: usize = 512;
-
-#[repr(C)]
-struct sqlite3 {
-    _private: [u8; 0],
-}
-
-#[repr(C)]
-struct sqlite3_stmt {
-    _private: [u8; 0],
-}
-
-#[link(name = "sqlite3")]
-unsafe extern "C" {
-    fn sqlite3_open_v2(
-        filename: *const c_char,
-        pp_db: *mut *mut sqlite3,
-        flags: c_int,
-        z_vfs: *const c_char,
-    ) -> c_int;
-    fn sqlite3_close_v2(db: *mut sqlite3) -> c_int;
-    fn sqlite3_busy_timeout(db: *mut sqlite3, ms: c_int) -> c_int;
-    fn sqlite3_prepare_v2(
-        db: *mut sqlite3,
-        z_sql: *const c_char,
-        n_byte: c_int,
-        pp_stmt: *mut *mut sqlite3_stmt,
-        pz_tail: *mut *const c_char,
-    ) -> c_int;
-    fn sqlite3_finalize(stmt: *mut sqlite3_stmt) -> c_int;
-    fn sqlite3_step(stmt: *mut sqlite3_stmt) -> c_int;
-    fn sqlite3_bind_text(
-        stmt: *mut sqlite3_stmt,
-        idx: c_int,
-        val: *const c_char,
-        n_bytes: c_int,
-        destructor: isize,
-    ) -> c_int;
-    fn sqlite3_bind_int64(stmt: *mut sqlite3_stmt, idx: c_int, val: i64) -> c_int;
-    fn sqlite3_column_type(stmt: *mut sqlite3_stmt, i_col: c_int) -> c_int;
-    fn sqlite3_column_text(stmt: *mut sqlite3_stmt, i_col: c_int) -> *const c_uchar;
-    fn sqlite3_column_bytes(stmt: *mut sqlite3_stmt, i_col: c_int) -> c_int;
-    fn sqlite3_column_int64(stmt: *mut sqlite3_stmt, i_col: c_int) -> i64;
-    fn sqlite3_column_double(stmt: *mut sqlite3_stmt, i_col: c_int) -> f64;
-    fn sqlite3_errmsg(db: *mut sqlite3) -> *const c_char;
-    #[cfg(test)]
-    fn sqlite3_exec(
-        db: *mut sqlite3,
-        sql: *const c_char,
-        callback: Option<
-            unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int,
-        >,
-        arg: *mut c_void,
-        errmsg: *mut *mut c_char,
-    ) -> c_int;
-    #[cfg(test)]
-    fn sqlite3_free(ptr: *mut c_void);
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexObservedStatus {
+    NeedsAttention,
     Working,
     Error,
     Unread,
     Idle,
     Unknown(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexLiveWindowSignals {
+    pub is_frontmost: bool,
+    pub toolbar_project: Option<String>,
+    pub active_sidebar_texts: Vec<String>,
+    pub attention_sidebar_titles: Vec<String>,
+    pub attention_windows: Vec<(Option<String>, Vec<String>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,284 +65,6 @@ pub struct CodexWindowSnapshot {
     pub has_resume_error: bool,
 }
 
-struct SqliteDb {
-    ptr: *mut sqlite3,
-}
-
-impl Drop for SqliteDb {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe {
-                sqlite3_close_v2(self.ptr);
-            }
-            self.ptr = std::ptr::null_mut();
-        }
-    }
-}
-
-impl SqliteDb {
-    fn open_readonly(path: &Path) -> Result<Self, String> {
-        let redacted = crate::redact_home_path(&path.display().to_string());
-        let open_path = resolve_nofollow_sqlite_path(path, &redacted)?;
-        let meta = match std::fs::symlink_metadata(&open_path) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Err(format!("blocked:codex_sqlite_missing:{redacted}"));
-            }
-            Err(_) => return Err(format!("blocked:codex_sqlite_unsafe:{redacted}")),
-        };
-        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-            return Err(format!("blocked:codex_sqlite_unsafe:{redacted}"));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if meta.uid() != unsafe { libc::getuid() } {
-                return Err(format!("blocked:codex_sqlite_owner_mismatch:{redacted}"));
-            }
-        }
-        let raw_path = open_path
-            .to_str()
-            .ok_or_else(|| "blocked:codex_sqlite_non_utf8_path".to_owned())?;
-        let c_path =
-            CString::new(raw_path).map_err(|e| format!("blocked:codex_sqlite_path:{e}"))?;
-        let mut raw_db: *mut sqlite3 = std::ptr::null_mut();
-        let rc = unsafe {
-            sqlite3_open_v2(
-                c_path.as_ptr(),
-                &mut raw_db,
-                SQLITE_OPEN_READONLY | SQLITE_OPEN_NOFOLLOW,
-                std::ptr::null(),
-            )
-        };
-        let db = Self { ptr: raw_db };
-        if rc != SQLITE_OK {
-            return Err(format!(
-                "blocked:codex_sqlite_open:{redacted}:{rc}:{}",
-                db.last_error()
-            ));
-        }
-        db.check_rc("busy_timeout", unsafe { sqlite3_busy_timeout(db.ptr, 250) })?;
-        Ok(db)
-    }
-
-    fn query_text_set(&self, sql: &str) -> Result<BTreeSet<String>, String> {
-        let mut stmt = self.prepare(sql)?;
-        let mut set = BTreeSet::new();
-        while stmt.step()? {
-            let value = stmt.col_text(0)?;
-            if !value.is_empty() {
-                set.insert(value);
-            }
-        }
-        Ok(set)
-    }
-
-    fn check_rc(&self, op: &str, rc: c_int) -> Result<(), String> {
-        if rc == SQLITE_OK {
-            Ok(())
-        } else {
-            Err(format!(
-                "blocked:codex_sqlite_{op}:{rc}:{}",
-                self.last_error()
-            ))
-        }
-    }
-
-    fn last_error(&self) -> String {
-        if self.ptr.is_null() {
-            return "null sqlite handle".to_owned();
-        }
-        let msg = unsafe { sqlite3_errmsg(self.ptr) };
-        if msg.is_null() {
-            "unknown sqlite error".to_owned()
-        } else {
-            unsafe { CStr::from_ptr(msg) }
-                .to_string_lossy()
-                .into_owned()
-        }
-    }
-
-    fn prepare(&self, sql: &str) -> Result<SqliteStmt<'_>, String> {
-        let c_sql = CString::new(sql).map_err(|e| format!("blocked:codex_sql_invalid:{e}"))?;
-        let mut raw_stmt: *mut sqlite3_stmt = std::ptr::null_mut();
-        let rc = unsafe {
-            sqlite3_prepare_v2(
-                self.ptr,
-                c_sql.as_ptr(),
-                sql.len() as c_int,
-                &mut raw_stmt,
-                std::ptr::null_mut(),
-            )
-        };
-        self.check_rc("prepare", rc)?;
-        if raw_stmt.is_null() {
-            return Err(format!(
-                "blocked:codex_sqlite_prepare:{rc}:{}",
-                self.last_error()
-            ));
-        }
-        Ok(SqliteStmt {
-            db: self,
-            ptr: raw_stmt,
-        })
-    }
-}
-
-struct SqliteStmt<'a> {
-    db: &'a SqliteDb,
-    ptr: *mut sqlite3_stmt,
-}
-
-impl Drop for SqliteStmt<'_> {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe { sqlite3_finalize(self.ptr) };
-            self.ptr = std::ptr::null_mut();
-        }
-    }
-}
-
-fn checked_sqlite_text_len(len: usize) -> Result<c_int, String> {
-    c_int::try_from(len).map_err(|_| "sqlite3 text binding exceeds i32 length limit".to_string())
-}
-
-impl SqliteStmt<'_> {
-    fn bind_text(&mut self, index: c_int, value: &str) -> Result<(), String> {
-        let len = checked_sqlite_text_len(value.len())?;
-        let rc = unsafe {
-            sqlite3_bind_text(
-                self.ptr,
-                index,
-                value.as_ptr().cast::<c_char>(),
-                len,
-                SQLITE_TRANSIENT,
-            )
-        };
-        self.db.check_rc("bind_text", rc)
-    }
-
-    fn bind_int64(&mut self, index: c_int, value: i64) -> Result<(), String> {
-        self.db.check_rc("bind_int64", unsafe {
-            sqlite3_bind_int64(self.ptr, index, value)
-        })
-    }
-
-    fn step(&mut self) -> Result<bool, String> {
-        match unsafe { sqlite3_step(self.ptr) } {
-            SQLITE_ROW => Ok(true),
-            SQLITE_DONE => Ok(false),
-            other => Err(self.db.check_rc("step", other).unwrap_err()),
-        }
-    }
-
-    fn col_opt_text(&self, col: c_int) -> Result<Option<String>, String> {
-        if unsafe { sqlite3_column_type(self.ptr, col) } == SQLITE_NULL {
-            return Ok(None);
-        }
-        let ptr = unsafe { sqlite3_column_text(self.ptr, col) };
-        let len = unsafe { sqlite3_column_bytes(self.ptr, col) };
-        if ptr.is_null() || len < 0 {
-            return Ok(Some(String::new()));
-        }
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-        std::str::from_utf8(bytes)
-            .map(|s| Some(s.to_owned()))
-            .map_err(|e| format!("blocked:codex_sqlite_utf8:{e}"))
-    }
-
-    fn col_bounded_text(&self, col: c_int, max_bytes: usize) -> Result<Option<String>, String> {
-        if unsafe { sqlite3_column_type(self.ptr, col) } == SQLITE_NULL {
-            return Ok(None);
-        }
-        let len = unsafe { sqlite3_column_bytes(self.ptr, col) };
-        if len < 0 || len as usize > max_bytes {
-            return Ok(None);
-        }
-        let ptr = unsafe { sqlite3_column_text(self.ptr, col) };
-        let len = unsafe { sqlite3_column_bytes(self.ptr, col) };
-        if ptr.is_null() || len <= 0 {
-            return Ok(Some(String::new()));
-        }
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-        std::str::from_utf8(bytes)
-            .map(|s| Some(s.to_owned()))
-            .map_err(|e| format!("blocked:codex_sqlite_utf8:{e}"))
-    }
-
-    fn col_text(&self, col: c_int) -> Result<String, String> {
-        Ok(self.col_opt_text(col)?.unwrap_or_default())
-    }
-
-    fn col_int64(&self, col: c_int) -> i64 {
-        unsafe { sqlite3_column_int64(self.ptr, col) }
-    }
-
-    fn col_double(&self, col: c_int) -> f64 {
-        unsafe { sqlite3_column_double(self.ptr, col) }
-    }
-}
-
-fn map_private_dir_error(
-    err: crate::private_fs::PrivateDirError,
-    prefix: &str,
-    redacted: &str,
-) -> String {
-    let tag = match err {
-        crate::private_fs::PrivateDirError::Missing => "missing",
-        crate::private_fs::PrivateDirError::Unsafe => "unsafe",
-        crate::private_fs::PrivateDirError::OwnerMismatch => "owner_mismatch",
-    };
-    format!("{prefix}_{tag}:{redacted}")
-}
-
-fn resolve_nofollow_sqlite_path(path: &Path, redacted: &str) -> Result<std::path::PathBuf, String> {
-    let Some(file_name) = path.file_name() else {
-        return Err(format!("blocked:codex_sqlite_unsafe:{redacted}"));
-    };
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    let verified_parent = crate::private_fs::verify_existing_private_dir(parent)
-        .map_err(|err| map_private_dir_error(err, "blocked:codex_sqlite", redacted))?;
-    Ok(verified_parent.join(file_name))
-}
-
-fn validate_codex_dir(dir: &Path) -> Result<(), String> {
-    let redacted = crate::redact_home_path(&dir.display().to_string());
-    crate::private_fs::verify_existing_private_dir(dir)
-        .map(|_| ())
-        .map_err(|err| map_private_dir_error(err, "blocked:codex_home", &redacted))
-}
-
-fn push_bounded_corpus(corpus: &mut String, addition: &str, max_bytes: usize) -> bool {
-    if corpus.len() >= max_bytes {
-        return false;
-    }
-    if addition.is_empty() {
-        return true;
-    }
-    if !corpus.is_empty() {
-        if corpus.len() + 1 >= max_bytes {
-            return false;
-        }
-        corpus.push('\n');
-    }
-    let remaining = max_bytes - corpus.len();
-    if addition.len() <= remaining {
-        corpus.push_str(addition);
-        corpus.len() < max_bytes
-    } else {
-        let mut end = remaining.min(addition.len());
-        while end > 0 && !addition.is_char_boundary(end) {
-            end -= 1;
-        }
-        corpus.push_str(&addition[..end]);
-        false
-    }
-}
-
 fn is_valid_uuid(id: &str) -> bool {
     let bytes = id.as_bytes();
     if bytes.len() != 36 {
@@ -418,15 +90,29 @@ fn timestamp_to_ms(raw: f64) -> u64 {
     }
 }
 
+fn resolve_root_thread_id<'a>(
+    start_id: &'a str,
+    parent_map: &'a BTreeMap<String, String>,
+) -> &'a str {
+    let mut visited = BTreeSet::new();
+    visited.insert(start_id);
+    let mut current = start_id;
+    for _ in 0..8 {
+        let Some(parent) = parent_map.get(current).map(String::as_str) else {
+            break;
+        };
+        if !visited.insert(parent) {
+            break;
+        }
+        current = parent;
+    }
+    current
+}
+
 struct CodexDbs {
     codex: SqliteDb,
     state: SqliteDb,
     history: SqliteDb,
-}
-
-struct ThreadTextIndex {
-    snippets: Vec<String>,
-    corpus: String,
 }
 
 impl CodexDbs {
@@ -449,6 +135,30 @@ impl CodexDbs {
         Ok(stmt.step()? && stmt.col_int64(0) != 0)
     }
 
+    fn load_parent_hierarchy(
+        &self,
+    ) -> Result<(BTreeSet<String>, BTreeMap<String, String>), String> {
+        let mut child_ids = BTreeSet::new();
+        let mut parent_map = BTreeMap::new();
+        for (child, parent) in self.state.query_optional_text_pairs(
+            "SELECT id, attached_thread_parent_id FROM threads WHERE attached_thread_parent_id IS NOT NULL AND attached_thread_parent_id != '' LIMIT 4096",
+        )? {
+            child_ids.insert(child.clone());
+            if child != parent {
+                parent_map.insert(child, parent);
+            }
+        }
+        for (child, parent) in self.state.query_optional_text_pairs(
+            "SELECT child_thread_id, parent_thread_id FROM thread_spawn_edges LIMIT 4096",
+        )? {
+            child_ids.insert(child.clone());
+            if child != parent {
+                parent_map.entry(child).or_insert(parent);
+            }
+        }
+        Ok((child_ids, parent_map))
+    }
+
     fn load_unread_receipts(&self) -> Result<BTreeMap<String, String>, String> {
         let mut stmt = self.state.prepare(
             "SELECT thread_id, first_unread_turn FROM thread_read_receipts WHERE first_unread_turn IS NOT NULL AND first_unread_turn != '' ORDER BY rowid DESC LIMIT 4096",
@@ -463,7 +173,7 @@ impl CodexDbs {
         Ok(map)
     }
 
-    fn load_priority_turn_ids(&self) -> Result<BTreeSet<String>, String> {
+    fn load_raw_priority_turn_ids(&self) -> Result<BTreeSet<String>, String> {
         let mut ids = self.history.query_text_set(
             "SELECT thread_id FROM thread_turns WHERE status = 'inProgress' GROUP BY thread_id ORDER BY MAX(rowid) DESC LIMIT 256",
         )?;
@@ -471,6 +181,13 @@ impl CodexDbs {
             "SELECT thread_id FROM thread_turns WHERE status = 'failed' GROUP BY thread_id ORDER BY MAX(rowid) DESC LIMIT 64",
         )?);
         Ok(ids)
+    }
+
+    #[cfg(test)]
+    fn load_priority_turn_ids(&self) -> Result<BTreeSet<String>, String> {
+        let (_, parent_map) = self.load_parent_hierarchy()?;
+        let raw = self.load_raw_priority_turn_ids()?;
+        Ok(expand_priority_ids_with_roots(&raw, &parent_map))
     }
 
     fn latest_turn(
@@ -491,53 +208,20 @@ impl CodexDbs {
             Ok(None)
         }
     }
+}
 
-    fn thread_snippets(
-        &self,
-        thread_id: &str,
-        max_items: usize,
-    ) -> Result<ThreadTextIndex, String> {
-        let mut stmt = self.history.prepare(
-            "SELECT item_json FROM thread_items WHERE thread_id = ?1 AND item_type IN ('agentMessage', 'userMessage') ORDER BY rollout_ordinal DESC LIMIT ?2",
-        )?;
-        stmt.bind_text(1, thread_id)?;
-        stmt.bind_int64(2, max_items as i64)?;
-        let mut snippets = Vec::new();
-        let mut seen = BTreeSet::new();
-        let mut corpus = String::new();
-        while stmt.step()? {
-            if corpus.len() >= MAX_THREAD_CORPUS_BYTES && snippets.len() >= MAX_THREAD_SNIPPETS {
-                break;
-            }
-            let Some(raw_json) = stmt.col_bounded_text(0, MAX_ITEM_JSON_BYTES)? else {
-                continue;
-            };
-            let Ok(parsed) = serde_json::from_str::<Value>(&raw_json) else {
-                continue;
-            };
-            let lines = extract_normalized_lines_from_value(&parsed);
-            if corpus.len() < MAX_THREAD_CORPUS_BYTES {
-                for line in &lines {
-                    if !push_bounded_corpus(&mut corpus, line, MAX_THREAD_CORPUS_BYTES) {
-                        break;
-                    }
-                }
-            }
-            if snippets.len() < MAX_THREAD_SNIPPETS {
-                for line in &lines {
-                    if let Some(snippet) = line_to_snippet(line) {
-                        if seen.insert(snippet.clone()) {
-                            snippets.push(snippet);
-                            if snippets.len() >= MAX_THREAD_SNIPPETS {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+fn expand_priority_ids_with_roots(
+    raw_ids: &BTreeSet<String>,
+    parent_map: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut expanded = raw_ids.clone();
+    for id in raw_ids {
+        let root = resolve_root_thread_id(id, parent_map);
+        if root != id {
+            expanded.insert(root.to_owned());
         }
-        Ok(ThreadTextIndex { snippets, corpus })
     }
+    expanded
 }
 
 fn map_codex_status(
@@ -550,10 +234,17 @@ fn map_codex_status(
     if in_active_chat_turns || turn_status == Some("inProgress") {
         return CodexObservedStatus::Working;
     }
+    let has_unread_signal = first_unread_turn.is_some() || automation_pending;
     match turn_status {
-        Some("failed") => CodexObservedStatus::Error,
+        Some("failed") => {
+            if has_unread_signal {
+                CodexObservedStatus::Error
+            } else {
+                CodexObservedStatus::Idle
+            }
+        }
         Some("completed" | "interrupted") => {
-            if first_unread_turn.is_some() || automation_pending {
+            if has_unread_signal {
                 CodexObservedStatus::Unread
             } else {
                 CodexObservedStatus::Idle
@@ -566,12 +257,164 @@ fn map_codex_status(
 
 fn status_priority_rank(status: &CodexObservedStatus) -> u8 {
     match status {
-        CodexObservedStatus::Working | CodexObservedStatus::Error | CodexObservedStatus::Unread => {
-            0
-        }
-        CodexObservedStatus::Idle => 1,
-        CodexObservedStatus::Unknown(_) => 2,
+        CodexObservedStatus::NeedsAttention => 0,
+        CodexObservedStatus::Error => 1,
+        CodexObservedStatus::Unread => 2,
+        CodexObservedStatus::Working => 3,
+        CodexObservedStatus::Idle => 4,
+        CodexObservedStatus::Unknown(_) => 5,
     }
+}
+
+fn sort_codex_observations(observations: &mut [CodexThreadObservation]) {
+    observations.sort_by(|a, b| {
+        status_priority_rank(&a.status)
+            .cmp(&status_priority_rank(&b.status))
+            .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
+    });
+}
+
+fn workspace_basename(workspace_path: &str) -> Option<&str> {
+    let trimmed = workspace_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+}
+
+fn workspace_matches_toolbar_project(workspace_path: &str, toolbar_project: Option<&str>) -> bool {
+    let Some(proj) = toolbar_project.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    match workspace_basename(workspace_path) {
+        Some(base) => base.eq_ignore_ascii_case(proj),
+        None => true,
+    }
+}
+
+pub fn apply_codex_window_signals(
+    observations: &mut [CodexThreadObservation],
+    signals: &CodexLiveWindowSignals,
+) -> Option<(String, String, String, String)> {
+    let fallback_window = [(
+        signals.toolbar_project.as_deref(),
+        signals.attention_sidebar_titles.as_slice(),
+    )];
+    let explicit_windows: Vec<(Option<&str>, &[String])> = signals
+        .attention_windows
+        .iter()
+        .map(|(proj, titles)| (proj.as_deref(), titles.as_slice()))
+        .collect();
+    let windows: &[(Option<&str>, &[String])] = if explicit_windows.is_empty() {
+        &fallback_window
+    } else {
+        &explicit_windows
+    };
+
+    let mut promote_indices = Vec::new();
+    for (idx, obs) in observations.iter().enumerate() {
+        if obs.status != CodexObservedStatus::Working {
+            continue;
+        }
+        let title = obs.display_title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        let matched = windows.iter().any(|(win_proj, titles)| {
+            titles.iter().any(|candidate| candidate.trim() == title)
+                && workspace_matches_toolbar_project(&obs.workspace_path, *win_proj)
+                && observations
+                    .iter()
+                    .filter(|peer| {
+                        peer.status == CodexObservedStatus::Working
+                            && peer.display_title.trim() == title
+                            && workspace_matches_toolbar_project(&peer.workspace_path, *win_proj)
+                    })
+                    .count()
+                    == 1
+        });
+        if matched {
+            promote_indices.push(idx);
+        }
+    }
+
+    let mut status_mutated = false;
+    for idx in promote_indices {
+        let obs = &mut observations[idx];
+        obs.status = CodexObservedStatus::NeedsAttention;
+        if obs.watermark.is_empty() {
+            obs.watermark = format!("{}:attention", obs.updated_at_ms);
+        } else if !obs.watermark.ends_with(":attention") {
+            obs.watermark.push_str(":attention");
+        }
+        status_mutated = true;
+    }
+
+    let mut frontmost_ack = None;
+    if signals.is_frontmost {
+        let toolbar_proj = signals
+            .toolbar_project
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let ack_matches: Vec<usize> = observations
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, obs)| {
+                if !matches!(
+                    obs.status,
+                    CodexObservedStatus::Unread | CodexObservedStatus::Error
+                ) {
+                    return None;
+                }
+                let title = obs.display_title.trim();
+                if title.is_empty() {
+                    return None;
+                }
+                let in_active_sidebar = signals
+                    .active_sidebar_texts
+                    .iter()
+                    .any(|text| text.trim() == title);
+                (in_active_sidebar
+                    && workspace_matches_toolbar_project(&obs.workspace_path, toolbar_proj))
+                .then_some(idx)
+            })
+            .collect();
+        if let [idx] = ack_matches.as_slice() {
+            let target_title = observations[*idx].display_title.trim();
+            let total_matching = observations
+                .iter()
+                .filter(|obs| {
+                    obs.display_title.trim() == target_title
+                        && workspace_matches_toolbar_project(&obs.workspace_path, toolbar_proj)
+                })
+                .count();
+            if total_matching == 1 {
+                let obs = &mut observations[*idx];
+                let watermark = if obs.watermark.is_empty() {
+                    obs.updated_at_ms.to_string()
+                } else {
+                    obs.watermark.clone()
+                };
+                frontmost_ack = Some((
+                    obs.thread_id.clone(),
+                    obs.host_id.clone(),
+                    obs.workspace_path.trim().to_owned(),
+                    watermark,
+                ));
+                obs.status = CodexObservedStatus::Idle;
+                status_mutated = true;
+            }
+        }
+    }
+
+    if status_mutated {
+        sort_codex_observations(observations);
+    }
+    frontmost_ack
 }
 
 pub fn observe_codex_threads(
@@ -585,6 +428,7 @@ pub fn observe_codex_threads(
     let archived_ids = dbs.state.query_text_set(
         "SELECT id FROM threads WHERE archived != 0 ORDER BY rowid DESC LIMIT 4096",
     )?;
+    let (child_thread_ids, parent_map) = dbs.load_parent_hierarchy()?;
     let active_turn_ids = dbs.codex.query_text_set(
         "SELECT thread_id FROM active_chat_turns GROUP BY thread_id ORDER BY MAX(rowid) DESC LIMIT 256",
     )?;
@@ -592,7 +436,51 @@ pub fn observe_codex_threads(
         "SELECT thread_id FROM automation_runs WHERE status = 'PENDING_REVIEW' AND read_at IS NULL GROUP BY thread_id ORDER BY MAX(rowid) DESC LIMIT 256",
     )?;
     let unread_receipts = dbs.load_unread_receipts()?;
-    let priority_turn_ids = dbs.load_priority_turn_ids()?;
+    let raw_priority_turn_ids = dbs.load_raw_priority_turn_ids()?;
+    let priority_turn_ids = expand_priority_ids_with_roots(&raw_priority_turn_ids, &parent_map);
+
+    let mut child_rollups: BTreeMap<String, (CodexObservedStatus, String)> = BTreeMap::new();
+    for cid in &child_thread_ids {
+        if !is_valid_uuid(cid)
+            || archived_ids.contains(cid)
+            || (!active_turn_ids.contains(cid) && !raw_priority_turn_ids.contains(cid))
+        {
+            continue;
+        }
+        let root_id = resolve_root_thread_id(cid, &parent_map);
+        if root_id == cid || child_thread_ids.contains(root_id) || archived_ids.contains(root_id) {
+            continue;
+        }
+        let latest_turn = dbs.latest_turn(cid)?;
+        let child_status = map_codex_status(
+            active_turn_ids.contains(cid),
+            latest_turn.as_ref(),
+            unread_receipts.get(cid).map(String::as_str),
+            pending_automation_ids.contains(cid),
+        );
+        let rolled = match child_status {
+            CodexObservedStatus::Working => Some((CodexObservedStatus::Working, ":subwork".into())),
+            CodexObservedStatus::Error => {
+                let child_turn = latest_turn
+                    .as_ref()
+                    .map(|(id, _, _)| id.as_str())
+                    .unwrap_or(cid.as_str());
+                Some((
+                    CodexObservedStatus::Error,
+                    format!(":suberror:{child_turn}"),
+                ))
+            }
+            _ => None,
+        };
+        if let Some((status, suffix)) = rolled {
+            let replace = child_rollups.get(root_id).is_none_or(|(existing, _)| {
+                status_priority_rank(&status) < status_priority_rank(existing)
+            });
+            if replace {
+                child_rollups.insert(root_id.to_owned(), (status, suffix));
+            }
+        }
+    }
 
     let mut catalog = dbs.codex.prepare(
         "SELECT c.thread_id, c.host_id, c.display_title, COALESCE(c.cwd, ''), \
@@ -608,16 +496,21 @@ pub fn observe_codex_threads(
     let mut observations = Vec::with_capacity(limit.min(64));
     while catalog.step()? {
         let thread_id = catalog.col_text(0)?;
-        if !is_valid_uuid(&thread_id) || archived_ids.contains(&thread_id) {
+        if !is_valid_uuid(&thread_id)
+            || archived_ids.contains(&thread_id)
+            || child_thread_ids.contains(&thread_id)
+        {
             continue;
         }
         let in_active_turns = active_turn_ids.contains(&thread_id);
         let automation_pending = pending_automation_ids.contains(&thread_id);
         let first_unread_turn = unread_receipts.get(&thread_id).map(String::as_str);
+        let has_child_rollup = child_rollups.contains_key(&thread_id);
         let is_priority = in_active_turns
             || automation_pending
             || first_unread_turn.is_some()
-            || priority_turn_ids.contains(&thread_id);
+            || priority_turn_ids.contains(&thread_id)
+            || has_child_rollup;
         if observations.len() >= limit && !is_priority {
             continue;
         }
@@ -627,7 +520,7 @@ pub fn observe_codex_threads(
         let updated_at_ms = timestamp_to_ms(catalog.col_double(4));
 
         let latest_turn = dbs.latest_turn(&thread_id)?;
-        let status = map_codex_status(
+        let mut status = map_codex_status(
             in_active_turns,
             latest_turn.as_ref(),
             first_unread_turn,
@@ -638,7 +531,13 @@ pub fn observe_codex_threads(
             .map(|(id, _, _)| id.as_str())
             .unwrap_or("");
         let unread_str = first_unread_turn.unwrap_or("");
-        let watermark = format!("{turn_id}:{unread_str}:{updated_at_ms}");
+        let mut watermark = format!("{turn_id}:{unread_str}:{updated_at_ms}");
+        if let Some((rolled_status, rolled_suffix)) = child_rollups.get(&thread_id) {
+            if status_priority_rank(rolled_status) < status_priority_rank(&status) {
+                status = rolled_status.clone();
+                watermark.push_str(rolled_suffix);
+            }
+        }
 
         observations.push(CodexThreadObservation {
             thread_id,
@@ -650,335 +549,9 @@ pub fn observe_codex_threads(
             watermark,
         });
     }
-    observations.sort_by(|a, b| {
-        status_priority_rank(&a.status)
-            .cmp(&status_priority_rank(&b.status))
-            .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
-    });
+    sort_codex_observations(&mut observations);
     observations.truncate(limit);
     Ok(observations)
-}
-
-fn collapse_whitespace(raw: &str) -> String {
-    raw.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn strip_inline_markdown(raw: &str) -> String {
-    let mut s = raw.trim_start();
-    loop {
-        if let Some(rest) = ["- ", "* ", "+ ", "> "]
-            .iter()
-            .find_map(|p| s.strip_prefix(p))
-        {
-            s = rest.trim_start();
-        } else if let Some(rest) = Some(s.trim_start_matches('#'))
-            .filter(|r| r.len() < s.len() && (r.is_empty() || r.starts_with(char::is_whitespace)))
-        {
-            s = rest.trim_start();
-        } else {
-            if s == ">" {
-                s = "";
-            }
-            break;
-        }
-    }
-
-    let mut unlinked = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(open) = rest.find('[') {
-        unlinked.push_str(&rest[..open]);
-        let after_open = &rest[open + 1..];
-        if let Some((label, after_close)) = after_open
-            .find(']')
-            .map(|close| (&after_open[..close], &after_open[close + 1..]))
-            .filter(|(label, after)| !label.contains('[') && after.starts_with('('))
-        {
-            if let Some(close_paren) = after_close[1..].find(')') {
-                unlinked.push_str(label);
-                rest = &after_close[1 + close_paren + 1..];
-                continue;
-            }
-        }
-        unlinked.push('[');
-        rest = after_open;
-    }
-    unlinked.push_str(rest);
-
-    let cleaned = unlinked.replace(['`', '*'], "");
-    collapse_whitespace(cleaned.trim_end().trim_end_matches('\\'))
-}
-
-fn extract_normalized_lines_from_value(parsed: &Value) -> Vec<String> {
-    let mut lines = Vec::new();
-    let texts = parsed
-        .get("text")
-        .into_iter()
-        .chain(
-            parsed
-                .get("content")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|part| part.get("text")),
-        )
-        .filter_map(Value::as_str);
-    for raw in texts {
-        for line in raw.lines() {
-            let trimmed_raw = line.trim();
-            if trimmed_raw.starts_with("```")
-                || (trimmed_raw.starts_with('<') && trimmed_raw.ends_with('>'))
-                || trimmed_raw.starts_with("[{\"")
-                || trimmed_raw.starts_with("{\"")
-            {
-                continue;
-            }
-            let normalized = strip_inline_markdown(trimmed_raw);
-            if !normalized.is_empty() {
-                lines.push(normalized);
-            }
-        }
-    }
-    lines
-}
-
-fn line_to_snippet(normalized: &str) -> Option<String> {
-    let snippet = normalized
-        .chars()
-        .take(MAX_SNIPPET_CHARS)
-        .collect::<String>()
-        .trim_end()
-        .to_owned();
-    (snippet.chars().count() >= 2 && snippet.chars().any(char::is_alphanumeric)).then_some(snippet)
-}
-
-fn snippet_overlaps_peer(snippet: &str, peer_set: &BTreeSet<&str>, peer_corpus: &str) -> bool {
-    peer_set.contains(snippet)
-        || (snippet.chars().count() >= MIN_SUBSTRING_SNIPPET_CHARS && peer_corpus.contains(snippet))
-}
-
-pub fn read_codex_thread_fingerprint(
-    codex_home: &Path,
-    thread_id: &str,
-    host_id: &str,
-) -> Result<CodexThreadFingerprint, String> {
-    if !is_valid_uuid(thread_id) {
-        return Err(format!("blocked:invalid_codex_thread_id:{thread_id}"));
-    }
-    if host_id.trim().is_empty() {
-        return Err("blocked:empty_codex_host_id".into());
-    }
-    let dbs = CodexDbs::open(codex_home)?;
-
-    let mut target_stmt = dbs.codex.prepare(
-        "SELECT c.display_title, COALESCE(c.cwd, '') \
-         FROM local_thread_catalog c \
-         LEFT JOIN local_thread_catalog_hosts h ON c.host_id = h.host_id \
-         WHERE c.thread_id = ?1 \
-           AND c.host_id = ?2 \
-           AND c.missing_candidate = 0 \
-           AND COALESCE(h.host_kind, '') != 'chatgpt' \
-           AND COALESCE(c.source_kind, '') != 'chatgpt' \
-         LIMIT 1",
-    )?;
-    target_stmt.bind_text(1, thread_id)?;
-    target_stmt.bind_text(2, host_id)?;
-    if !target_stmt.step()? {
-        return Err(format!(
-            "blocked:codex_thread_missing:{host_id}:{thread_id}"
-        ));
-    }
-    if dbs.is_thread_archived(thread_id)? {
-        return Err(format!(
-            "blocked:codex_thread_archived:{host_id}:{thread_id}"
-        ));
-    }
-    let display_title = target_stmt.col_text(0)?;
-    let cwd = target_stmt.col_text(1)?;
-    let project_name = (!cwd.trim().is_empty())
-        .then(|| Path::new(&cwd).file_name().and_then(|s| s.to_str()))
-        .flatten()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-
-    let target_index = dbs.thread_snippets(thread_id, 256)?;
-    let mut sibling_stmt = dbs.codex.prepare(
-        "SELECT c.thread_id \
-         FROM local_thread_catalog c \
-         LEFT JOIN local_thread_catalog_hosts h ON c.host_id = h.host_id \
-         WHERE c.display_title = ?1 \
-           AND c.missing_candidate = 0 \
-           AND COALESCE(h.host_kind, '') != 'chatgpt' \
-           AND COALESCE(c.source_kind, '') != 'chatgpt' \
-           AND NOT (c.thread_id = ?2 AND c.host_id = ?3) \
-         ORDER BY COALESCE(c.source_updated_at, c.source_recency_at, 0) DESC LIMIT 24",
-    )?;
-    sibling_stmt.bind_text(1, &display_title)?;
-    sibling_stmt.bind_text(2, thread_id)?;
-    sibling_stmt.bind_text(3, host_id)?;
-
-    let mut sibling_candidates = Vec::new();
-    let mut sibling_corpus = String::new();
-    let max_sibling_corpus_bytes = MAX_THREAD_CORPUS_BYTES * 4;
-    while sibling_stmt.step()? {
-        let sib_id = sibling_stmt.col_text(0)?;
-        if !is_valid_uuid(&sib_id) || dbs.is_thread_archived(&sib_id)? {
-            continue;
-        }
-        let sib_index = dbs.thread_snippets(&sib_id, 256)?;
-        sibling_candidates.extend(sib_index.snippets);
-        if sibling_corpus.len() < max_sibling_corpus_bytes && !sib_index.corpus.is_empty() {
-            let _ = push_bounded_corpus(
-                &mut sibling_corpus,
-                &sib_index.corpus,
-                max_sibling_corpus_bytes,
-            );
-        }
-    }
-
-    let target_set: BTreeSet<&str> = target_index.snippets.iter().map(String::as_str).collect();
-    let sibling_set: BTreeSet<&str> = sibling_candidates.iter().map(String::as_str).collect();
-
-    let (long_unique, short_unique): (Vec<String>, Vec<String>) = target_index
-        .snippets
-        .iter()
-        .filter(|s| {
-            !snippet_overlaps_peer(s.as_str(), &sibling_set, &sibling_corpus)
-                && s.chars().count() >= 2
-        })
-        .cloned()
-        .partition(|s| s.chars().count() >= MIN_SUBSTRING_SNIPPET_CHARS);
-    let target_snippets: Vec<String> = long_unique
-        .into_iter()
-        .chain(short_unique)
-        .take(MAX_SNIPPETS)
-        .collect();
-
-    let mut seen_siblings = BTreeSet::new();
-    let conflicting_sibling_snippets: Vec<String> = sibling_candidates
-        .into_iter()
-        .filter(|snippet| {
-            !snippet_overlaps_peer(snippet.as_str(), &target_set, &target_index.corpus)
-                && snippet.chars().count() >= 2
-                && seen_siblings.insert(snippet.clone())
-        })
-        .collect();
-
-    Ok(CodexThreadFingerprint {
-        thread_id: thread_id.to_owned(),
-        host_id: host_id.to_owned(),
-        display_title,
-        project_name,
-        target_snippets,
-        conflicting_sibling_snippets,
-    })
-}
-
-fn percent_encode_query_value(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for byte in raw.as_bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(*byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
-
-pub fn build_codex_thread_deeplink(thread_id: &str, host_id: &str) -> Result<String, String> {
-    if !is_valid_uuid(thread_id) {
-        return Err(format!("blocked:invalid_codex_thread_id:{thread_id}"));
-    }
-    let host_id = host_id.trim();
-    if host_id.is_empty() {
-        return Err("blocked:empty_codex_host_id".into());
-    }
-    if host_id == "local" {
-        Ok(format!("codex://threads/{thread_id}"))
-    } else {
-        Ok(format!(
-            "codex://threads/{thread_id}?hostId={}",
-            percent_encode_query_value(host_id)
-        ))
-    }
-}
-
-struct SnapshotTextIndex<'a> {
-    trimmed_nodes: BTreeSet<&'a str>,
-    searchable: Vec<String>,
-}
-
-impl<'a> SnapshotTextIndex<'a> {
-    fn new(snap: &'a CodexWindowSnapshot) -> Self {
-        let all = snap
-            .main_pane_texts
-            .iter()
-            .chain(&snap.active_sidebar_texts);
-        let trimmed_nodes = all.clone().map(|t| t.trim()).collect();
-        let mut searchable: Vec<String> = all.map(|t| collapse_whitespace(t)).collect();
-        searchable.push(collapse_whitespace(&snap.main_pane_texts.join(" ")));
-        searchable.push(collapse_whitespace(&snap.active_sidebar_texts.join(" ")));
-        Self {
-            trimmed_nodes,
-            searchable,
-        }
-    }
-}
-
-fn snippet_matches_snapshot(snippet: &str, snap_ctx: &SnapshotTextIndex<'_>) -> bool {
-    let trimmed = snippet.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if trimmed.chars().count() < MIN_SUBSTRING_SNIPPET_CHARS {
-        return snap_ctx.trimmed_nodes.contains(trimmed);
-    }
-    let collapsed = collapse_whitespace(trimmed);
-    snap_ctx.searchable.iter().any(|t| t.contains(&collapsed))
-}
-
-pub fn verify_codex_window_readback(
-    fp: &CodexThreadFingerprint,
-    snap: &CodexWindowSnapshot,
-) -> Result<(), String> {
-    if snap.has_resume_error {
-        return Err("unconfirmed:codex_resume_error".into());
-    }
-    let expected_title = fp.display_title.trim();
-    if !expected_title.is_empty() && snap.window_title.trim() != expected_title {
-        return Err("unconfirmed:codex_title_mismatch".into());
-    }
-    if let Some(expected_project) = fp
-        .project_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if !snap
-            .toolbar_project
-            .as_deref()
-            .is_some_and(|actual| actual.trim().eq_ignore_ascii_case(expected_project))
-        {
-            return Err("unconfirmed:codex_project_mismatch".into());
-        }
-    }
-    let snap_ctx = SnapshotTextIndex::new(snap);
-    if fp
-        .conflicting_sibling_snippets
-        .iter()
-        .any(|bad| snippet_matches_snapshot(bad, &snap_ctx))
-    {
-        return Err("unconfirmed:codex_conflicting_sibling_detected".into());
-    }
-    if !fp.target_snippets.is_empty()
-        && !fp
-            .target_snippets
-            .iter()
-            .any(|snippet| snippet_matches_snapshot(snippet, &snap_ctx))
-    {
-        return Err("unconfirmed:codex_target_snippet_missing".into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

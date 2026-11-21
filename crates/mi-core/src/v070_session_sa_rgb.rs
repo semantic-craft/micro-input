@@ -105,6 +105,7 @@ pub fn aggregate_session_kind(slot_kinds: &[FourAppSessionKind; SLOT_COUNT]) -> 
     slot_kinds
         .iter()
         .copied()
+        .filter(|&k| !matches!(k, FourAppSessionKind::BlueDotCompleted))
         .max_by_key(|&k| session_kind_urgency(k))
         .unwrap_or(FourAppSessionKind::Idle)
 }
@@ -116,6 +117,17 @@ const fn lit_override(rgb: u32, effect: SaRgbEffect, b: u16, s: u16) -> DesiredS
         brightness_milli: b,
         speed_milli: s,
     })
+}
+
+pub const fn filter_session_kind_for_lighting(
+    kind: FourAppSessionKind,
+    glow_on_working: bool,
+) -> FourAppSessionKind {
+    if matches!(kind, FourAppSessionKind::Working) && !glow_on_working {
+        FourAppSessionKind::Idle
+    } else {
+        kind
+    }
 }
 
 pub const fn map_session_kind_to_sa_lighting(kind: FourAppSessionKind) -> DesiredSaLighting {

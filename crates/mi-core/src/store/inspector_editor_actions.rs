@@ -238,6 +238,7 @@ impl WorkbenchStore {
                     self.document_store
                         .update(|draft| draft.unassign_encoder_hold(&json!(pid), &json!(lid)))
                         .map_err(WorkbenchError::Storage)?;
+                    self.refresh_four_app_lighting();
                     self.commit_runtime_update();
                     return Ok(());
                 }
@@ -247,7 +248,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.slot_role_overrides
                     .insert((pid, slot), KeycapRole::ActionKey);
-                self.sync_v070_session_sa_rgb();
+                self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())
             }

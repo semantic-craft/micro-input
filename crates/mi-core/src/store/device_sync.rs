@@ -934,18 +934,15 @@ impl WorkbenchStore {
                 }
                 None
             }
-            HardwareLoopEvent::LiveCandidatesUpdated { epoch, catalog } => {
+            HardwareLoopEvent::LiveCandidatesUpdated {
+                epoch,
+                source,
+                catalog,
+            } => {
                 if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
                     return None;
                 }
-                let desired = self.desired_live_session_source();
-                if catalog
-                    .as_ref()
-                    .is_some_and(|c| c.instance.source() != desired)
-                {
-                    return None;
-                }
-                self.update_navigation_catalog(catalog);
+                self.update_navigation_catalog_for_source(source, catalog);
                 None
             }
             HardwareLoopEvent::V070CapabilityOutcome {

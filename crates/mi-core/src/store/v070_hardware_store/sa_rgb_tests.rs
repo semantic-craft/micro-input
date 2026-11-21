@@ -168,33 +168,33 @@ fn v070_session_sa_rgb_end_to_end_states_dedup_coalescing_and_rc06_isolation() {
         .unwrap();
     assert!(store.projection().v070_hardware.session_sa_rgb_sync_enabled);
     assert!(store.document_store.v070_session_sa_rgb_sync_enabled());
-    wait_for_sa_rgb_count(&link, 4);
+    wait_for_sa_rgb_count(&link, 3);
 
-    let first_batch = link.sa_rgb_params();
-    assert_eq!(first_batch.len(), 4);
-    let mut lit_ids = std::collections::BTreeSet::new();
-    for frame in &first_batch {
+    let default_batch = link.sa_rgb_params();
+    assert_eq!(default_batch.len(), 3);
+    let mut default_lit_ids = std::collections::BTreeSet::new();
+    for frame in &default_batch {
         assert!(frame.get("e").and_then(Value::as_u64).unwrap_or(0) > 0);
         assert!(frame.get("c").and_then(Value::as_u64).is_some());
         for id in frame["sa"].as_array().unwrap() {
-            lit_ids.insert(id.as_u64().unwrap());
+            default_lit_ids.insert(id.as_u64().unwrap());
         }
     }
     assert_eq!(
-        lit_ids,
-        std::collections::BTreeSet::from([101, 102, 103, 104, 199]),
-        "Idle slot SA_105 must stay unlit while SA_199 aggregates highest urgency"
+        default_lit_ids,
+        std::collections::BTreeSet::from([101, 102, 103, 199]),
+        "default glow_on_working=false must keep Working SA_104 and Idle SA_105 unlit"
     );
-    let attention_frame = first_batch
+    let attention_frame = default_batch
         .iter()
         .find(|f| {
             f["sa"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|v| v.as_u64() == Some(102))
+                .any(|v| v.as_u64() == Some(101))
         })
-        .expect("NeedsAttention frame for SA_102");
+        .expect("NeedsAttention frame for SA_101");
     let attention_ids: Vec<u64> = attention_frame["sa"]
         .as_array()
         .unwrap()
@@ -203,8 +203,29 @@ fn v070_session_sa_rgb_end_to_end_states_dedup_coalescing_and_rc06_isolation() {
         .collect();
     assert_eq!(
         attention_ids,
-        vec![102, 199],
-        "non-slot SA_199 must share aggregate NeedsAttention style"
+        vec![101, 199],
+        "non-slot SA_199 must share aggregate NeedsAttention style with slot 0 SA_101"
+    );
+
+    std::thread::sleep(Duration::from_millis(120));
+    link.clear_wire_events();
+    store
+        .dispatch_session_strip_action(crate::session_strip::SessionStripAction::SetGlowOnWorking(
+            true,
+        ))
+        .unwrap();
+    wait_for_sa_rgb_count(&link, 1);
+    let working_opt_in = link.sa_rgb_params();
+    assert_eq!(working_opt_in.len(), 1);
+    assert_eq!(working_opt_in[0]["c"].as_u64(), Some(0x00FF66));
+    assert_eq!(
+        working_opt_in[0]["sa"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![104]
     );
 
     link.clear_wire_events();
@@ -336,6 +357,11 @@ fn v070_session_sa_rgb_resets_before_close_on_opt_out_protected_layer_sleep_term
     store.trigger_v070_session_snapshot_if_supported(&session);
     poll_until(&mut store, |s| s.projection().v070_hardware.synced);
 
+    store
+        .dispatch_session_strip_action(crate::session_strip::SessionStripAction::SetGlowOnWorking(
+            true,
+        ))
+        .unwrap();
     store.ingest_four_app_candidates(vec![
         make_live_candidate(0, FourAppSessionKind::Working, 100),
         make_live_candidate(1, FourAppSessionKind::Error, 90),
@@ -439,6 +465,11 @@ fn v070_session_sa_rgb_resets_before_close_on_opt_out_protected_layer_sleep_term
     store_term.device_session = Some(session_term.clone());
     store_term.trigger_v070_session_snapshot_if_supported(&session_term);
     poll_until(&mut store_term, |s| s.projection().v070_hardware.synced);
+    store_term
+        .dispatch_session_strip_action(crate::session_strip::SessionStripAction::SetGlowOnWorking(
+            true,
+        ))
+        .unwrap();
     store_term.ingest_four_app_candidates(vec![make_live_candidate(
         0,
         FourAppSessionKind::Working,
@@ -487,6 +518,11 @@ fn v070_session_sa_rgb_resets_before_close_on_opt_out_protected_layer_sleep_term
     store_unplug.device_session = Some(session_unplug.clone());
     store_unplug.trigger_v070_session_snapshot_if_supported(&session_unplug);
     poll_until(&mut store_unplug, |s| s.projection().v070_hardware.synced);
+    store_unplug
+        .dispatch_session_strip_action(crate::session_strip::SessionStripAction::SetGlowOnWorking(
+            true,
+        ))
+        .unwrap();
     store_unplug.ingest_four_app_candidates(vec![make_live_candidate(
         0,
         FourAppSessionKind::Working,
@@ -564,6 +600,11 @@ fn v070_session_sa_rgb_drop_inside_tokio_runtime_resets_before_close_without_pan
     store.device_session = Some(session.clone());
     store.trigger_v070_session_snapshot_if_supported(&session);
     poll_until(&mut store, |s| s.projection().v070_hardware.synced);
+    store
+        .dispatch_session_strip_action(crate::session_strip::SessionStripAction::SetGlowOnWorking(
+            true,
+        ))
+        .unwrap();
     store.ingest_four_app_candidates(vec![
         make_live_candidate(0, FourAppSessionKind::Working, 100),
         make_live_candidate(1, FourAppSessionKind::BlueDotCompleted, 90),
@@ -617,6 +658,11 @@ fn v070_session_sa_rgb_drop_inside_tokio_runtime_resets_before_close_without_pan
     store_drop.device_session = Some(session_drop.clone());
     store_drop.trigger_v070_session_snapshot_if_supported(&session_drop);
     poll_until(&mut store_drop, |s| s.projection().v070_hardware.synced);
+    store_drop
+        .dispatch_session_strip_action(crate::session_strip::SessionStripAction::SetGlowOnWorking(
+            true,
+        ))
+        .unwrap();
     store_drop.ingest_four_app_candidates(vec![
         make_live_candidate(0, FourAppSessionKind::Working, 100),
         make_live_candidate(1, FourAppSessionKind::Error, 90),
@@ -675,6 +721,11 @@ fn reassigned_slot_ignores_stale_original_sa_and_hardware_layer_2_does_not_alias
     store.trigger_v070_session_snapshot_if_supported(&session);
     poll_until(&mut store, |s| s.projection().v070_hardware.synced);
 
+    store
+        .dispatch_session_strip_action(crate::session_strip::SessionStripAction::SetGlowOnWorking(
+            true,
+        ))
+        .unwrap();
     store.ingest_four_app_candidates(vec![
         make_live_candidate(0, FourAppSessionKind::Working, 100),
         make_live_candidate(1, FourAppSessionKind::Error, 90),
@@ -766,6 +817,11 @@ fn manual_sa_rgb_apply_is_not_immediately_clobbered_and_opt_out_uses_nonblocking
     store.trigger_v070_session_snapshot_if_supported(&session);
     poll_until(&mut store, |s| s.projection().v070_hardware.synced);
 
+    store
+        .dispatch_session_strip_action(crate::session_strip::SessionStripAction::SetGlowOnWorking(
+            true,
+        ))
+        .unwrap();
     store.ingest_four_app_candidates(vec![make_live_candidate(
         0,
         FourAppSessionKind::Working,

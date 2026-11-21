@@ -154,7 +154,7 @@ impl RoutingContext {
             .map(str::to_owned)
     }
 
-    fn resolve_control<'a>(
+    pub(crate) fn resolve_control<'a>(
         &'a self,
         plan: &'a AppliedSixLayerPlan,
         control_layer: u8,

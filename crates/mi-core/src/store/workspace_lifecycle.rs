@@ -32,6 +32,8 @@ impl WorkbenchStore {
         }
         self.cancel_session_navigation();
         self.session_navigation.catalog = None;
+        self.session_navigation.antigravity_catalog = None;
+        self.session_navigation.codex_catalog = None;
         self.end_lighting_preview_blocking(LightingPreviewStopReason::SystemSleep);
         self.teardown_v070_session_sa_rgb();
         self.system_lifecycle = SystemLifecycle::Sleeping;
