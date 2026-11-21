@@ -686,6 +686,8 @@ private struct BoardKeycapCellButton: View, @MainActor Equatable {
     var body: some View {
         let unassignedSession = L10n.tr("尚未分配会话", locale)
         let unboundKey = L10n.tr("未绑定", locale)
+        let taskBase = sessionSlot?.title.isEmpty == false ? sessionSlot!.title : unassignedSession
+        let taskHelp = (sessionSlot?.statusDetail).flatMap { $0.isEmpty ? nil : "\(taskBase)\n\($0)" } ?? taskBase
         Button {
             if let surface {
                 store.dispatch("canvas", ["SelectSurface": surface])
@@ -711,7 +713,7 @@ private struct BoardKeycapCellButton: View, @MainActor Equatable {
         }
         .buttonStyle(.plain)
         .focusEffectDisabled()
-        .help(isTaskRole ? (sessionSlot?.title ?? unassignedSession) : sublabel)
+        .help(isTaskRole ? taskHelp : sublabel)
         .accessibilityLabel(isTaskRole
             ? (locale == .en
                 ? "Session \(slot + 1), \(sessionSlot?.title ?? unassignedSession), \(SessionKeyStatusView.label(for: sessionSlot, locale: locale))"
@@ -904,6 +906,10 @@ struct SessionTitleRow: View {
     var onSelect: () -> Void
 
     var body: some View {
+        let detailText = sessionSlot?.statusDetail?.isEmpty == false ? sessionSlot?.statusDetail : nil
+        let detailColor: Color = sessionSlot?.kind == "Error"
+            ? Color(hex: "#FF2200")
+            : (sessionSlot?.kind == "NeedsAttention" ? Color(hex: "#FFAA00") : UITheme.textMuted)
         Button(action: onSelect) {
             HStack(alignment: .top, spacing: 12) {
                 Text("\(slotIndex + 1)")
@@ -911,12 +917,17 @@ struct SessionTitleRow: View {
                     .foregroundStyle(isSelected ? UITheme.textPrimary : UITheme.textSecondary)
                     .frame(width: 28, height: 28)
                     .background(UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                Text(title)
-                    .font(UITheme.body)
-                    .foregroundStyle(UITheme.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 4)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(UITheme.body)
+                        .foregroundStyle(UITheme.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let detailText {
+                        Text(detailText).font(UITheme.micro).foregroundStyle(detailColor).lineLimit(1).truncationMode(.tail)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 4)
                 SessionKeyStatusView(sessionSlot: sessionSlot, locale: locale)
                     .font(UITheme.caption)
                     .fixedSize()
@@ -928,6 +939,8 @@ struct SessionTitleRow: View {
         }
         .buttonStyle(.plain)
         .focusEffectDisabled()
+        .help(detailText ?? "")
+        .accessibilityHint(detailText ?? "")
         .accessibilityIdentifier("session-title-\(slotIndex)")
         .accessibilityLabel(locale == .en
             ? "Session \(slotIndex + 1), \(title), \(SessionKeyStatusView.label(for: sessionSlot, locale: locale))"

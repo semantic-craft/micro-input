@@ -321,6 +321,7 @@ impl WorkbenchStore {
                 h.write_u64(cand.last_modified_ms);
                 h.write_u64(cand.last_user_view_ms);
                 h.write_u64(cand.updated_at_ms);
+                h.write_opt_str(cand.status_detail.as_deref());
             }
         }
         let mut h = Fnv1a::new();

@@ -130,6 +130,7 @@ public struct SessionSlotModel: Identifiable, Equatable {
     public let isBoundToTopKey: Bool
     public let ledColorHex: String
     public let hasAssignedPlace: Bool
+    public let statusDetail: String?
 
     public init(
         slotIndex: Int,
@@ -144,7 +145,8 @@ public struct SessionSlotModel: Identifiable, Equatable {
         isWorkingAnimated: Bool,
         isBoundToTopKey: Bool,
         ledColorHex: String,
-        hasAssignedPlace: Bool = false
+        hasAssignedPlace: Bool = false,
+        statusDetail: String? = nil
     ) {
         self.slotIndex = slotIndex
         self.keyBindingId = keyBindingId
@@ -159,6 +161,7 @@ public struct SessionSlotModel: Identifiable, Equatable {
         self.isBoundToTopKey = isBoundToTopKey
         self.ledColorHex = ledColorHex
         self.hasAssignedPlace = hasAssignedPlace
+        self.statusDetail = statusDetail
     }
 }
 

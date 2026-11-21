@@ -28,6 +28,7 @@ fn make_live_candidate(
         last_modified_ms: 10_000 + updated_at_ms,
         last_user_view_ms: 1_000,
         updated_at_ms,
+        status_detail: None,
     }
 }
 

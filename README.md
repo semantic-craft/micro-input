@@ -38,7 +38,7 @@ Micro Input 一方面在 macOS 上完整接管日常配置、通用快捷键映�
 #### 专为 Antigravity 优化的物理工作流
 
 - **开箱即用的 Antigravity 全键位映射。** 顶部 6 键（`AG00–AG05`）对应按行动优先级排序的会话槽位与响应驱动逐键状态灯；下排 7 键（`AG06–AG12`）预置为 Gemini Live 实时语音、聚焦当前输入框、受控 AX 直达内置浏览器（自动展开侧栏、清理旧搜索词并剪除访客 `WebContentsView` 噪音节点）、打开 Side Question、在项目中新建会话、按住说话与先停听写再发送消息；右上角摇杆采用四向扇区（上/下滚动对话、左划打开右边栏、右划关闭右边栏）。
-- **物理键帽按待响应优先级点亮真实状态。** 顶部状态键按行动优先级排序主会话（待回应与异常优先于未读完成与运行中），默认保持进行中会话安静熄灯，将未读完成会话点亮为沉稳常亮海洋蓝（`solid`），并在会话或子代理需要审批输入与报错时以琥珀金或珊瑚红呼吸灯同步点亮环境底光（`sa: true`），前台打开对应 `/c/<cid>` 会话后自动核销熄灯。
+- **物理键帽按待响应优先级点亮真实状态。** 顶部状态键按行动优先级排序主会话（待回应与异常优先于未读完成与运行中），默认保持进行中会话安静熄灯，将未读完成会话点亮为沉稳常亮海洋蓝（`solid`），并在会话或子代理需要审批输入、后台日志检出自动重试/超 60 秒无进展、接口报错（如 `429` 配额受限）或守护进程断连时以琥珀金或珊瑚红呼吸灯同步点亮环境底光（`sa: true`）；界面槽位与键帽悬浮提示会展示具体原因，前台打开对应 `/c/<cid>` 会话后自动核销熄灯。
 - **围绕语音与选模型重构的硬件操控。** 直接旋转旋钮即可在 Antigravity 内原位展开并切换模型与推理档位，按下或长按旋钮直接搜索会话（`Cmd+K`），无需先聚焦输入框或抬手点选菜单。底行中键合并为 2U 宽键后适合连续口述代码需求，并由底层防抖确保松开最后一侧微动才停录，也可随时拆回两颗 1U 按键分别承担新建会话与按住说话。
 - **跟手且零侵入的辅助功能执行。** 所有 Antigravity 集成均基于可观测界面与辅助功能实现，不向宿主应用打 `.patch` 补丁，并在 Antigravity 2.31.0 下把 release 构建聚焦输入框中位耗时压至 284.3 ms，让单键切换窗口和输入几乎感受不到等待。
 
@@ -171,7 +171,7 @@ Micro Input handles daily macOS key configuration and official firmware updates 
 #### Dedicated Physical Workflows for Antigravity
 
 - **Antigravity keymap ready out of the box.** Top six slots (`AG00–AG05`) show live session status and trigger direct jumps; bottom seven keys (`AG06–AG12`) cover Gemini Live voice toggle, composer input focus, direct managed Accessibility built-in browser opening (expanding the Side Panel, clearing stale search text, and pruning guest `WebContentsView` noise), Side Question, new conversation in project, hold-to-talk, and submit after confirmed dictation stop; the top-right joystick uses 4-sector `RADIAL` controls (Up/Down chat scroll, Left open right side panel, Right close right side panel).
-- **Hardware keycaps prioritize actionable sessions and track real unread watermarks.** Top slots rank sessions needing attention and errors ahead of unread completions and running work, keep running sessions dark unless opted in, light unread completions in steady ocean-blue (`solid`) until viewed frontmost at `/c/<cid>`, and switch sessions directly through sidebar links.
+- **Hardware keycaps prioritize actionable sessions and track real unread watermarks.** Top slots rank sessions needing attention and errors ahead of unread completions and running work, keep running sessions dark unless opted in, light unread completions in steady ocean-blue (`solid`) until viewed frontmost at `/c/<cid>`, pulse amber or coral-red with underglow on approvals, background-log retries, 60-second stalls, API errors such as `429`, or daemon disconnects with hover reason tooltips in the workbench, and switch sessions directly through sidebar links.
 - **Voice and model controls tuned to hardware cadence.** Rotating the encoder directly opens Antigravity's model picker in place without stealing composer focus and adjusts reasoning effort, pressing or holding the encoder searches conversations, and bottom `AG10` and `AG11` switches merge into a debounced 2U wide dictation key or split back into dual 1U keys for new conversation and hold-to-talk.
 - **Responsive, zero-patch Accessibility execution.** Integrates cleanly through macOS Accessibility and observable endpoints without patching the target app, reducing Antigravity 2.31.0 release composer focus median time to 284.3 ms.
 

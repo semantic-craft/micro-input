@@ -1417,6 +1417,7 @@ impl WorkbenchStore {
             status: "idle".to_string(),
             place: None,
             watermark: String::new(),
+            status_detail: None,
         };
         let preferred_layer = self
             .six_layer_running

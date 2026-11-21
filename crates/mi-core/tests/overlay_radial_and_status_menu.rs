@@ -71,6 +71,7 @@ fn radial_8_way_selection_and_four_app_prompt_preview() {
             last_modified_ms: 1000,
             last_user_view_ms: 500,
             updated_at_ms: 1000,
+            status_detail: None,
         }],
         &std::collections::BTreeMap::new(),
     );
@@ -869,6 +870,7 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
             last_modified_ms: 5000,
             last_user_view_ms: 1000,
             updated_at_ms: 5000,
+            status_detail: None,
         },
         FourAppLiveCandidate {
             place: NavigationPlace::antigravity("agy-live-2", "workspace-b"),
@@ -878,6 +880,7 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
             last_modified_ms: 6000,
             last_user_view_ms: 2000,
             updated_at_ms: 6000,
+            status_detail: None,
         },
     ]);
     assert_eq!(

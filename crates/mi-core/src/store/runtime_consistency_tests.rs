@@ -1048,6 +1048,7 @@ fn poll_at_detects_session_navigation_and_slot_table_mutations() {
         last_modified_ms: 5000,
         last_user_view_ms: 1000,
         updated_at_ms: 5000,
+        status_detail: None,
     };
 
     let gen_before_slot = store.projection_generation();

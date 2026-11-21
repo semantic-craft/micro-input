@@ -1541,6 +1541,7 @@ impl ProjectionInputs<'_> {
                 FourAppSessionKind::Idle => "空闲已读",
             };
             let subtitle = crate::i18n::tr(subtitle_zh, locale).to_string();
+            let status_detail = cand.and_then(|c| c.effective_status_detail(acks));
 
             SessionSlotCardProjection {
                 slot_index: idx,
@@ -1558,6 +1559,7 @@ impl ProjectionInputs<'_> {
                 is_working_animated,
                 is_bound_to_top_key,
                 led_color_hex,
+                status_detail,
             }
         });
 

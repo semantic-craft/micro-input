@@ -592,7 +592,7 @@ private struct CanvasDTO: Decodable {
 
 private struct SessionStripDTO: Decodable {
     struct SlotDTO: Decodable {
-        let slotIndex: Int?; let keyBindingId, mode, status, kind, agentMonogram, title, subtitle, ledColorHex: String?
+        let slotIndex: Int?; let keyBindingId, mode, status, kind, agentMonogram, title, subtitle, ledColorHex, statusDetail: String?
         let isUnreadBlueDot, isWorkingAnimated, isBoundToTopKey: Bool?; let place: JSONPresence?
     }
     struct LightingPopoverDTO: Decodable {
@@ -612,7 +612,8 @@ private struct SessionStripDTO: Decodable {
                     status: $0.status ?? "Idle", kind: $0.kind ?? "Idle", agentMonogram: $0.agentMonogram ?? "",
                     title: $0.title ?? "", subtitle: $0.subtitle ?? "", isUnreadBlueDot: $0.isUnreadBlueDot ?? false,
                     isWorkingAnimated: $0.isWorkingAnimated ?? false, isBoundToTopKey: $0.isBoundToTopKey ?? false,
-                    ledColorHex: $0.ledColorHex ?? "#222222", hasAssignedPlace: $0.place != nil
+                    ledColorHex: $0.ledColorHex ?? "#222222", hasAssignedPlace: $0.place != nil,
+                    statusDetail: $0.statusDetail
                 )
             }
         }

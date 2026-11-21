@@ -1198,6 +1198,7 @@ mod tests {
                 last_modified_ms: 9_000,
                 last_user_view_ms: 9_000,
                 updated_at_ms: 9_000,
+                status_detail: None,
             },
             FourAppLiveCandidate {
                 place: mi_model::navigation_history::NavigationPlace::antigravity(
@@ -1210,6 +1211,7 @@ mod tests {
                 last_modified_ms: 8_000,
                 last_user_view_ms: 1_000,
                 updated_at_ms: 8_000,
+                status_detail: None,
             },
         ]);
 
@@ -1351,6 +1353,7 @@ mod tests {
             last_modified_ms: 5_000,
             last_user_view_ms: 5_000,
             updated_at_ms: 5_000,
+            status_detail: None,
         }]);
         assert!(!store.lighting_arbiter.hardware_synced);
         assert_eq!(
@@ -1452,6 +1455,7 @@ mod tests {
                 last_modified_ms: 9_000,
                 last_user_view_ms: 9_000,
                 updated_at_ms: 9_000,
+                status_detail: None,
             },
             FourAppLiveCandidate {
                 place: mi_model::navigation_history::NavigationPlace::antigravity(
@@ -1464,6 +1468,7 @@ mod tests {
                 last_modified_ms: 8_000,
                 last_user_view_ms: 1_000,
                 updated_at_ms: 8_000,
+                status_detail: None,
             },
         ]);
         let initial_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();

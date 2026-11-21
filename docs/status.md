@@ -18,7 +18,7 @@
   - 第 2 层（`Antigravity`）：顶部 `AG00–AG05` 为 6 槽会话状态灯与直达跳转，摇杆默认采用四向 `RADIAL`（上/下滚动对话、左划打开右边栏、右划关闭右边栏）；
   - 第 3 层（`DeepSeek Harness`）：顶部两键为 `Subagent` + `左键点击`（`AG02–AG05` 留空），摇杆默认采用硬件 `MOUSE` 模式；
   - 第 4–6 层：保留未分配。
-- **响应驱动双源状态灯与 `0.7.0-rc.16` 能力**：`SharedVendorBridge` 通过 `v.oai.thstatus`（`AG00–AG17`）真实总线 ACK 独立同步第 1 层（`AG00–AG05` Codex）与第 2 层（`AG06–AG11` Antigravity）可行动会话槽位（第 3 层非会话键位保持熄灯，900 请求预轮转），默认保持运行中会话熄灯、未读完成常亮海洋蓝（`solid`），仅在会话或子代理待审批输入与报错时呼吸琥珀金/珊瑚红并同步单路底光（`sa: true`）；`0.7.0-rc.16` 支持 `mouse.config` 四档预设与滑块调校、`joystick.deadzone`（默认恢复出厂 `0.15`）、`kb.pl.set` 无写 Flash 实时切层、`pm.config`/`pm.state` 休眠状态读取及 `device.name` / `kb.sa.rgb` 动态灯效，详见 [0.7.0 进阶硬件能力](firmware-v070-capabilities.md)。
+- **响应驱动双源状态灯与 `0.7.0-rc.16` 能力**：`SharedVendorBridge` 通过 `v.oai.thstatus`（`AG00–AG17`）真实总线 ACK 独立同步第 1 层（`AG00–AG05` Codex）与第 2 层（`AG06–AG11` Antigravity）可行动会话槽位（第 3 层非会话键位保持熄灯，900 请求预轮转），默认保持运行中会话熄灯、未读完成常亮海洋蓝（`solid`），仅在会话或子代理待审批输入、Antigravity 后台日志检出自动重试/60 秒无进展/API 报错（如 `429`）或守护进程断连时呼吸琥珀金/珊瑚红并同步单路底光（`sa: true`），同时在工作台槽位与键帽悬浮提示展示具体原因；`0.7.0-rc.16` 支持 `mouse.config` 四档预设与滑块调校、`joystick.deadzone`（默认恢复出厂 `0.15`）、`kb.pl.set` 无写 Flash 实时切层、`pm.config`/`pm.state` 休眠状态读取及 `device.name` / `kb.sa.rgb` 动态灯效，详见 [0.7.0 进阶硬件能力](firmware-v070-capabilities.md)。
 - **官方串口固件升级**：直接对接 `cm-v2-fw-releases` 校验 SHA-256、保存 16 MB Flash 备份并检查 `0x8000` 分区表，详见 [固件更新契约](firmware-update.md)。
 
 ### 2. 桌面应用控制、听写与工作台
