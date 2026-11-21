@@ -35,28 +35,92 @@ impl WorkbenchStore {
             .filter(|pid| profiles.contains_key(pid))
     }
 
-    pub(crate) fn desired_live_session_source(&self) -> LiveSessionSource {
-        let profiles = &self
-            .document_store
-            .host_store()
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles;
-        let profile_name = |pid: &str| profiles.get(pid).map(|p| p.name.as_str());
-        let active_id = self
-            .effective_resolved_active_profile_id()
-            .or_else(|| self.selected_profile_id.clone());
-        let active_name = active_id
-            .as_deref()
-            .and_then(|id| self.runtime_action_profile_id(id))
-            .and_then(profile_name);
-        if active_name == Some(mi_model::preset::LOCAL_CODEX_PROFILE_NAME) {
+    pub fn slot_table_for_source(&self, source: LiveSessionSource) -> &FourAppSlotTable {
+        match source {
+            LiveSessionSource::Antigravity => &self.slot_table,
+            LiveSessionSource::Codex => &self.codex_slot_table,
+        }
+    }
+
+    pub fn slot_table_for_source_mut(
+        &mut self,
+        source: LiveSessionSource,
+    ) -> &mut FourAppSlotTable {
+        match source {
+            LiveSessionSource::Antigravity => &mut self.slot_table,
+            LiveSessionSource::Codex => &mut self.codex_slot_table,
+        }
+    }
+
+    pub fn active_slot_table(&self) -> &FourAppSlotTable {
+        self.slot_table_for_source(self.desired_live_session_source())
+    }
+
+    pub fn active_slot_table_mut(&mut self) -> &mut FourAppSlotTable {
+        let source = self.desired_live_session_source();
+        self.slot_table_for_source_mut(source)
+    }
+
+    pub fn source_for_profile_id(&self, profile_id: &str) -> LiveSessionSource {
+        if profile_id == "codex" {
+            return LiveSessionSource::Codex;
+        }
+        if profile_id == "workbench" {
+            return self.desired_live_session_source();
+        }
+        let host_doc = &self.document_store.host_store().draft.document;
+        let draft_doc = &self.document_store.draft.document;
+        if let Some(resolved) = self.runtime_action_profile_id(profile_id) {
+            if host_doc
+                .editable
+                .graph
+                .profiles
+                .get(resolved)
+                .is_some_and(|p| {
+                    p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME
+                        || CanonicalAgent::from_profile_name(&p.name) == Some(CanonicalAgent::Codex)
+                })
+            {
+                return LiveSessionSource::Codex;
+            }
+        }
+        if mi_model::board_layers::native_owner(host_doc, profile_id)
+            == Some(NativeLayerOwner::Codex)
+            || mi_model::board_layers::native_owner(draft_doc, profile_id)
+                == Some(NativeLayerOwner::Codex)
+            || draft_doc
+                .editable
+                .graph
+                .profiles
+                .get(profile_id)
+                .is_some_and(|p| {
+                    p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME
+                        || CanonicalAgent::from_profile_name(&p.name) == Some(CanonicalAgent::Codex)
+                })
+        {
             LiveSessionSource::Codex
         } else {
             LiveSessionSource::Antigravity
         }
+    }
+
+    pub(crate) fn desired_live_session_source(&self) -> LiveSessionSource {
+        if let Some(active_id) = self
+            .effective_resolved_active_profile_id()
+            .or_else(|| self.selected_profile_id.clone())
+        {
+            return self.source_for_profile_id(&active_id);
+        }
+        if self.document_store.locked_profile_id().is_none()
+            && !self.six_layer_user_pinned
+            && self
+                .six_layer_running
+                .as_ref()
+                .is_some_and(|r| r.observed_layer.load(Ordering::Acquire) == 1)
+        {
+            return LiveSessionSource::Codex;
+        }
+        LiveSessionSource::Antigravity
     }
 
     pub(crate) fn sync_live_session_source(&mut self) -> bool {
@@ -76,9 +140,7 @@ impl WorkbenchStore {
         if !changed {
             return false;
         }
-        let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
-        self.update_navigation_catalog(None);
-        self.slot_table.retain_agent_slots(desired.agent(), &acks);
+        self.sync_active_navigation_catalog_mirror();
         self.refresh_navigation_revision();
         self.refresh_four_app_lighting();
         self.commit_runtime_update();
@@ -96,29 +158,32 @@ impl WorkbenchStore {
             let mut seen_running_ids = BTreeSet::new();
             let mut completed_transition_watermarks = BTreeMap::new();
             loop {
-                let (source, source_gen) = {
+                let source_gen = {
                     let (lock, _) = &*live_source;
-                    let guard = lock.lock().unwrap();
-                    (guard.source, guard.generation)
+                    lock.lock().unwrap().generation
                 };
                 let epoch = epoch_source.load(Ordering::Acquire);
-                let catalog = match source {
-                    LiveSessionSource::Antigravity => poll_antigravity_daemon_candidates(
-                        &mut seen_running_ids,
-                        &mut completed_transition_watermarks,
-                    ),
-                    LiveSessionSource::Codex => poll_codex_session_candidates(),
-                };
-                let still_current = {
-                    let (lock, _) = &*live_source;
-                    let guard = lock.lock().unwrap();
-                    guard.source == source && guard.generation == source_gen
-                };
-                if !still_current {
-                    continue;
-                }
+                let ag_catalog = poll_antigravity_daemon_candidates(
+                    &mut seen_running_ids,
+                    &mut completed_transition_watermarks,
+                );
                 if tx
-                    .send(HardwareLoopEvent::LiveCandidatesUpdated { epoch, catalog })
+                    .send(HardwareLoopEvent::LiveCandidatesUpdated {
+                        epoch,
+                        source: LiveSessionSource::Antigravity,
+                        catalog: ag_catalog,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                let codex_catalog = poll_codex_session_candidates();
+                if tx
+                    .send(HardwareLoopEvent::LiveCandidatesUpdated {
+                        epoch,
+                        source: LiveSessionSource::Codex,
+                        catalog: codex_catalog,
+                    })
                     .is_err()
                 {
                     break;

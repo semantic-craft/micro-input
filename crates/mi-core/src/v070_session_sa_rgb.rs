@@ -118,6 +118,17 @@ const fn lit_override(rgb: u32, effect: SaRgbEffect, b: u16, s: u16) -> DesiredS
     })
 }
 
+pub const fn filter_session_kind_for_lighting(
+    kind: FourAppSessionKind,
+    glow_on_working: bool,
+) -> FourAppSessionKind {
+    if matches!(kind, FourAppSessionKind::Working) && !glow_on_working {
+        FourAppSessionKind::Idle
+    } else {
+        kind
+    }
+}
+
 pub const fn map_session_kind_to_sa_lighting(kind: FourAppSessionKind) -> DesiredSaLighting {
     match kind {
         FourAppSessionKind::Idle => DesiredSaLighting::DefaultOnboard,
@@ -130,6 +141,18 @@ pub const fn map_session_kind_to_sa_lighting(kind: FourAppSessionKind) -> Desire
         }
         FourAppSessionKind::Error => lit_override(0xFF2200, SaRgbEffect::Breath, 1000, 850),
     }
+}
+
+pub const fn map_session_kind_to_sa_lighting_filtered(
+    kind: FourAppSessionKind,
+    only_attention_or_completed: bool,
+    glow_on_working: bool,
+) -> DesiredSaLighting {
+    let effective = filter_session_kind_for_lighting(kind, glow_on_working);
+    if matches!(effective, FourAppSessionKind::Idle) && !only_attention_or_completed {
+        return lit_override(0x0088FF, SaRgbEffect::Solid, 900, 500);
+    }
+    map_session_kind_to_sa_lighting(effective)
 }
 
 fn merge_sa_kind(

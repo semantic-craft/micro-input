@@ -1138,6 +1138,7 @@ fn idle_live_candidates_none_does_not_force_commit_local_update() {
     store.handle_hardware_loop_event(
         HardwareLoopEvent::LiveCandidatesUpdated {
             epoch: 0,
+            source: LiveSessionSource::Antigravity,
             catalog: None,
         },
         now,

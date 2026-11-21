@@ -604,9 +604,16 @@ impl WorkbenchStore {
     }
 
     fn resolve_v070_session_sa_rgb_target(&self) -> DesiredTarget {
+        if !self.lighting_arbiter.lighting_enabled {
+            return DesiredTarget::UrgentClear(UrgentClearReason::OptInDisabled);
+        }
+        let glow_on_working = self.lighting_arbiter.glow_on_working_sessions;
         let slot_kinds = self
-            .slot_table
-            .slot_session_kinds(&self.lighting_arbiter.acknowledged_watermarks);
+            .active_slot_table()
+            .slot_session_kinds(&self.lighting_arbiter.acknowledged_watermarks)
+            .map(|kind| {
+                crate::v070_session_sa_rgb::filter_session_kind_for_lighting(kind, glow_on_working)
+            });
         let fallback_sa = self
             .v070_hardware
             .projection

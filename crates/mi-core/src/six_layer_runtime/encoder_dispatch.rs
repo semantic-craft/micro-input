@@ -3,6 +3,7 @@ use super::{activation_to_input_event, RoutingContext};
 use crate::store::session_navigation::{
     NavigationCommand, NavigationDispatch, PhysicalNavigationIntent,
 };
+use crate::store::LiveSessionSource;
 use mi_model::apply::AppliedSixLayerPlan;
 use mi_model::{
     direct_controls::{CONTROL_BINDINGS, DIRECT_CONTROLS},
@@ -17,6 +18,43 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+fn navigation_source_for_dispatch(
+    context: &RoutingContext,
+    control_layer: u8,
+    profile_id: &str,
+    action: &ResolvedHostAction,
+) -> Option<LiveSessionSource> {
+    if matches!(
+        action,
+        ResolvedHostAction::AgentCommand { adapter, command }
+            if adapter == "navigation" && matches!(command.as_str(), "back" | "forward")
+    ) {
+        return None;
+    }
+    if matches!(action, ResolvedHostAction::AgentCommand { adapter, .. } if adapter == "codex")
+        || profile_id == "codex"
+    {
+        return Some(LiveSessionSource::Codex);
+    }
+    match &context.mode {
+        crate::six_layer_runtime::SixLayerRoutingMode::BoardLayers { .. } => {
+            if control_layer == 1 {
+                Some(LiveSessionSource::Codex)
+            } else {
+                Some(LiveSessionSource::Antigravity)
+            }
+        }
+        crate::six_layer_runtime::SixLayerRoutingMode::Locked(pinned)
+        | crate::six_layer_runtime::SixLayerRoutingMode::ManualPinned(pinned) => {
+            if pinned.bundle_id.as_deref() == Some("com.openai.codex") {
+                Some(LiveSessionSource::Codex)
+            } else {
+                Some(LiveSessionSource::Antigravity)
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
@@ -85,11 +123,18 @@ pub(super) fn execute_clicks(
                 continue;
             }
             let snapshot = dispatch.slots.lock().unwrap().clone();
+            let source =
+                navigation_source_for_dispatch(&context, control_layer, profile_id, action);
+            let revision = match source {
+                Some(src) => snapshot.revision_for_source(src),
+                None => snapshot.revision,
+            };
             if dispatch
                 .tx
                 .try_send(PhysicalNavigationIntent {
                     command,
-                    revision: snapshot.revision,
+                    source,
+                    revision,
                     input_generation: event.generation.clone(),
                     admission,
                     received_at: event.received_at,
@@ -809,11 +854,18 @@ pub(super) fn execute_clicks_with_encoder_picker(
                 continue;
             }
             let snapshot = dispatch.slots.lock().unwrap().clone();
+            let source =
+                navigation_source_for_dispatch(&context, control_layer, profile_id, action);
+            let revision = match source {
+                Some(src) => snapshot.revision_for_source(src),
+                None => snapshot.revision,
+            };
             if dispatch
                 .tx
                 .try_send(PhysicalNavigationIntent {
                     command,
-                    revision: snapshot.revision,
+                    source,
+                    revision,
                     input_generation: event.generation.clone(),
                     admission,
                     received_at: event.received_at,

@@ -161,13 +161,13 @@ pub struct HardwareAutoAcceptanceReceipt {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LiveSessionSource {
+pub enum LiveSessionSource {
     Antigravity,
     Codex,
 }
 
 impl LiveSessionSource {
-    fn agent(self) -> CanonicalAgent {
+    pub fn agent(self) -> CanonicalAgent {
         match self {
             Self::Antigravity => CanonicalAgent::Antigravity,
             Self::Codex => CanonicalAgent::Codex,
@@ -197,6 +197,7 @@ pub enum HardwareLoopEvent {
     },
     LiveCandidatesUpdated {
         epoch: u64,
+        source: LiveSessionSource,
         catalog: Option<NavigationCatalog>,
     },
     V070CapabilityOutcome {
@@ -492,6 +493,7 @@ pub struct WorkbenchStore {
     pub ptt_controller: DictationControllerState,
     pub lighting_arbiter: FourAppLightingArbiter,
     pub slot_table: FourAppSlotTable,
+    pub codex_slot_table: FourAppSlotTable,
     pub app_cache: Arc<AppBundleCache>,
     pub panel_host: Arc<dyn PassivePanelHost>,
     pub status_item_host: Arc<dyn StatusItemHost>,
@@ -655,6 +657,7 @@ impl WorkbenchStore {
             ptt_controller: DictationControllerState::default(),
             lighting_arbiter: FourAppLightingArbiter::new(),
             slot_table: FourAppSlotTable::new(),
+            codex_slot_table: FourAppSlotTable::new(),
             app_cache,
             panel_host,
             status_item_host,
@@ -1871,7 +1874,7 @@ impl WorkbenchStore {
             six_layer_user_pinned: self.six_layer_user_pinned,
             six_layer_view: &self.six_layer_view,
             slot_role_overrides: &self.slot_role_overrides,
-            slot_table: &self.slot_table,
+            slot_table: self.active_slot_table(),
             status_menu_open: self.status_menu_open,
             status_message: &self.status_message,
             ui_language: self.document_store.ui_language(),

@@ -159,7 +159,7 @@ pub(crate) struct RuntimeCommitStamp {
     v070_text_hash: u64,
     encoder_picker_hash: u64,
     navigation_pending: bool,
-    navigation_catalog_present: bool,
+    navigation_catalog_mask: u8,
     navigation_history_hash: u64,
     slot_table_hash: u64,
     lighting_arbiter_hash: u64,
@@ -278,50 +278,58 @@ impl WorkbenchStore {
     }
 
     fn slot_table_hash(&self) -> u64 {
-        let mut h = Fnv1a::new();
-        let slots = self.slot_table.slot_table().slots();
-        h.write_u64(slots.len() as u64);
-        for slot in slots {
-            h.write_u64(slot.slot_index as u64);
-            h.write_u8(match slot.mode {
-                SlotMode::Pinned => 0,
-                SlotMode::Recent => 1,
-            });
-            match &slot.place {
-                Some(place) => {
-                    h.write_u8(1);
-                    h.write_place(place);
+        fn write_table(h: &mut Fnv1a, table: &FourAppSlotTable) {
+            let slots = table.slot_table().slots();
+            h.write_u64(slots.len() as u64);
+            for slot in slots {
+                h.write_u64(slot.slot_index as u64);
+                h.write_u8(match slot.mode {
+                    SlotMode::Pinned => 0,
+                    SlotMode::Recent => 1,
+                });
+                match &slot.place {
+                    Some(place) => {
+                        h.write_u8(1);
+                        h.write_place(place);
+                    }
+                    None => h.write_u8(0),
                 }
-                None => h.write_u8(0),
+                h.write_str(&slot.title);
+                h.write_u8(match slot.status {
+                    SlotStatus::Idle => 0,
+                    SlotStatus::Running => 1,
+                    SlotStatus::NeedsInteraction => 2,
+                    SlotStatus::Unread => 3,
+                    SlotStatus::Error => 4,
+                });
+                h.write_u64(slot.pinned_at.unwrap_or(u64::MAX));
+                h.write_u64(slot.updated_at.unwrap_or(u64::MAX));
             }
-            h.write_str(&slot.title);
-            h.write_u8(match slot.status {
-                SlotStatus::Idle => 0,
-                SlotStatus::Running => 1,
-                SlotStatus::NeedsInteraction => 2,
-                SlotStatus::Unread => 3,
-                SlotStatus::Error => 4,
-            });
-            h.write_u64(slot.pinned_at.unwrap_or(u64::MAX));
-            h.write_u64(slot.updated_at.unwrap_or(u64::MAX));
+            let candidates = table.candidates();
+            h.write_u64(candidates.len() as u64);
+            for cand in candidates {
+                h.write_place(&cand.place);
+                h.write_str(&cand.title);
+                h.write_u8(match cand.phase {
+                    FourAppSessionKind::NeedsAttention => 0,
+                    FourAppSessionKind::Error => 1,
+                    FourAppSessionKind::BlueDotCompleted => 2,
+                    FourAppSessionKind::Working => 3,
+                    FourAppSessionKind::Idle => 4,
+                });
+                h.write_str(&cand.watermark);
+                h.write_u64(cand.last_modified_ms);
+                h.write_u64(cand.last_user_view_ms);
+                h.write_u64(cand.updated_at_ms);
+            }
         }
-        let candidates = self.slot_table.candidates();
-        h.write_u64(candidates.len() as u64);
-        for cand in candidates {
-            h.write_place(&cand.place);
-            h.write_str(&cand.title);
-            h.write_u8(match cand.phase {
-                FourAppSessionKind::NeedsAttention => 0,
-                FourAppSessionKind::BlueDotCompleted => 1,
-                FourAppSessionKind::Working => 2,
-                FourAppSessionKind::Error => 3,
-                FourAppSessionKind::Idle => 4,
-            });
-            h.write_str(&cand.watermark);
-            h.write_u64(cand.last_modified_ms);
-            h.write_u64(cand.last_user_view_ms);
-            h.write_u64(cand.updated_at_ms);
-        }
+        let mut h = Fnv1a::new();
+        h.write_u8(match self.desired_live_session_source() {
+            LiveSessionSource::Antigravity => 0,
+            LiveSessionSource::Codex => 1,
+        });
+        write_table(&mut h, &self.slot_table);
+        write_table(&mut h, &self.codex_slot_table);
         h.finish()
     }
 
@@ -353,6 +361,8 @@ impl WorkbenchStore {
                 h.write_f64(dz.underglow_speed);
             }
         }
+        h.write_bool(self.lighting_arbiter.hardware_synced);
+        h.write_opt_str(self.lighting_arbiter.last_synced_payload_digest.as_deref());
         h.finish()
     }
 
@@ -472,7 +482,12 @@ impl WorkbenchStore {
             v070_text_hash: self.v070_text_hash(),
             encoder_picker_hash: self.encoder_picker_hash(),
             navigation_pending: self.session_navigation.is_pending(),
-            navigation_catalog_present: self.session_navigation.catalog.is_some(),
+            navigation_catalog_mask: u8::from(
+                self.session_navigation.antigravity_catalog.is_some(),
+            ) | (u8::from(
+                self.session_navigation.codex_catalog.is_some(),
+            ) << 1)
+                | (u8::from(self.session_navigation.catalog.is_some()) << 2),
             navigation_history_hash: self.navigation_history_hash(),
             slot_table_hash: self.slot_table_hash(),
             lighting_arbiter_hash: self.lighting_arbiter_hash(),

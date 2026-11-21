@@ -89,8 +89,8 @@ pub use status_menu::{
 pub use store::{
     format_popover_cheat_label, DeviceWorkflowAction, HardwareAutoAcceptanceReceipt,
     HardwareLoopEvent, LightingPreviewBeginFuture, LightingPreviewEndFuture, LightingPreviewHandle,
-    LightingPreviewPhase, LightingPreviewStarter, NativeLightingPreviewStarter, WorkbenchCommand,
-    WorkbenchError, WorkbenchProjection, WorkbenchStore, WorkbenchStoreConfig,
+    LightingPreviewPhase, LightingPreviewStarter, LiveSessionSource, NativeLightingPreviewStarter,
+    WorkbenchCommand, WorkbenchError, WorkbenchProjection, WorkbenchStore, WorkbenchStoreConfig,
 };
 pub use v070_hardware::{
     V070HardwareAction, V070HardwareProjection, V070MouseConfigProjection, V070PmStateProjection,

@@ -643,7 +643,8 @@ impl WorkbenchStore {
                 self.status_message = format!("宿主动作清理未确认 · {localized}");
             }
         } else if observed_changed || v070_changed {
-            self.sync_v070_session_sa_rgb();
+            let _ = self.sync_live_session_source();
+            self.refresh_four_app_lighting();
         }
         if changed {
             self.commit_runtime_update();
@@ -1178,6 +1179,10 @@ mod tests {
         store.six_layer_state.installation = Some(running.installation.clone());
         store.six_layer_running = Some(running);
 
+        store
+            .dispatch_session_strip_action(SessionStripAction::SetGlowOnWorking(true))
+            .unwrap();
+        let _ = rpc_rx.try_recv();
         store.ingest_four_app_candidates(vec![
             FourAppLiveCandidate {
                 place: mi_model::navigation_history::NavigationPlace::antigravity(
@@ -1213,18 +1218,15 @@ mod tests {
         assert_eq!(
             key_names,
             vec![
-                "AG06", "AG07", "AG08", "AG09", "AG10", "AG11", "AG12", "AG13", "AG14", "AG15",
-                "AG16", "AG17"
+                "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09",
+                "AG10", "AG11", "AG12", "AG13", "AG14", "AG15", "AG16", "AG17"
             ]
         );
-        assert!(key_names
-            .iter()
-            .all(|k| !matches!(*k, "AG00" | "AG01" | "AG02" | "AG03" | "AG04" | "AG05")));
-        assert_eq!(keys[0]["c"], 0x00FF66);
-        assert_eq!(keys[6]["c"], 0x00FF66);
-        assert_eq!(keys[1]["c"], 0x0088FF);
-        assert_eq!(keys[7]["c"], 0x0088FF);
-        for empty_idx in [2, 3, 4, 5, 8, 9, 10, 11] {
+        assert_eq!(keys[6]["c"], 0x0088FF);
+        assert_eq!(keys[6]["e"], 1);
+        assert_eq!(keys[7]["c"], 0x00FF66);
+        assert_eq!(keys[7]["e"], 4);
+        for empty_idx in (0..6).chain(8..18) {
             assert_eq!(keys[empty_idx]["c"], 0);
             assert_eq!(keys[empty_idx]["b"], 0.0);
         }
@@ -1237,11 +1239,10 @@ mod tests {
         let preview_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(preview_rpc["method"], "v.oai.thstatus");
         wait_lighting_synced(&mut store, true);
-        assert!(preview_rpc["params"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|entry| entry["c"] == 0xFF2200));
+        let preview_keys = preview_rpc["params"].as_array().unwrap();
+        assert!(preview_keys.iter().all(|entry| entry["c"] == 0xFF2200));
+        assert_eq!(preview_keys[0]["sa"], true);
+        assert!(preview_keys[1..].iter().all(|entry| entry["sa"] == false));
 
         store
             .dispatch_session_strip_action(SessionStripAction::SetLightingEnabled(false))
@@ -1250,7 +1251,7 @@ mod tests {
         assert_eq!(extinguish_rpc["method"], "v.oai.thstatus");
         assert!(!store.lighting_arbiter.hardware_synced);
         let off_keys = extinguish_rpc["params"].as_array().unwrap();
-        assert_eq!(off_keys.len(), 12);
+        assert_eq!(off_keys.len(), 18);
         assert!(off_keys
             .iter()
             .all(|entry| entry["c"] == 0 && entry["b"] == 0.0 && entry["e"] == 0));
@@ -1334,6 +1335,9 @@ mod tests {
         store.six_layer_state.installation = Some(running.installation.clone());
         store.six_layer_running = Some(running);
 
+        store
+            .dispatch_session_strip_action(SessionStripAction::SetGlowOnWorking(true))
+            .unwrap();
         store.ingest_four_app_candidates(vec![FourAppLiveCandidate {
             place: mi_model::navigation_history::NavigationPlace::antigravity(
                 "conv-run", "/ws/run",
@@ -1373,8 +1377,9 @@ mod tests {
         wait_lighting_synced(&mut store, true);
         let synced_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(synced_rpc["method"], "v.oai.thstatus");
-        assert_eq!(synced_rpc["params"][0]["c"], 0x00FF66);
+        assert_eq!(synced_rpc["params"][0]["c"], 0);
         assert_eq!(synced_rpc["params"][6]["c"], 0x00FF66);
+        assert_eq!(synced_rpc["params"][12]["c"], 0);
 
         store.tokio_runtime.block_on(vendor_session.shutdown());
         wait_lighting_synced(&mut store, false);
@@ -1428,6 +1433,10 @@ mod tests {
         store.six_layer_state.installation = Some(running.installation.clone());
         store.six_layer_running = Some(running);
 
+        store
+            .dispatch_session_strip_action(SessionStripAction::SetGlowOnWorking(true))
+            .unwrap();
+        let _ = rpc_rx.try_recv();
         store.ingest_four_app_candidates(vec![
             FourAppLiveCandidate {
                 place: mi_model::navigation_history::NavigationPlace::antigravity(
@@ -1479,11 +1488,11 @@ mod tests {
         assert!(store.lighting_arbiter.hardware_synced);
         assert_eq!(
             store.projection().session_strip.slots[0].led_color_hex,
-            "#00FF66"
+            "#0088FF"
         );
         assert_eq!(
             store.projection().session_strip.slots[1].led_color_hex,
-            "#0088FF"
+            "#00FF66"
         );
         assert_eq!(
             store.projection().session_strip.working_pills[0].color_hex,
