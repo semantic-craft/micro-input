@@ -84,8 +84,6 @@ pub struct FourAppSlotSnapshot {
     pub status: String,
     pub place: Option<NavigationPlace>,
     pub watermark: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1075,7 +1073,6 @@ mod tests {
             status: "waiting_approval".into(),
             place: Some(NavigationPlace::antigravity("conv-1", "/tmp/ws")),
             watermark: "1:1:waiting".into(),
-            status_detail: None,
         }];
 
         let r1 = arbiter.update_feedback(
@@ -1111,7 +1108,6 @@ mod tests {
             status: "completed".into(),
             place: Some(NavigationPlace::antigravity("conv-1", "/tmp/ws")),
             watermark: "1:2:done".into(),
-            status_detail: None,
         }];
         let r3 = arbiter.update_feedback(
             FourAppAgentPhase::Completed,
@@ -1154,7 +1150,6 @@ mod tests {
             status: "running".into(),
             place: Some(NavigationPlace::antigravity("conv-run", "/tmp/ws")),
             watermark: "running:1".into(),
-            status_detail: None,
         };
         let _ = arbiter.update_feedback(
             FourAppAgentPhase::Thinking,
@@ -1196,7 +1191,6 @@ mod tests {
             status: "completed".into(),
             place: Some(NavigationPlace::antigravity("conv-run", "/tmp/ws")),
             watermark: "idle:2".into(),
-            status_detail: None,
         };
         let _ = arbiter.update_feedback(
             FourAppAgentPhase::Completed,
@@ -1231,7 +1225,6 @@ mod tests {
                 status: "running".into(),
                 place: Some(NavigationPlace::antigravity("conv-run", "/tmp/ws")),
                 watermark: "run:1".into(),
-                status_detail: None,
             },
             FourAppSlotSnapshot {
                 app: "antigravity".into(),
@@ -1239,7 +1232,6 @@ mod tests {
                 status: "completed".into(),
                 place: Some(NavigationPlace::antigravity("conv-done", "/tmp/ws")),
                 watermark: "done:1".into(),
-                status_detail: None,
             },
             FourAppSlotSnapshot {
                 app: "dsh-desktop".into(),
@@ -1247,7 +1239,6 @@ mod tests {
                 status: "idle".into(),
                 place: Some(NavigationPlace::session("dsh-desktop", "sess-idle")),
                 watermark: "idle:1".into(),
-                status_detail: None,
             },
         ];
 
@@ -1310,7 +1301,6 @@ mod tests {
                 status: "error".into(),
                 place: Some(NavigationPlace::codex("c-err", "local", "/tmp/c")),
                 watermark: "w1".into(),
-                status_detail: None,
             },
             FourAppSlotSnapshot {
                 app: "com.openai.codex".into(),
@@ -1318,7 +1308,6 @@ mod tests {
                 status: "waiting_approval".into(),
                 place: Some(NavigationPlace::codex("c-wait", "local", "/tmp/c")),
                 watermark: "w2".into(),
-                status_detail: None,
             },
         ];
         let l2 = [
@@ -1328,7 +1317,6 @@ mod tests {
                 status: "waiting".into(),
                 place: Some(NavigationPlace::antigravity("ag-wait", "/tmp/ag")),
                 watermark: "w3".into(),
-                status_detail: None,
             },
             FourAppSlotSnapshot {
                 app: "com.google.antigravity".into(),
@@ -1336,7 +1324,6 @@ mod tests {
                 status: "completed".into(),
                 place: Some(NavigationPlace::antigravity("ag-done", "/tmp/ag")),
                 watermark: "w4".into(),
-                status_detail: None,
             },
         ];
 
@@ -1388,7 +1375,6 @@ mod tests {
             status: "running".into(),
             place: Some(NavigationPlace::antigravity("conv-run", "/tmp/ws")),
             watermark: "run:1".into(),
-            status_detail: None,
         }];
         arbiter.recompute_feedback(
             FourAppAgentPhase::Thinking,
@@ -1462,7 +1448,6 @@ mod tests {
                 status: "error".into(),
                 place: Some(err_place.clone()),
                 watermark: "err:1".into(),
-                status_detail: None,
             },
             FourAppSlotSnapshot {
                 app: "antigravity".into(),
@@ -1470,7 +1455,6 @@ mod tests {
                 status: "running".into(),
                 place: Some(run_place),
                 watermark: "run:1".into(),
-                status_detail: None,
             },
         ];
 

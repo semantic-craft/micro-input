@@ -556,12 +556,9 @@ private struct SessionSlotExplanationSection: View {
                 .font(UITheme.caption)
                 .foregroundStyle(UITheme.textSecondary)
             if let detail = sessionSlot?.statusDetail, !detail.isEmpty {
-                let detailColor: Color = sessionSlot?.kind == "Error"
-                    ? Color(hex: "#FF2200")
-                    : (sessionSlot?.kind == "NeedsAttention" ? Color(hex: "#FFAA00") : UITheme.textMuted)
                 Text(detail)
                     .font(UITheme.micro)
-                    .foregroundStyle(detailColor)
+                    .foregroundStyle(UITheme.sessionDetailColor(for: sessionSlot?.kind))
                     .fixedSize(horizontal: false, vertical: true)
                     .help(detail)
             }

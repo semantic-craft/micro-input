@@ -714,10 +714,11 @@ private struct BoardKeycapCellButton: View, @MainActor Equatable {
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .help(isTaskRole ? taskHelp : sublabel)
+        .accessibilityHint(isTaskRole ? (sessionSlot?.statusDetail ?? "") : "")
         .accessibilityLabel(isTaskRole
             ? (locale == .en
-                ? "Session \(slot + 1), \(sessionSlot?.title ?? unassignedSession), \(SessionKeyStatusView.label(for: sessionSlot, locale: locale))"
-                : "会话 \(slot + 1)，\(sessionSlot?.title ?? unassignedSession)，\(SessionKeyStatusView.label(for: sessionSlot, locale: locale))")
+                ? "Session \(slot + 1), \(taskBase), \(SessionKeyStatusView.label(for: sessionSlot, locale: locale))"
+                : "会话 \(slot + 1)，\(taskBase)，\(SessionKeyStatusView.label(for: sessionSlot, locale: locale))")
             : (locale == .en
                 ? "Key \(slot + 1), \(sublabel.isEmpty ? unboundKey : sublabel)"
                 : "按键 \(slot + 1)，\(sublabel.isEmpty ? unboundKey : sublabel)"))
@@ -894,100 +895,5 @@ struct CreatorMicroSessionListView: View {
                 }
             }
         }
-    }
-}
-
-struct SessionTitleRow: View {
-    let slotIndex: Int
-    let title: String
-    let sessionSlot: SessionSlotModel?
-    let isSelected: Bool
-    var locale: ResolvedLocale = .zhHans
-    var onSelect: () -> Void
-
-    var body: some View {
-        let detailText = sessionSlot?.statusDetail?.isEmpty == false ? sessionSlot?.statusDetail : nil
-        let detailColor: Color = sessionSlot?.kind == "Error"
-            ? Color(hex: "#FF2200")
-            : (sessionSlot?.kind == "NeedsAttention" ? Color(hex: "#FFAA00") : UITheme.textMuted)
-        Button(action: onSelect) {
-            HStack(alignment: .top, spacing: 12) {
-                Text("\(slotIndex + 1)")
-                    .font(UITheme.bodySemibold)
-                    .foregroundStyle(isSelected ? UITheme.textPrimary : UITheme.textSecondary)
-                    .frame(width: 28, height: 28)
-                    .background(UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(UITheme.body)
-                        .foregroundStyle(UITheme.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let detailText {
-                        Text(detailText).font(UITheme.micro).foregroundStyle(detailColor).lineLimit(1).truncationMode(.tail)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 4)
-                SessionKeyStatusView(sessionSlot: sessionSlot, locale: locale)
-                    .font(UITheme.caption)
-                    .fixedSize()
-                    .padding(.top, 4)
-            }
-            .padding(12)
-            .background(isSelected ? UITheme.accentSoft : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
-        .help(detailText ?? "")
-        .accessibilityHint(detailText ?? "")
-        .accessibilityIdentifier("session-title-\(slotIndex)")
-        .accessibilityLabel(locale == .en
-            ? "Session \(slotIndex + 1), \(title), \(SessionKeyStatusView.label(for: sessionSlot, locale: locale))"
-            : "会话 \(slotIndex + 1)，\(title)，\(SessionKeyStatusView.label(for: sessionSlot, locale: locale))")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-}
-
-struct SessionKeycapContent: View {
-    let slotIndex: Int
-    let sessionSlot: SessionSlotModel?
-    let showLabels: Bool
-    var locale: ResolvedLocale = .zhHans
-
-    var body: some View {
-        VStack(spacing: 6) {
-            Text("\(slotIndex + 1)")
-                .font(UITheme.heading)
-                .foregroundStyle(UITheme.textPrimary)
-            if showLabels {
-                SessionKeyStatusView(sessionSlot: sessionSlot, locale: locale)
-                    .font(UITheme.caption)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-struct SessionKeyStatusView: View {
-    let sessionSlot: SessionSlotModel?
-    var locale: ResolvedLocale = .zhHans
-
-    nonisolated static func label(for slot: SessionSlotModel?, locale: ResolvedLocale = .zhHans) -> String {
-        guard let slot else { return L10n.tr("未分配", locale) }
-        if slot.title.isEmpty && !slot.hasAssignedPlace { return L10n.tr("未分配", locale) }
-        switch slot.kind {
-        case "Working": return L10n.tr("进行中", locale)
-        case "BlueDotCompleted": return L10n.tr("已完成", locale)
-        case "NeedsAttention": return L10n.tr("待回应", locale)
-        case "Error": return L10n.tr("执行异常", locale)
-        case "Idle": return L10n.tr("就绪", locale)
-        default: return L10n.tr("状态未知", locale)
-        }
-    }
-
-    var body: some View {
-        Text(Self.label(for: sessionSlot, locale: locale))
-            .foregroundStyle(sessionSlot?.isUnreadBlueDot == true ? UITheme.textPrimary : UITheme.textSecondary)
     }
 }

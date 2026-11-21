@@ -185,6 +185,9 @@ impl SessionNavigation {
     pub(super) fn source_for_place(place: &NavigationPlace) -> Option<LiveSessionSource> {
         match place {
             NavigationPlace::Antigravity { .. } => Some(LiveSessionSource::Antigravity),
+            NavigationPlace::App { bundle_id } if bundle_id == "com.google.antigravity" => {
+                Some(LiveSessionSource::Antigravity)
+            }
             NavigationPlace::Codex { .. } => Some(LiveSessionSource::Codex),
             NavigationPlace::Session { adapter, .. } if adapter == "codex" => {
                 Some(LiveSessionSource::Codex)

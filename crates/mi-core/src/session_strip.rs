@@ -273,7 +273,6 @@ impl FourAppSlotTable {
                         status: status_str.to_string(),
                         place: Some(place.clone()),
                         watermark: cand.watermark.clone(),
-                        status_detail: cand.effective_status_detail(acknowledged_watermarks),
                     };
                 }
                 return FourAppSlotSnapshot {
@@ -282,7 +281,6 @@ impl FourAppSlotTable {
                     status: "idle".to_string(),
                     place: Some(place.clone()),
                     watermark: String::new(),
-                    status_detail: None,
                 };
             }
             FourAppSlotSnapshot {
@@ -291,7 +289,6 @@ impl FourAppSlotTable {
                 status: "idle".to_string(),
                 place: None,
                 watermark: String::new(),
-                status_detail: None,
             }
         })
     }
