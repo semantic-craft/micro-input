@@ -105,6 +105,7 @@ pub fn aggregate_session_kind(slot_kinds: &[FourAppSessionKind; SLOT_COUNT]) -> 
     slot_kinds
         .iter()
         .copied()
+        .filter(|&k| !matches!(k, FourAppSessionKind::BlueDotCompleted))
         .max_by_key(|&k| session_kind_urgency(k))
         .unwrap_or(FourAppSessionKind::Idle)
 }
@@ -141,18 +142,6 @@ pub const fn map_session_kind_to_sa_lighting(kind: FourAppSessionKind) -> Desire
         }
         FourAppSessionKind::Error => lit_override(0xFF2200, SaRgbEffect::Breath, 1000, 850),
     }
-}
-
-pub const fn map_session_kind_to_sa_lighting_filtered(
-    kind: FourAppSessionKind,
-    only_attention_or_completed: bool,
-    glow_on_working: bool,
-) -> DesiredSaLighting {
-    let effective = filter_session_kind_for_lighting(kind, glow_on_working);
-    if matches!(effective, FourAppSessionKind::Idle) && !only_attention_or_completed {
-        return lit_override(0x0088FF, SaRgbEffect::Solid, 900, 500);
-    }
-    map_session_kind_to_sa_lighting(effective)
 }
 
 fn merge_sa_kind(

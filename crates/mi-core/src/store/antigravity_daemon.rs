@@ -628,17 +628,14 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
         {
             seen_running_ids.insert(cid.clone());
             (FourAppSessionKind::Working, raw_view_ms)
-        } else if errored
-            || matches!(
-                status_str,
-                "CASCADE_RUN_STATUS_ERROR" | "CASCADE_RUN_STATUS_FAILED"
-            )
-            || term_str == "ERROR"
-            || term_str.ends_with("_ERROR")
-        {
-            seen_running_ids.remove(cid);
-            (FourAppSessionKind::Error, raw_view_ms)
         } else {
+            let is_errored = errored
+                || matches!(
+                    status_str,
+                    "CASCADE_RUN_STATUS_ERROR" | "CASCADE_RUN_STATUS_FAILED"
+                )
+                || term_str == "ERROR"
+                || term_str.ends_with("_ERROR");
             if seen_running_ids.remove(cid) {
                 completed_transition_watermarks.insert(cid.clone(), watermark.clone());
             }
@@ -654,12 +651,16 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
                 }
                 (FourAppSessionKind::Idle, last_modified_ms.max(raw_view_ms))
             } else if has_unviewed || just_transitioned {
-                let adj_view_ms = if last_modified_ms > raw_view_ms.saturating_add(500) {
-                    raw_view_ms
+                if is_errored {
+                    (FourAppSessionKind::Error, raw_view_ms)
                 } else {
-                    last_modified_ms.saturating_sub(1000)
-                };
-                (FourAppSessionKind::BlueDotCompleted, adj_view_ms)
+                    let adj_view_ms = if last_modified_ms > raw_view_ms.saturating_add(500) {
+                        raw_view_ms
+                    } else {
+                        last_modified_ms.saturating_sub(1000)
+                    };
+                    (FourAppSessionKind::BlueDotCompleted, adj_view_ms)
+                }
             } else {
                 (FourAppSessionKind::Idle, raw_view_ms)
             }
@@ -862,7 +863,9 @@ pub(crate) fn poll_codex_session_candidates() -> Option<NavigationCatalog> {
     let frontmost_acknowledged = if observations.iter().any(|obs| {
         matches!(
             obs.status,
-            mi_macos::CodexObservedStatus::Working | mi_macos::CodexObservedStatus::Unread
+            mi_macos::CodexObservedStatus::Working
+                | mi_macos::CodexObservedStatus::Unread
+                | mi_macos::CodexObservedStatus::Error
         )
     }) {
         mi_macos::observe_codex_live_window_signals()

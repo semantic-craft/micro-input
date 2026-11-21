@@ -159,18 +159,14 @@ impl FourAppLightingArbiter {
         };
         if matches!(
             slot.status.as_str(),
-            "waiting"
-                | "waiting_approval"
-                | "needs-interaction"
-                | "needs_interaction"
-                | "error"
-                | "failed"
+            "waiting" | "waiting_approval" | "needs-interaction" | "needs_interaction"
         ) {
             return true;
         }
-        if slot.status == "completed" {
+        if matches!(slot.status.as_str(), "completed" | "error" | "failed") {
             let key = place.target_id();
-            return self.acknowledged_watermarks.get(&key) != Some(&slot.watermark);
+            return slot.watermark.is_empty()
+                || self.acknowledged_watermarks.get(&key) != Some(&slot.watermark);
         }
         false
     }
@@ -187,6 +183,19 @@ impl FourAppLightingArbiter {
                     | "background_active"
                     | "backgroundActive"
             )
+    }
+
+    fn should_light_slot(&self, slot: &FourAppSlotSnapshot) -> bool {
+        if slot.place.is_none() {
+            return false;
+        }
+        if self.is_slot_working(slot) {
+            self.glow_on_working_sessions
+        } else if self.only_glow_on_attention_or_completed {
+            self.is_slot_attention_needed(slot)
+        } else {
+            true
+        }
     }
 
     pub fn acknowledge_slot(&mut self, place: &NavigationPlace, watermark: impl Into<String>) {
@@ -245,21 +254,26 @@ impl FourAppLightingArbiter {
         let working_hex = self.working_color_hex.as_str();
         for (i, key_id) in key_ids.iter().enumerate() {
             if let Some(slot) = slots.get(i).filter(|s| s.place.is_some()) {
-                let (phase, color) = match slot.status.as_str() {
-                    "running" | "runningTool" | "generating" | "busy" | "active" => {
-                        (FourAppAgentPhase::Thinking, working_hex)
+                let (phase, color) = if !self.session_lighting_linked {
+                    (FourAppAgentPhase::Idle, idle_hex)
+                } else {
+                    match slot.status.as_str() {
+                        "running" | "runningTool" | "generating" | "busy" | "active" => {
+                            (FourAppAgentPhase::Thinking, working_hex)
+                        }
+                        "waiting" | "waiting_approval" | "needs-interaction"
+                        | "needs_interaction" => (FourAppAgentPhase::AwaitingInput, "#FFAA00"),
+                        "error" | "failed" if self.is_slot_attention_needed(slot) => {
+                            (FourAppAgentPhase::Error, "#FF2200")
+                        }
+                        "background_active" | "backgroundActive" => {
+                            (FourAppAgentPhase::BackgroundActive, "#AA44FF")
+                        }
+                        "completed" if self.is_slot_attention_needed(slot) => {
+                            (FourAppAgentPhase::Completed, idle_hex)
+                        }
+                        _ => (FourAppAgentPhase::Idle, idle_hex),
                     }
-                    "waiting" | "waiting_approval" | "needs-interaction" | "needs_interaction" => {
-                        (FourAppAgentPhase::AwaitingInput, "#FFAA00")
-                    }
-                    "error" | "failed" => (FourAppAgentPhase::Error, "#FF2200"),
-                    "background_active" | "backgroundActive" => {
-                        (FourAppAgentPhase::BackgroundActive, "#AA44FF")
-                    }
-                    "completed" if self.is_slot_attention_needed(slot) => {
-                        (FourAppAgentPhase::Completed, idle_hex)
-                    }
-                    _ => (FourAppAgentPhase::Idle, idle_hex),
                 };
                 let label = if slot.title.is_empty() {
                     format!("{} slot {i}", slot.app)
@@ -471,9 +485,9 @@ impl FourAppLightingArbiter {
                     "waiting" | "waiting_approval" | "needs-interaction" | "needs_interaction"
                 )
         });
-        let has_error_slot = slots
-            .iter()
-            .any(|s| s.place.is_some() && matches!(s.status.as_str(), "error" | "failed"));
+        let has_error_slot = slots.iter().any(|s| {
+            matches!(s.status.as_str(), "error" | "failed") && self.is_slot_attention_needed(s)
+        });
         let has_any_attention = !attention_slots.is_empty();
 
         let mut dual_zone = self.derive_dual_zone_feedback(phase, dictation_active);
@@ -488,10 +502,7 @@ impl FourAppLightingArbiter {
                 underglow_brightness: 0.0,
                 underglow_speed: 0.0,
             };
-        } else if self.only_glow_on_attention_or_completed
-            && self.manual_preview_phase.is_none()
-            && self.session_lighting_linked
-        {
+        } else if self.only_glow_on_attention_or_completed && self.manual_preview_phase.is_none() {
             dual_zone.backlight_color = "#000000".into();
             dual_zone.backlight_effect = "off".into();
             dual_zone.backlight_brightness = 0.0;
@@ -506,30 +517,78 @@ impl FourAppLightingArbiter {
                 dual_zone.underglow_brightness = (1.0 * clamped_scale).min(1.0);
                 dual_zone.underglow_speed = 0.5;
             } else if phase == FourAppAgentPhase::AwaitingInput || has_awaiting_slot {
-                dual_zone.backlight_color = "#FFAA00".into();
-                dual_zone.backlight_effect = "breath".into();
+                let color = if self.session_lighting_linked {
+                    "#FFAA00".into()
+                } else {
+                    self.idle_color_hex.clone()
+                };
+                let effect = if self.session_lighting_linked {
+                    "breath"
+                } else {
+                    "solid"
+                };
+                dual_zone.backlight_color = color.clone();
+                dual_zone.backlight_effect = effect.into();
                 dual_zone.backlight_brightness = (0.85 * clamped_scale).min(1.0);
-                dual_zone.backlight_speed = 0.75;
-                dual_zone.underglow_color = "#FFAA00".into();
-                dual_zone.underglow_effect = "breath".into();
+                dual_zone.backlight_speed = if self.session_lighting_linked {
+                    0.75
+                } else {
+                    0.5
+                };
+                dual_zone.underglow_color = color;
+                dual_zone.underglow_effect = effect.into();
                 dual_zone.underglow_brightness = (0.95 * clamped_scale).min(1.0);
-                dual_zone.underglow_speed = 0.75;
+                dual_zone.underglow_speed = if self.session_lighting_linked {
+                    0.75
+                } else {
+                    0.5
+                };
             } else if phase == FourAppAgentPhase::Error || has_error_slot {
-                dual_zone.backlight_color = "#FF2200".into();
-                dual_zone.backlight_effect = "breath".into();
+                let color = if self.session_lighting_linked {
+                    "#FF2200".into()
+                } else {
+                    self.idle_color_hex.clone()
+                };
+                let effect = if self.session_lighting_linked {
+                    "breath"
+                } else {
+                    "solid"
+                };
+                dual_zone.backlight_color = color.clone();
+                dual_zone.backlight_effect = effect.into();
                 dual_zone.backlight_brightness = (0.90 * clamped_scale).min(1.0);
-                dual_zone.backlight_speed = 0.85;
-                dual_zone.underglow_color = "#FF2200".into();
-                dual_zone.underglow_effect = "breath".into();
+                dual_zone.backlight_speed = if self.session_lighting_linked {
+                    0.85
+                } else {
+                    0.5
+                };
+                dual_zone.underglow_color = color;
+                dual_zone.underglow_effect = effect.into();
                 dual_zone.underglow_brightness = (1.0 * clamped_scale).min(1.0);
-                dual_zone.underglow_speed = 0.85;
+                dual_zone.underglow_speed = if self.session_lighting_linked {
+                    0.85
+                } else {
+                    0.5
+                };
             } else if self.glow_on_working_sessions
                 && (phase == FourAppAgentPhase::Thinking || !working_slots.is_empty())
             {
-                dual_zone.backlight_color = self.working_color_hex.clone();
-                dual_zone.backlight_effect = "breath".into();
+                dual_zone.backlight_color = if self.session_lighting_linked {
+                    self.working_color_hex.clone()
+                } else {
+                    self.idle_color_hex.clone()
+                };
+                dual_zone.backlight_effect = if self.session_lighting_linked {
+                    "breath".into()
+                } else {
+                    "solid".into()
+                };
                 dual_zone.backlight_brightness = (0.80 * clamped_scale).min(1.0);
-                dual_zone.backlight_speed = 0.65;
+                dual_zone.backlight_speed = if self.session_lighting_linked {
+                    0.65
+                } else {
+                    0.5
+                };
             }
         } else {
             if phase == FourAppAgentPhase::Idle && !dictation_active {
@@ -552,19 +611,15 @@ impl FourAppLightingArbiter {
             has_any_attention,
             is_bottom_row_split,
         );
-        if self.manual_preview_phase.is_none() && self.session_lighting_linked {
+        if self.manual_preview_phase.is_none() {
             let slot_ids = ["AG00", "AG01", "AG02", "AG03", "AG04", "AG05"];
             if self.only_glow_on_attention_or_completed {
                 full_keys = full_keys
                     .into_iter()
                     .map(|item| {
                         if let Some(idx) = slot_ids.iter().position(|k| *k == item.binding_id) {
-                            if let Some(slot) = slots.get(idx) {
-                                if self.is_slot_attention_needed(slot)
-                                    || (self.glow_on_working_sessions && self.is_slot_working(slot))
-                                {
-                                    return item;
-                                }
+                            if slots.get(idx).is_some_and(|s| self.should_light_slot(s)) {
+                                return item;
                             }
                             return PerKeyLightingFeedback {
                                 binding_id: item.binding_id,
@@ -574,14 +629,16 @@ impl FourAppLightingArbiter {
                             };
                         }
                         if item.binding_id == "AG06" && has_any_attention {
-                            let attn_color =
-                                if phase == FourAppAgentPhase::AwaitingInput || has_awaiting_slot {
-                                    "#FFAA00"
-                                } else if phase == FourAppAgentPhase::Error || has_error_slot {
-                                    "#FF2200"
-                                } else {
-                                    self.idle_color_hex.as_str()
-                                };
+                            let attn_color = if !self.session_lighting_linked {
+                                self.idle_color_hex.as_str()
+                            } else if phase == FourAppAgentPhase::AwaitingInput || has_awaiting_slot
+                            {
+                                "#FFAA00"
+                            } else if phase == FourAppAgentPhase::Error || has_error_slot {
+                                "#FF2200"
+                            } else {
+                                self.idle_color_hex.as_str()
+                            };
                             return PerKeyLightingFeedback {
                                 binding_id: item.binding_id,
                                 color: attn_color.into(),
@@ -602,12 +659,12 @@ impl FourAppLightingArbiter {
                         }
                     })
                     .collect();
-            } else if !self.glow_on_working_sessions {
+            } else {
                 full_keys = full_keys
                     .into_iter()
                     .map(|item| {
                         if let Some(idx) = slot_ids.iter().position(|k| *k == item.binding_id) {
-                            if slots.get(idx).is_some_and(|s| self.is_slot_working(s)) {
+                            if slots.get(idx).is_some_and(|s| !self.should_light_slot(s)) {
                                 return PerKeyLightingFeedback {
                                     binding_id: item.binding_id,
                                     color: "#000000".into(),
@@ -773,7 +830,9 @@ impl FourAppLightingArbiter {
                 "waiting" | "waiting_approval" | "needs-interaction" | "needs_interaction" => {
                     (FourAppAgentPhase::AwaitingInput, "#FFAA00")
                 }
-                "error" | "failed" => (FourAppAgentPhase::Error, "#FF2200"),
+                "error" | "failed" if self.is_slot_attention_needed(slot) => {
+                    (FourAppAgentPhase::Error, "#FF2200")
+                }
                 "completed" if self.is_slot_attention_needed(slot) => {
                     (FourAppAgentPhase::Completed, self.idle_color_hex.as_str())
                 }
@@ -786,16 +845,7 @@ impl FourAppLightingArbiter {
                 _ => (FourAppAgentPhase::Idle, self.idle_color_hex.as_str()),
             }
         };
-        let should_light = if !self.session_lighting_linked {
-            !self.only_glow_on_attention_or_completed
-        } else if self.is_slot_working(slot) {
-            self.glow_on_working_sessions
-        } else if self.only_glow_on_attention_or_completed {
-            self.is_slot_attention_needed(slot)
-        } else {
-            true
-        };
-        if !should_light {
+        if !self.should_light_slot(slot) {
             return (OaiKeyStatusEntry::with_style(key, 0, 0.0, 0, 0.65), None);
         }
         let color = parse_hex_rgb(hex).unwrap_or(0);
@@ -964,25 +1014,6 @@ impl FourAppLightingArbiter {
         self.hardware_synced
     }
 
-    pub fn reconcile_six_layer_confirmed_for_layers(
-        &mut self,
-        layer1_slots: &[FourAppSlotSnapshot],
-        layer2_slots: &[FourAppSlotSnapshot],
-        layer3_slots: &[FourAppSlotSnapshot],
-        preferred_layer: u8,
-        confirmed_digest: Option<&str>,
-    ) -> bool {
-        let entries = self.six_layer_thstatus_entries_for_layers(
-            layer1_slots,
-            layer2_slots,
-            layer3_slots,
-            preferred_layer,
-        );
-        self.last_six_layer_entries = Some(entries.clone());
-        let digest = sha256_hex(&serde_json::to_vec(&entries).unwrap_or_default());
-        self.apply_six_layer_confirmation(&digest, confirmed_digest)
-    }
-
     pub fn sync_six_layer_hardware<F>(&mut self, queue_and_read_confirmed: F) -> bool
     where
         F: FnOnce(&str, &[OaiKeyStatusEntry]) -> Result<Option<String>, String>,
@@ -1008,6 +1039,10 @@ impl FourAppLightingArbiter {
         };
         let digest = sha256_hex(&serde_json::to_vec(&entries).unwrap_or_default());
         self.apply_six_layer_confirmation(&digest, confirmed_digest)
+    }
+
+    pub fn last_six_layer_entries(&self) -> Option<&[OaiKeyStatusEntry]> {
+        self.last_six_layer_entries.as_deref()
     }
 
     pub fn release(&mut self) {
@@ -1398,5 +1433,53 @@ mod tests {
             arbiter.last_synced_payload_digest.as_deref(),
             Some(off_digest.as_str())
         );
+    }
+
+    #[test]
+    fn unlinked_session_lighting_and_error_watermark_acknowledgement_align_ui_and_hardware() {
+        let mut arbiter = FourAppLightingArbiter::new();
+        arbiter.session_lighting_linked = false;
+        let err_place = NavigationPlace::antigravity("conv-err", "/tmp/ws");
+        let run_place = NavigationPlace::antigravity("conv-run", "/tmp/ws");
+        let slots = vec![
+            FourAppSlotSnapshot {
+                app: "antigravity".into(),
+                title: "Errored".into(),
+                status: "error".into(),
+                place: Some(err_place.clone()),
+                watermark: "err:1".into(),
+            },
+            FourAppSlotSnapshot {
+                app: "antigravity".into(),
+                title: "Running".into(),
+                status: "running".into(),
+                place: Some(run_place),
+                watermark: "run:1".into(),
+            },
+        ];
+
+        arbiter.recompute_feedback(FourAppAgentPhase::Error, &slots, false, false, false, false);
+        assert_eq!(arbiter.full_keypad_feedback[0].color, "#0088FF");
+        assert_eq!(arbiter.full_keypad_feedback[1].color, "#000000");
+        assert_eq!(
+            arbiter.dual_zone_feedback.as_ref().unwrap().underglow_color,
+            "#0088FF"
+        );
+        let unlinked_entries = arbiter.six_layer_thstatus_entries_for_layers(&[], &slots, &[], 2);
+        assert_eq!(unlinked_entries[6].c, 0x0088FF);
+        assert_eq!(unlinked_entries[7].c, 0);
+
+        arbiter.session_lighting_linked = true;
+        arbiter.acknowledge_slot(&err_place, "err:1");
+        assert!(!arbiter.is_slot_attention_needed(&slots[0]));
+        arbiter.recompute_feedback(FourAppAgentPhase::Idle, &slots, false, false, false, false);
+        assert_eq!(arbiter.full_keypad_feedback[0].color, "#000000");
+        assert_eq!(
+            arbiter.dual_zone_feedback.as_ref().unwrap().underglow_color,
+            "#000000"
+        );
+        let acked_entries = arbiter.six_layer_thstatus_entries_for_layers(&[], &slots, &[], 2);
+        assert_eq!(acked_entries[6].c, 0);
+        assert!(acked_entries.iter().all(|e| !e.sa));
     }
 }

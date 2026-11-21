@@ -35,6 +35,8 @@ impl WorkbenchStore {
         self.document_store
             .save_board_configuration(plan, preview, usb)
             .map_err(WorkbenchError::Storage)?;
+        self.sync_six_layer_routing_context();
+        self.refresh_four_app_lighting();
         self.commit_local_update();
         Ok(())
     }
@@ -1035,7 +1037,7 @@ impl WorkbenchStore {
                 self.document_store
                     .update(|draft| draft.assign(&json!(pid), &json!(lid), slot, action))
                     .map_err(WorkbenchError::Storage)?;
-                self.sync_v070_session_sa_rgb();
+                self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -1134,12 +1136,13 @@ impl WorkbenchStore {
                 Ok(())
             }
             SessionStripAction::AcknowledgeAllCompleted => {
+                let acks_before = &self.lighting_arbiter.acknowledged_watermarks;
                 let to_ack: Vec<_> = self
                     .slot_table
                     .candidates()
                     .iter()
                     .chain(self.codex_slot_table.candidates().iter())
-                    .filter(|c| c.has_unviewed_completion_timestamp())
+                    .filter(|c| c.is_unacknowledged(acks_before) && !c.watermark.is_empty())
                     .map(|c| (c.place.clone(), c.watermark.clone()))
                     .collect();
                 for (place, wm) in to_ack {
@@ -1177,7 +1180,7 @@ impl WorkbenchStore {
                     self.slot_role_overrides.remove(&(pid.clone(), slot));
                     self.keycap_overrides.remove(&(pid.clone(), slot));
                 }
-                self.sync_v070_session_sa_rgb();
+                self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -1276,7 +1279,7 @@ impl WorkbenchStore {
                 self.bottom_row_layout = BottomRowLayout::Split;
                 self.merge_wide_key.store(false, Ordering::SeqCst);
                 self.normalize_surface_for_current_layer();
-                self.sync_v070_session_sa_rgb();
+                self.refresh_four_app_lighting();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -1438,10 +1441,49 @@ impl WorkbenchStore {
             mode: self.build_six_layer_routing_mode(),
             bundle_id: self.foreground_bundle_id.clone(),
         };
+        let board_ctx = crate::six_layer_runtime::RoutingContext {
+            mode: self.build_board_layers_routing_mode(),
+            bundle_id: None,
+        };
+        let is_pinned_mode = matches!(
+            ctx.mode,
+            crate::six_layer_runtime::SixLayerRoutingMode::ManualPinned(_)
+                | crate::six_layer_runtime::SixLayerRoutingMode::Locked(_)
+        );
+        let board_slot_binds_session_open = |control_layer: u8, slot_idx: usize| -> bool {
+            if let Some((_, ResolvedHostAction::AgentCommand { command, .. })) =
+                board_ctx.resolve_control(plan, control_layer, slot_idx)
+            {
+                return command
+                    .strip_prefix("slot-open:")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .is_some_and(|idx| idx < SLOT_COUNT);
+            }
+            control_layer == 1
+                && slot_idx < SLOT_COUNT
+                && matches!(
+                    &board_ctx.mode,
+                    crate::six_layer_runtime::SixLayerRoutingMode::BoardLayers {
+                        layer_one: None,
+                        ..
+                    }
+                )
+                && matches!(
+                    plan.desired
+                        .route(mi_model::board_layers::BoardLayer::ALL[0]),
+                    mi_model::board_layers::BoardLayerRoute::Native {
+                        owner: mi_model::board_layers::NativeLayerOwner::Codex,
+                        ..
+                    }
+                )
+        };
         let ag_snapshots = self.slot_table.lighting_snapshots(acks);
         let codex_snapshots = self.codex_slot_table.lighting_snapshots(acks);
         let snapshots_for_layer = |control_layer: u8| {
             std::array::from_fn(|slot_idx| {
+                if is_pinned_mode && !board_slot_binds_session_open(control_layer, slot_idx) {
+                    return empty_snapshot();
+                }
                 let Some((profile_id, action)) = ctx.resolve_control(plan, control_layer, slot_idx)
                 else {
                     return empty_snapshot();
@@ -1510,6 +1552,31 @@ impl WorkbenchStore {
                             .and_then(|r| r.queue_session_lighting(digest, entries)))
                     },
                 );
+                if self.lighting_arbiter.manual_preview_phase.is_none()
+                    && self.lighting_arbiter.lighting_enabled
+                    && !is_protected
+                    && self.lighting_arbiter.brightness_scale > 0.0
+                {
+                    if let Some(sa_color) = self
+                        .lighting_arbiter
+                        .last_six_layer_entries()
+                        .and_then(|entries| entries.iter().find(|e| e.sa && e.c != 0 && e.b > 0.0))
+                        .map(|e| e.c)
+                    {
+                        let clamped = self.lighting_arbiter.brightness_scale.clamp(0.15, 1.0);
+                        let (ug_brightness, ug_speed) = if sa_color == 0xFF2200 {
+                            ((1.0 * clamped).min(1.0), 0.85)
+                        } else {
+                            ((0.95 * clamped).min(1.0), 0.75)
+                        };
+                        if let Some(dz) = self.lighting_arbiter.dual_zone_feedback.as_mut() {
+                            dz.underglow_color = format!("#{:06X}", sa_color & 0xFF_FFFF);
+                            dz.underglow_effect = "breath".into();
+                            dz.underglow_brightness = ug_brightness;
+                            dz.underglow_speed = ug_speed;
+                        }
+                    }
+                }
             }
             self.sync_v070_session_sa_rgb();
             return;

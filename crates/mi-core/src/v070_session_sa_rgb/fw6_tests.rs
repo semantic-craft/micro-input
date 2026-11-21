@@ -874,3 +874,31 @@ fn partial_chunk_failure_commits_earlier_chunks_backs_off_halts_at_3_failures_an
     );
     responder.abort();
 }
+
+#[test]
+fn completed_blue_dot_lights_bound_slot_without_lighting_non_slot_ambient_sa() {
+    let custom = sample_custom_layer(&[
+        "SA_101", "KC_NO", "KC_NO", "KC_NO", "KC_NO", "KC_NO", "SA_199",
+    ]);
+    let completed_only = [
+        FourAppSessionKind::BlueDotCompleted,
+        FourAppSessionKind::Idle,
+        FourAppSessionKind::Idle,
+        FourAppSessionKind::Idle,
+        FourAppSessionKind::Idle,
+        FourAppSessionKind::Idle,
+    ];
+    let LayerLightingResolution::Active(desired) =
+        resolve_desired_for_device_layer(&custom, &completed_only, Some(sa(199)))
+    else {
+        panic!("expected Active resolution");
+    };
+    assert_eq!(desired.get(&sa(101)), Some(&completed_style()));
+    assert!(!desired.contains_key(&sa(199)));
+
+    let no_slot_sa = sample_custom_layer(&["KC_A", "KC_B"]);
+    assert_eq!(
+        resolve_desired_for_device_layer(&no_slot_sa, &completed_only, Some(sa(199))),
+        LayerLightingResolution::Active(BTreeMap::new())
+    );
+}

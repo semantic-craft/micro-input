@@ -139,6 +139,16 @@ struct PendingNavigation {
 type NavigationTestWorker =
     Box<dyn FnOnce(NavigationPlace, mpsc::SyncSender<Result<NavigationPlace, String>>)>;
 
+pub(super) struct NavigationCommandRequest {
+    pub command: NavigationCommand,
+    pub intent_source: Option<LiveSessionSource>,
+    pub revision: Option<u64>,
+    pub input_generation: Option<NavigationInputLease>,
+    pub profile: String,
+    pub binding: String,
+    pub commit: bool,
+}
+
 pub(super) struct SessionNavigation {
     pub catalog: Option<NavigationCatalog>,
     pub antigravity_catalog: Option<NavigationCatalog>,
@@ -302,14 +312,13 @@ impl WorkbenchStore {
                 pending.cancelled.store(true, Ordering::Release);
             }
         }
-        let desired = self.desired_live_session_source();
         while let Ok(intent) = self.session_navigation.intents.try_recv() {
             self.session_navigation.queued_intents.push_back(intent);
         }
-        self.session_navigation.queued_intents.retain(|intent| {
-            let src = intent.source.unwrap_or(desired);
-            src != source
-        });
+        self.session_navigation
+            .queued_intents
+            .retain(|intent| intent.source != Some(source));
+        let desired = self.desired_live_session_source();
         let mut slots = self.session_navigation.dispatch.slots.lock().unwrap();
         match source {
             LiveSessionSource::Antigravity => slots.antigravity_revision += 1,
@@ -390,7 +399,7 @@ impl WorkbenchStore {
             .catalog_for_source(source)
             .map(|c| &c.instance)
             != catalog.as_ref().map(|c| &c.instance);
-        if changed_instance || catalog.is_none() {
+        if changed_instance {
             self.cancel_session_navigation_for_source(source);
         }
         let mut ack_changed = false;
@@ -457,6 +466,15 @@ impl WorkbenchStore {
             } else {
                 self.refresh_navigation_revision();
             }
+        } else if !self.slot_table_for_source(source).candidates().is_empty()
+            || self
+                .slot_table_for_source(source)
+                .slot_table()
+                .slots()
+                .iter()
+                .any(|s| s.place.is_some() && s.mode != mi_model::slot_table::SlotMode::Pinned)
+        {
+            self.ingest_candidates_for_source(source, Vec::new());
         } else if ack_changed {
             let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
             self.slot_table_for_source_mut(source)
@@ -512,30 +530,35 @@ impl WorkbenchStore {
         binding: String,
         commit: bool,
     ) {
-        self.request_navigation_command_for_source_with_commit(
+        self.request_navigation_command_for_source_with_commit(NavigationCommandRequest {
             command,
-            None,
+            intent_source: None,
             revision,
             input_generation,
             profile,
             binding,
             commit,
-        );
+        });
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn request_navigation_command_for_source_with_commit(
         &mut self,
-        command: NavigationCommand,
-        intent_source: Option<LiveSessionSource>,
-        revision: Option<u64>,
-        input_generation: Option<NavigationInputLease>,
-        profile: String,
-        binding: String,
-        commit: bool,
+        req: NavigationCommandRequest,
     ) {
+        let NavigationCommandRequest {
+            command,
+            intent_source,
+            revision,
+            input_generation,
+            profile,
+            binding,
+            commit,
+        } = req;
         let target_source = intent_source.unwrap_or_else(|| self.source_for_profile_id(&profile));
-        if revision.is_some_and(|rev| {
+        if !matches!(
+            command,
+            NavigationCommand::Back | NavigationCommand::Forward
+        ) && revision.is_some_and(|rev| {
             let slots = self.session_navigation.dispatch.slots.lock().unwrap();
             let expected = match intent_source {
                 Some(src) => slots.revision_for_source(src),
@@ -841,18 +864,18 @@ impl WorkbenchStore {
                 && intent.received_at.elapsed() < Duration::from_secs(2)
                 && self.system_lifecycle == SystemLifecycle::Awake
             {
-                self.request_navigation_command_for_source_with_commit(
-                    intent.command,
-                    intent.source,
-                    Some(intent.revision),
-                    Some(NavigationInputLease::SixLayer(
+                self.request_navigation_command_for_source_with_commit(NavigationCommandRequest {
+                    command: intent.command,
+                    intent_source: intent.source,
+                    revision: Some(intent.revision),
+                    input_generation: Some(NavigationInputLease::SixLayer(
                         intent.input_generation,
                         intent.admission,
                     )),
-                    intent.profile,
-                    intent.binding,
-                    false,
-                );
+                    profile: intent.profile,
+                    binding: intent.binding,
+                    commit: false,
+                });
                 dirty = true;
             }
         }
@@ -2998,7 +3021,7 @@ mod tests {
             .unwrap();
         let after = store.projection();
         assert_eq!(after.session_strip.unread_completed_count, 0);
-        assert_eq!(after.session_strip.attention_count, 2);
+        assert_eq!(after.session_strip.attention_count, 1);
         let after_titles: Vec<&str> = after
             .session_strip
             .slots
@@ -3009,11 +3032,11 @@ mod tests {
             after_titles,
             vec![
                 "Attention Oldest",
-                "Error Older",
                 "Working 7",
                 "Working 6",
                 "Working 5",
                 "Working 4",
+                "Working 3",
             ]
         );
     }
@@ -3220,5 +3243,532 @@ mod tests {
                 .shutdown(&store.tokio_runtime)
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn auto_connect_usb_startup_preserves_response_driven_lighting_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = WorkbenchStoreConfig::isolated(dir.path());
+        cfg.auto_connect_usb = true;
+        let store = WorkbenchStore::open(cfg).unwrap();
+        assert!(store.lighting_popover.only_glow_on_attention_or_completed);
+        assert!(store.lighting_arbiter.only_glow_on_attention_or_completed);
+        assert!(!store.lighting_popover.glow_on_working);
+        assert!(!store.lighting_arbiter.glow_on_working_sessions);
+    }
+
+    #[test]
+    fn antigravity_and_codex_error_sessions_acknowledge_on_read_frontmost_jump_and_clear_all() {
+        let payload = serde_json::json!({
+            "err-read": {
+                "summary": "Already Viewed Error",
+                "status": "CASCADE_RUN_STATUS_ERROR",
+                "lastModifiedTime": "2026-04-19T10:00:00Z",
+                "annotations": {"lastUserViewTime": "2026-04-19T10:05:00Z"},
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "err-frontmost": {
+                "summary": "Frontmost Error",
+                "status": "CASCADE_RUN_STATUS_FAILED",
+                "lastModifiedTime": "2026-04-19T11:00:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "err-unread": {
+                "summary": "Unread Error",
+                "status": "CASCADE_RUN_STATUS_ERROR",
+                "lastModifiedTime": "2026-04-19T12:00:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            }
+        });
+        let mut seen_running = BTreeSet::new();
+        let mut transition_watermarks = BTreeMap::new();
+        let (rows, _, front_ack) = classify_antigravity_trajectory_summaries(
+            payload.as_object().unwrap(),
+            Some("err-frontmost"),
+            &mut seen_running,
+            &mut transition_watermarks,
+        );
+        let phase_of = |cid: &str| {
+            rows.iter()
+                .find(|r| r.place == NavigationPlace::antigravity(cid, "/work/repo"))
+                .unwrap()
+                .phase
+        };
+        assert_eq!(phase_of("err-read"), FourAppSessionKind::Idle);
+        assert_eq!(phase_of("err-frontmost"), FourAppSessionKind::Idle);
+        assert_eq!(phase_of("err-unread"), FourAppSessionKind::Error);
+        assert_eq!(
+            front_ack.as_ref().map(|(p, _)| p),
+            Some(&NavigationPlace::antigravity("err-frontmost", "/work/repo"))
+        );
+
+        let (dir, mut store) = store();
+        let err_place = NavigationPlace::antigravity("err-unread", "/work/repo");
+        store.update_navigation_catalog_for_source(
+            LiveSessionSource::Antigravity,
+            Some(catalog(rows, "/tmp/hub")),
+        );
+        assert_eq!(store.projection().canvas.underglow_hex, "#FF2200");
+
+        let rx = worker(&mut store);
+        store.request_session_navigation(err_place.clone());
+        let (target, reply) = rx.recv().unwrap();
+        assert_eq!(target, err_place);
+        reply.send(Ok(err_place)).unwrap();
+        store.poll_session_navigation();
+        assert_eq!(store.projection().canvas.underglow_hex, "#000000");
+        assert_eq!(store.projection().session_strip.attention_count, 0);
+
+        let codex_cat = codex_observations_to_catalog(
+            dir.path().join("codex-home"),
+            &[codex_obs(
+                "c-err-1",
+                "local",
+                "Codex Unread Fail",
+                mi_macos::CodexObservedStatus::Error,
+                5_000,
+                "wm-cerr-1",
+            )],
+        );
+        let local_codex = store.local_codex_profile_id().unwrap();
+        store.select_and_activate_profile(&local_codex).unwrap();
+        store.update_navigation_catalog_for_source(LiveSessionSource::Codex, Some(codex_cat));
+        assert_eq!(store.projection().canvas.underglow_hex, "#FF2200");
+
+        store
+            .dispatch_session_strip_action(SessionStripAction::AcknowledgeAllCompleted)
+            .unwrap();
+        assert_eq!(store.projection().canvas.underglow_hex, "#000000");
+        assert_eq!(store.projection().session_strip.attention_count, 0);
+    }
+
+    #[test]
+    fn source_exit_clears_stale_attention_leds_while_repeated_none_polls_do_not_churn_revision_or_drop_back(
+    ) {
+        #[cfg(unix)]
+        {
+            use mi_transport::ActivationPayload;
+            use std::os::unix::net::UnixDatagram;
+
+            let (dir, mut store) = store();
+            let ag_pid = store
+                .find_canonical_profile_id(CanonicalAgent::Antigravity)
+                .unwrap();
+            store.select_and_activate_profile(&ag_pid).unwrap();
+            store
+                .dispatch_canvas_action(crate::canvas::CanvasAction::AssignSlotAction {
+                    slot: 6,
+                    action_id: "navigate-back".into(),
+                })
+                .unwrap();
+            store.six_layer_user_pinned = false;
+            store.set_host_execution_enabled(true).unwrap();
+
+            let session = {
+                let _entered = store.tokio_runtime.enter();
+                let (link, _) = mi_transport::MockLink::new();
+                DeviceSession::new(
+                    link,
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig::default(),
+                )
+            };
+            let mut running =
+                crate::six_layer_runtime::RunningSixLayer::isolated(session, dir.path());
+            running.installation.plan =
+                store.projection_inputs().compiled_six_layer_plan().unwrap();
+            running.set_routing_context(store.build_six_layer_routing_mode(), None);
+            running.navigation = Some(store.session_navigation.dispatch.clone());
+            running.receiver.arm().unwrap();
+            running.set_execution_policy(true, true, Instant::now() - Duration::from_secs(1));
+            let receiver = running.receiver.clone();
+            running.observed_layer.store(2, Ordering::Release);
+            let first_verified = running.first_event_verified.clone();
+            running.start_executor(Arc::clone(&store.live_executor));
+            store.six_layer_running = Some(running);
+
+            store.update_navigation_catalog_for_source(
+                LiveSessionSource::Antigravity,
+                Some(catalog(
+                    vec![FourAppLiveCandidate {
+                        place: NavigationPlace::antigravity("ag-wait", "/work"),
+                        title: "AG Waiting".into(),
+                        phase: FourAppSessionKind::NeedsAttention,
+                        watermark: "wm-wait".into(),
+                        last_modified_ms: 2_000,
+                        last_user_view_ms: 2_000,
+                        updated_at_ms: 2_000,
+                    }],
+                    "/tmp/hub",
+                )),
+            );
+            assert_eq!(store.projection().canvas.underglow_hex, "#FFAA00");
+            assert_eq!(store.projection().session_strip.attention_count, 1);
+
+            let back_payload =
+                serde_json::to_vec(&ActivationPayload::new(receiver.generation(), 6)).unwrap();
+            UnixDatagram::unbound()
+                .unwrap()
+                .send_to(&back_payload, receiver.path())
+                .unwrap();
+            let delivery_deadline = Instant::now() + Duration::from_secs(2);
+            while !first_verified.load(Ordering::Acquire) {
+                assert!(Instant::now() < delivery_deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::thread::sleep(Duration::from_millis(15));
+
+            store.update_navigation_catalog_for_source(LiveSessionSource::Antigravity, None);
+            assert_eq!(store.projection().canvas.underglow_hex, "#000000");
+            assert_eq!(store.projection().session_strip.attention_count, 0);
+            assert_eq!(store.session_navigation.queued_intents.len(), 1);
+            assert_eq!(
+                store.session_navigation.queued_intents[0].command,
+                NavigationCommand::Back
+            );
+
+            let rev_after_exit = {
+                let slots = store.session_navigation.dispatch.slots.lock().unwrap();
+                (
+                    slots.revision,
+                    slots.antigravity_revision,
+                    slots.codex_revision,
+                )
+            };
+            let commits_after_exit = store.commit_local_update_count;
+
+            store.update_navigation_catalog_for_source(LiveSessionSource::Antigravity, None);
+            let rev_after_repeat = {
+                let slots = store.session_navigation.dispatch.slots.lock().unwrap();
+                (
+                    slots.revision,
+                    slots.antigravity_revision,
+                    slots.codex_revision,
+                )
+            };
+            assert_eq!(rev_after_repeat, rev_after_exit);
+            assert_eq!(store.commit_local_update_count, commits_after_exit);
+            assert_eq!(store.session_navigation.queued_intents.len(), 1);
+
+            store
+                .six_layer_running
+                .take()
+                .unwrap()
+                .shutdown(&store.tokio_runtime)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn reassigned_board_layer_aligns_source_cross_layer_back_ignores_slot_churn_and_manual_pin_unpin_resyncs(
+    ) {
+        #[cfg(unix)]
+        {
+            use mi_transport::ActivationPayload;
+            use std::os::unix::net::UnixDatagram;
+
+            let (dir, mut store) = store();
+            let local_codex = store.local_codex_profile_id().unwrap();
+            let ag_pid = store
+                .find_canonical_profile_id(CanonicalAgent::Antigravity)
+                .unwrap();
+            store.select_and_activate_profile(&local_codex).unwrap();
+            store
+                .dispatch_session_strip_action(SessionStripAction::BindTopSixAsSessionKeys)
+                .unwrap();
+            store
+                .dispatch_canvas_action(crate::canvas::CanvasAction::AssignSlotAction {
+                    slot: 6,
+                    action_id: "navigate-back".into(),
+                })
+                .unwrap();
+            store.select_and_activate_profile(&ag_pid).unwrap();
+            store
+                .dispatch_canvas_action(crate::canvas::CanvasAction::AssignSlotAction {
+                    slot: 6,
+                    action_id: "navigate-back".into(),
+                })
+                .unwrap();
+            store.six_layer_user_pinned = false;
+            store.set_host_execution_enabled(true).unwrap();
+
+            let session = {
+                let _entered = store.tokio_runtime.enter();
+                let (link, _) = mi_transport::MockLink::new();
+                DeviceSession::new(
+                    link,
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig::default(),
+                )
+            };
+            let session_id = session.id;
+            let mut running =
+                crate::six_layer_runtime::RunningSixLayer::isolated(session, dir.path());
+            running.installation.plan =
+                store.projection_inputs().compiled_six_layer_plan().unwrap();
+            running.set_routing_context(store.build_six_layer_routing_mode(), None);
+            running.navigation = Some(store.session_navigation.dispatch.clone());
+            running.receiver.arm().unwrap();
+            running.set_execution_policy(true, true, Instant::now() - Duration::from_secs(1));
+            let receiver = running.receiver.clone();
+            running.start_executor(Arc::clone(&store.live_executor));
+            store.six_layer_running = Some(running);
+            store
+                .assign_board_layer(
+                    mi_model::board_layers::BoardLayer::ALL[1],
+                    Some(local_codex.clone()),
+                )
+                .unwrap();
+
+            let codex_place = NavigationPlace::codex("c-reassigned", "local", "/work/codex-repo");
+            let codex_cat = codex_observations_to_catalog(
+                dir.path().join("codex-home"),
+                &[codex_obs(
+                    "c-reassigned",
+                    "local",
+                    "Codex On Layer 2",
+                    mi_macos::CodexObservedStatus::NeedsAttention,
+                    3_000,
+                    "wm-cr2",
+                )],
+            );
+            store.update_navigation_catalog_for_source(LiveSessionSource::Codex, Some(codex_cat));
+            let ag_place = NavigationPlace::antigravity("ag-1", "/work/ag-repo");
+            store.update_navigation_catalog_for_source(
+                LiveSessionSource::Antigravity,
+                Some(catalog(
+                    vec![FourAppLiveCandidate {
+                        place: ag_place.clone(),
+                        title: "AG Idle".into(),
+                        phase: FourAppSessionKind::Idle,
+                        watermark: "wm-ag1".into(),
+                        last_modified_ms: 1_000,
+                        last_user_view_ms: 1_000,
+                        updated_at_ms: 1_000,
+                    }],
+                    "/tmp/hub",
+                )),
+            );
+
+            assert_eq!(store.projection().canvas.underglow_hex, "#FFAA00");
+
+            let rx1 = worker(&mut store);
+            let payload_l2_slot0 =
+                serde_json::to_vec(&ActivationPayload::new(receiver.generation(), 0)).unwrap();
+            UnixDatagram::unbound()
+                .unwrap()
+                .send_to(&payload_l2_slot0, receiver.path())
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while store.session_navigation.pending.is_none() {
+                assert!(Instant::now() < deadline);
+                store.poll_session_navigation();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let (jumped_codex, reply1) = rx1.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(jumped_codex, codex_place);
+            reply1.send(Ok(codex_place.clone())).unwrap();
+            store.poll_session_navigation();
+
+            let rx2 = worker(&mut store);
+            store.request_session_navigation(ag_place.clone());
+            let (_, reply2) = rx2.recv().unwrap();
+            reply2.send(Ok(ag_place.clone())).unwrap();
+            store.poll_session_navigation();
+            assert_eq!(store.navigation_history.current(), Some(&ag_place));
+
+            let rx_back = worker(&mut store);
+            let payload_l2_back =
+                serde_json::to_vec(&ActivationPayload::new(receiver.generation(), 6)).unwrap();
+            UnixDatagram::unbound()
+                .unwrap()
+                .send_to(&payload_l2_back, receiver.path())
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            store.update_navigation_catalog_for_source(
+                LiveSessionSource::Antigravity,
+                Some(catalog(
+                    vec![
+                        FourAppLiveCandidate {
+                            place: ag_place,
+                            title: "AG Idle".into(),
+                            phase: FourAppSessionKind::Idle,
+                            watermark: "wm-ag1".into(),
+                            last_modified_ms: 1_000,
+                            last_user_view_ms: 1_000,
+                            updated_at_ms: 1_000,
+                        },
+                        FourAppLiveCandidate {
+                            place: NavigationPlace::antigravity("ag-2", "/work/ag-repo"),
+                            title: "AG Extra".into(),
+                            phase: FourAppSessionKind::Working,
+                            watermark: "wm-ag2".into(),
+                            last_modified_ms: 4_000,
+                            last_user_view_ms: 4_000,
+                            updated_at_ms: 4_000,
+                        },
+                    ],
+                    "/tmp/hub",
+                )),
+            );
+            let back_deadline = Instant::now() + Duration::from_secs(2);
+            while store.session_navigation.pending.is_none() {
+                assert!(
+                    Instant::now() < back_deadline,
+                    "cross-layer Back must not fail with blocked:session_slots_changed"
+                );
+                store.poll_session_navigation();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let (back_target, reply_back) = rx_back.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(back_target, codex_place);
+            reply_back.send(Ok(codex_place)).unwrap();
+            store.poll_session_navigation();
+
+            store
+                .assign_board_layer(
+                    mi_model::board_layers::BoardLayer::ALL[1],
+                    Some(ag_pid.clone()),
+                )
+                .unwrap();
+            store.select_and_activate_profile(&ag_pid).unwrap();
+            assert!(store.six_layer_user_pinned);
+            store.refresh_four_app_lighting();
+            let pinned_entries = store.lighting_arbiter.last_six_layer_entries().unwrap();
+            assert!(pinned_entries[12..18]
+                .iter()
+                .all(|e| e.c == 0 && e.e == 0 && !e.sa));
+            assert_eq!(pinned_entries[0].c, 0);
+
+            store.handle_v070_profile_layer_changed(session_id, 0, 1);
+            assert!(!store.six_layer_user_pinned);
+            let unpinned_entries = store.lighting_arbiter.last_six_layer_entries().unwrap();
+            assert_eq!(unpinned_entries[0].c, 0xFFAA00);
+            assert!(unpinned_entries[0].sa);
+
+            store
+                .six_layer_running
+                .take()
+                .unwrap()
+                .shutdown(&store.tokio_runtime)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn slot_and_layout_actions_immediately_refresh_six_layer_thstatus_entries() {
+        let (dir, mut store) = store();
+        let ag_pid = store
+            .find_canonical_profile_id(CanonicalAgent::Antigravity)
+            .unwrap();
+        store.select_and_activate_profile(&ag_pid).unwrap();
+        store.six_layer_user_pinned = false;
+
+        let session = {
+            let _entered = store.tokio_runtime.enter();
+            let (link, _) = mi_transport::MockLink::new();
+            DeviceSession::new(
+                link,
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        let mut template_running =
+            crate::six_layer_runtime::RunningSixLayer::isolated(session, dir.path());
+        template_running.installation.plan =
+            store.projection_inputs().compiled_six_layer_plan().unwrap();
+        store.six_layer_state.installation = Some(template_running.installation.clone());
+        template_running.shutdown(&store.tokio_runtime).unwrap();
+
+        store.update_navigation_catalog_for_source(
+            LiveSessionSource::Antigravity,
+            Some(catalog(
+                vec![FourAppLiveCandidate {
+                    place: NavigationPlace::antigravity("ag-attn", "/work"),
+                    title: "AG Attention".into(),
+                    phase: FourAppSessionKind::NeedsAttention,
+                    watermark: "wm-attn".into(),
+                    last_modified_ms: 5_000,
+                    last_user_view_ms: 5_000,
+                    updated_at_ms: 5_000,
+                }],
+                "/tmp/hub",
+            )),
+        );
+        assert_eq!(
+            store.lighting_arbiter.last_six_layer_entries().unwrap()[6].c,
+            0xFFAA00
+        );
+
+        store
+            .dispatch_canvas_action(crate::canvas::CanvasAction::SelectLogicalSlot(0))
+            .unwrap();
+        store
+            .dispatch_inspector_action(crate::inspector::InspectorAction::UnassignSelectedSlot)
+            .unwrap();
+        assert_eq!(
+            store.lighting_arbiter.last_six_layer_entries().unwrap()[6].c,
+            0
+        );
+
+        store.undo_draft(false).unwrap();
+        assert_eq!(
+            store.lighting_arbiter.last_six_layer_entries().unwrap()[6].c,
+            0xFFAA00
+        );
+
+        store
+            .dispatch_inspector_action(crate::inspector::InspectorAction::UnassignSelectedSlot)
+            .unwrap();
+        assert_eq!(
+            store.lighting_arbiter.last_six_layer_entries().unwrap()[6].c,
+            0
+        );
+
+        store
+            .dispatch_canvas_action(crate::canvas::CanvasAction::AssignSlotAction {
+                slot: 0,
+                action_id: "slot-open-0".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            store.lighting_arbiter.last_six_layer_entries().unwrap()[6].c,
+            0xFFAA00
+        );
+
+        store
+            .dispatch_inspector_action(crate::inspector::InspectorAction::UnassignSelectedSlot)
+            .unwrap();
+        assert_eq!(
+            store.lighting_arbiter.last_six_layer_entries().unwrap()[6].c,
+            0
+        );
+
+        store
+            .dispatch_session_strip_action(SessionStripAction::BindTopSixAsSessionKeys)
+            .unwrap();
+        assert_eq!(
+            store.lighting_arbiter.last_six_layer_entries().unwrap()[6].c,
+            0xFFAA00
+        );
+
+        store
+            .dispatch_inspector_action(crate::inspector::InspectorAction::UnassignSelectedSlot)
+            .unwrap();
+        assert_eq!(
+            store.lighting_arbiter.last_six_layer_entries().unwrap()[6].c,
+            0
+        );
+
+        store
+            .dispatch_session_strip_action(SessionStripAction::RestoreDefaultLayout)
+            .unwrap();
+        assert_eq!(
+            store.lighting_arbiter.last_six_layer_entries().unwrap()[6].c,
+            0xFFAA00
+        );
     }
 }

@@ -55,15 +55,30 @@ impl FourAppLiveCandidate {
             && self.last_modified_ms > self.last_user_view_ms.saturating_add(500)
     }
 
-    pub fn is_unread_blue_dot(&self, acknowledged_watermarks: &BTreeMap<String, String>) -> bool {
-        if !self.has_unviewed_completion_timestamp() {
-            return false;
-        }
+    pub fn is_watermark_acknowledged(
+        &self,
+        acknowledged_watermarks: &BTreeMap<String, String>,
+    ) -> bool {
         let target_id = self.place.target_id();
-        !matches!(
+        matches!(
             acknowledged_watermarks.get(&target_id),
             Some(ack) if !self.watermark.is_empty() && ack == &self.watermark
         )
+    }
+
+    pub fn is_unread_blue_dot(&self, acknowledged_watermarks: &BTreeMap<String, String>) -> bool {
+        self.has_unviewed_completion_timestamp()
+            && !self.is_watermark_acknowledged(acknowledged_watermarks)
+    }
+
+    pub fn is_unacknowledged(&self, acknowledged_watermarks: &BTreeMap<String, String>) -> bool {
+        match self.phase {
+            FourAppSessionKind::BlueDotCompleted => {
+                self.is_unread_blue_dot(acknowledged_watermarks)
+            }
+            FourAppSessionKind::Error => !self.is_watermark_acknowledged(acknowledged_watermarks),
+            _ => false,
+        }
     }
 
     pub fn effective_kind(
@@ -76,6 +91,13 @@ impl FourAppLiveCandidate {
                     FourAppSessionKind::BlueDotCompleted
                 } else {
                     FourAppSessionKind::Idle
+                }
+            }
+            FourAppSessionKind::Error => {
+                if self.is_watermark_acknowledged(acknowledged_watermarks) {
+                    FourAppSessionKind::Idle
+                } else {
+                    FourAppSessionKind::Error
                 }
             }
             other => other,

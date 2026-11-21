@@ -186,6 +186,10 @@ impl WorkbenchStore {
                 }
             }
         }
+        self.build_board_layers_routing_mode()
+    }
+
+    pub(crate) fn build_board_layers_routing_mode(&self) -> six_layer_runtime::SixLayerRoutingMode {
         let doc = &self.document_store.host_store().draft.document;
         let layer_one = doc
             .editable
@@ -238,10 +242,6 @@ impl WorkbenchStore {
     }
 
     pub(crate) fn sync_six_layer_routing_context(&mut self) {
-        self.last_synced_six_layer_revs = (
-            self.document_store.draft.revision,
-            self.document_store.host_revision(),
-        );
         if self.six_layer_running.is_none() {
             return;
         }
@@ -624,6 +624,7 @@ impl WorkbenchStore {
                 self.status_message = failure;
             }
         }
+        let mut source_synced = false;
         if needs_cleanup {
             let preview_was_busy = self.is_lighting_preview_busy();
             self.end_lighting_preview_blocking(LightingPreviewStopReason::DeviceDisconnected);
@@ -643,10 +644,12 @@ impl WorkbenchStore {
                 self.status_message = format!("宿主动作清理未确认 · {localized}");
             }
         } else if observed_changed || v070_changed {
-            let _ = self.sync_live_session_source();
-            self.refresh_four_app_lighting();
+            source_synced = self.sync_live_session_source();
+            if !source_synced {
+                self.refresh_four_app_lighting();
+            }
         }
-        if changed {
+        if changed && !source_synced {
             self.commit_runtime_update();
         }
         self.try_auto_resume_six_layer(self.update_now);

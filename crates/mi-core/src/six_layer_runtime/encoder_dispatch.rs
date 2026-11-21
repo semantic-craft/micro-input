@@ -21,6 +21,7 @@ use std::{
 
 fn navigation_source_for_dispatch(
     context: &RoutingContext,
+    plan: &AppliedSixLayerPlan,
     control_layer: u8,
     profile_id: &str,
     action: &ResolvedHostAction,
@@ -38,7 +39,32 @@ fn navigation_source_for_dispatch(
         return Some(LiveSessionSource::Codex);
     }
     match &context.mode {
-        crate::six_layer_runtime::SixLayerRoutingMode::BoardLayers { .. } => {
+        crate::six_layer_runtime::SixLayerRoutingMode::BoardLayers {
+            layer_one,
+            layer_two,
+            layer_three,
+        } => {
+            let layer_plan = match control_layer {
+                1 => layer_one.as_deref(),
+                2 => layer_two.as_deref(),
+                3 => layer_three.as_deref(),
+                _ => None,
+            };
+            if let Some(lp) = layer_plan {
+                if lp.bundle_id.as_deref() == Some("com.openai.codex") || lp.profile_id == "codex" {
+                    return Some(LiveSessionSource::Codex);
+                }
+                if lp.bundle_id.is_some() {
+                    return Some(LiveSessionSource::Antigravity);
+                }
+            }
+            if let Some(host) = plan.hosts.iter().find(|h| h.profile_id == profile_id) {
+                return if host.adapter == "codex" {
+                    Some(LiveSessionSource::Codex)
+                } else {
+                    Some(LiveSessionSource::Antigravity)
+                };
+            }
             if control_layer == 1 {
                 Some(LiveSessionSource::Codex)
             } else {
@@ -124,7 +150,7 @@ pub(super) fn execute_clicks(
             }
             let snapshot = dispatch.slots.lock().unwrap().clone();
             let source =
-                navigation_source_for_dispatch(&context, control_layer, profile_id, action);
+                navigation_source_for_dispatch(&context, plan, control_layer, profile_id, action);
             let revision = match source {
                 Some(src) => snapshot.revision_for_source(src),
                 None => snapshot.revision,
@@ -855,7 +881,7 @@ pub(super) fn execute_clicks_with_encoder_picker(
             }
             let snapshot = dispatch.slots.lock().unwrap().clone();
             let source =
-                navigation_source_for_dispatch(&context, control_layer, profile_id, action);
+                navigation_source_for_dispatch(&context, plan, control_layer, profile_id, action);
             let revision = match source {
                 Some(src) => snapshot.revision_for_source(src),
                 None => snapshot.revision,

@@ -1664,6 +1664,58 @@ mod macos {
         )
     }
 
+    fn is_signed_diff_count(token: &str) -> bool {
+        token.starts_with(['+', '-'])
+            && token.len() > 1
+            && token[1..].bytes().all(|b| b.is_ascii_digit())
+    }
+
+    fn is_codex_sidebar_metadata_token(raw: &str) -> bool {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return true;
+        }
+        let collapsed = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.eq_ignore_ascii_case("now") || collapsed.eq_ignore_ascii_case("just now") {
+            return true;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if matches!(parts.as_slice(), [one] if is_signed_diff_count(one))
+            || matches!(parts.as_slice(), [a, b] if is_signed_diff_count(a) && is_signed_diff_count(b))
+        {
+            return true;
+        }
+        let digit_len = trimmed.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digit_len > 0 {
+            let unit = trimmed[digit_len..].trim_start().to_ascii_lowercase();
+            if matches!(
+                unit.as_str(),
+                "s" | "ss"
+                    | "sec"
+                    | "secs"
+                    | "m"
+                    | "ms"
+                    | "min"
+                    | "mins"
+                    | "h"
+                    | "hs"
+                    | "hr"
+                    | "hrs"
+                    | "d"
+                    | "ds"
+                    | "w"
+                    | "ws"
+                    | "mo"
+                    | "mos"
+                    | "y"
+                    | "ys"
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
     struct CodexParsedWindow {
         toolbar_project: Option<String>,
         active_sidebar_texts: Vec<String>,
@@ -1746,7 +1798,9 @@ mod macos {
             }
             if row_texts.iter().any(|t| is_codex_attention_badge(t)) {
                 for text in row_texts {
-                    if !is_codex_attention_badge(&text) && !attention_sidebar_titles.contains(&text)
+                    if !is_codex_attention_badge(&text)
+                        && !is_codex_sidebar_metadata_token(&text)
+                        && !attention_sidebar_titles.contains(&text)
                     {
                         attention_sidebar_titles.push(text);
                     }
@@ -1831,16 +1885,32 @@ mod macos {
         }
     }
 
-    fn summarize_codex_live_window_signals(
+    fn summarize_codex_live_window_signals_multi(
         is_frontmost: bool,
-        nodes: &[CodexObservedNode],
+        primary_nodes: &[CodexObservedNode],
+        extra_windows: &[Vec<CodexObservedNode>],
     ) -> crate::codex_sessions::CodexLiveWindowSignals {
-        let parsed = parse_codex_window_nodes(nodes);
+        let primary = parse_codex_window_nodes(primary_nodes);
+        let mut attention_sidebar_titles = primary.attention_sidebar_titles.clone();
+        let mut attention_windows = vec![(
+            primary.toolbar_project.clone(),
+            primary.attention_sidebar_titles,
+        )];
+        for nodes in extra_windows {
+            let parsed = parse_codex_window_nodes(nodes);
+            for title in &parsed.attention_sidebar_titles {
+                if !attention_sidebar_titles.contains(title) {
+                    attention_sidebar_titles.push(title.clone());
+                }
+            }
+            attention_windows.push((parsed.toolbar_project, parsed.attention_sidebar_titles));
+        }
         crate::codex_sessions::CodexLiveWindowSignals {
             is_frontmost,
-            toolbar_project: parsed.toolbar_project,
-            active_sidebar_texts: parsed.active_sidebar_texts,
-            attention_sidebar_titles: parsed.attention_sidebar_titles,
+            toolbar_project: primary.toolbar_project,
+            active_sidebar_texts: primary.active_sidebar_texts,
+            attention_sidebar_titles,
+            attention_windows,
         }
     }
 
@@ -1910,12 +1980,28 @@ mod macos {
                     .position(|window| unsafe { CFEqual(window.0, focused.0) } != 0)
             })
             .unwrap_or(0);
-        let window = visible.swap_remove(index);
-        let nodes = collect_codex_nodes(window, deadline, |element| {
+        let primary_window = visible.remove(index);
+        let primary_nodes = collect_codex_nodes(primary_window, deadline, |element| {
             read_codex_ax_node(|names| element.attributes(names, deadline))
         })
         .ok()?;
-        Some(summarize_codex_live_window_signals(is_frontmost, &nodes))
+        let mut extra_windows = Vec::new();
+        for window in visible {
+            if Instant::now() >= deadline {
+                break;
+            }
+            let Ok(nodes) = collect_codex_nodes(window, deadline, |element| {
+                read_codex_ax_node(|names| element.attributes(names, deadline))
+            }) else {
+                break;
+            };
+            extra_windows.push(nodes);
+        }
+        Some(summarize_codex_live_window_signals_multi(
+            is_frontmost,
+            &primary_nodes,
+            &extra_windows,
+        ))
     }
 
     fn find_sidebar_conversation_link(
@@ -6170,13 +6256,31 @@ mod macos {
                 n(Some(5), "AXStaticText", "", "", "2m", None),
                 n(Some(4), "AXButton", "Deploy Staging", "", "", None),
                 n(Some(7), "AXStaticText", "", "", "Needs approval", None),
+                n(Some(7), "AXStaticText", "", "", "2m", None),
+                n(Some(7), "AXStaticText", "", "", "+12 -4", None),
                 n(Some(4), "AXButton", "", "", "", None),
-                n(Some(9), "AXStaticText", "", "", "迁移数据库", None),
-                n(Some(9), "AXStaticText", "", "", "需要批准", None),
+                n(Some(11), "AXStaticText", "", "", "迁移数据库", None),
+                n(Some(11), "AXStaticText", "", "", "需要批准", None),
+                n(Some(11), "AXStaticText", "", "", "just now", None),
+                n(Some(11), "AXStaticText", "", "", "+12", None),
                 n(Some(4), "AXButton", "Fix needs approval copy", "", "", None),
-                n(Some(12), "AXStaticText", "", "", "Running", None),
+                n(Some(16), "AXStaticText", "", "", "Running", None),
             ];
-            let live_signals = summarize_codex_live_window_signals(true, &attention_nodes);
+            let second_window_nodes = vec![
+                n(None, "AXWindow", "Other Window", "", "", None),
+                n(Some(0), "AXToolbar", "", "Chat toolbar", "", None),
+                n(Some(1), "AXImage", "", "Project: sibling-repo", "", None),
+                n(Some(0), "AXWebArea", "", "", "", None),
+                n(Some(3), "AXList", "", "Threads", "", None),
+                n(Some(4), "AXButton", "Audit Auth", "", "", None),
+                n(Some(5), "AXStaticText", "", "", "Needs input", None),
+                n(Some(5), "AXStaticText", "", "", "15mins", None),
+            ];
+            let live_signals = summarize_codex_live_window_signals_multi(
+                true,
+                &attention_nodes,
+                &[second_window_nodes],
+            );
             assert!(live_signals.is_frontmost);
             assert_eq!(live_signals.toolbar_project.as_deref(), Some("micro-input"));
             assert_eq!(
@@ -6185,7 +6289,24 @@ mod macos {
             );
             assert_eq!(
                 live_signals.attention_sidebar_titles,
-                vec!["Deploy Staging".to_string(), "迁移数据库".to_string()]
+                vec![
+                    "Deploy Staging".to_string(),
+                    "迁移数据库".to_string(),
+                    "Audit Auth".to_string()
+                ]
+            );
+            assert_eq!(
+                live_signals.attention_windows,
+                vec![
+                    (
+                        Some("micro-input".to_string()),
+                        vec!["Deploy Staging".to_string(), "迁移数据库".to_string()]
+                    ),
+                    (
+                        Some("sibling-repo".to_string()),
+                        vec!["Audit Auth".to_string()]
+                    )
+                ]
             );
         }
 

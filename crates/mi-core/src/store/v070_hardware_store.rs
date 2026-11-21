@@ -608,12 +608,26 @@ impl WorkbenchStore {
             return DesiredTarget::UrgentClear(UrgentClearReason::OptInDisabled);
         }
         let glow_on_working = self.lighting_arbiter.glow_on_working_sessions;
-        let slot_kinds = self
-            .active_slot_table()
-            .slot_session_kinds(&self.lighting_arbiter.acknowledged_watermarks)
-            .map(|kind| {
-                crate::v070_session_sa_rgb::filter_session_kind_for_lighting(kind, glow_on_working)
-            });
+        let slot_kinds_for_source = |source: crate::store::LiveSessionSource| {
+            self.slot_table_for_source(source)
+                .slot_session_kinds(&self.lighting_arbiter.acknowledged_watermarks)
+                .map(|kind| {
+                    crate::v070_session_sa_rgb::filter_session_kind_for_lighting(
+                        kind,
+                        glow_on_working,
+                    )
+                })
+        };
+        let source_for_board_route = |route: &mi_model::board_layers::BoardLayerRoute| match route {
+            mi_model::board_layers::BoardLayerRoute::HostProfile { profile_id } => {
+                self.source_for_profile_id(profile_id)
+            }
+            mi_model::board_layers::BoardLayerRoute::Native {
+                owner: mi_model::board_layers::NativeLayerOwner::Codex,
+                ..
+            } => crate::store::LiveSessionSource::Codex,
+            _ => self.desired_live_session_source(),
+        };
         let fallback_sa = self
             .v070_hardware
             .projection
@@ -640,12 +654,28 @@ impl WorkbenchStore {
             let Ok(board_layer) = mi_model::board_layers::BoardLayer::try_from(l) else {
                 return DesiredTarget::UrgentClear(UrgentClearReason::ProtectedLayer);
             };
+            let route = self
+                .document_store
+                .board_layer_plan()
+                .map(|p| p.route(board_layer))
+                .unwrap_or_else(|| running.installation.plan.desired.route(board_layer));
             if matches!(
-                running.installation.plan.desired.route(board_layer),
+                route,
                 mi_model::board_layers::BoardLayerRoute::Native { .. }
             ) {
                 return DesiredTarget::UrgentClear(UrgentClearReason::ProtectedLayer);
             }
+            let board_source = if let Some(locked_id) = self.document_store.locked_profile_id() {
+                self.source_for_profile_id(&locked_id)
+            } else if self.six_layer_user_pinned {
+                self.document_store
+                    .host_active_profile_id()
+                    .map(|pid| self.source_for_profile_id(&pid))
+                    .unwrap_or_else(|| source_for_board_route(route))
+            } else {
+                source_for_board_route(route)
+            };
+            let slot_kinds = slot_kinds_for_source(board_source);
             let compiled_layer = running.installation.plan.compiled_board_layer(board_layer);
             return map_layer_lighting_resolution(resolve_desired_for_device_layer(
                 &compiled_layer,
@@ -668,6 +698,15 @@ impl WorkbenchStore {
                 .profiles
                 .get(usize::from(p))
                 .and_then(|prof| prof.layers.get(usize::from(layer_1_based - 1)))?;
+            let board_source = mi_model::board_layers::BoardLayer::try_from(layer_1_based)
+                .ok()
+                .and_then(|bl| {
+                    self.document_store
+                        .board_layer_plan()
+                        .map(|plan| source_for_board_route(plan.route(bl)))
+                })
+                .unwrap_or_else(|| self.desired_live_session_source());
+            let slot_kinds = slot_kinds_for_source(board_source);
             Some(map_layer_lighting_resolution(
                 resolve_desired_for_device_layer(dev_layer, &slot_kinds, fallback_sa),
             ))
@@ -692,6 +731,7 @@ impl WorkbenchStore {
         let Some(profile) = doc.editable.graph.profiles.get(&active_pid) else {
             return DesiredTarget::Active(std::collections::BTreeMap::new());
         };
+        let slot_kinds = slot_kinds_for_source(self.source_for_profile_id(&active_pid));
 
         if let Some(l) = self.v070_hardware.device_layer_override.filter(|&l| l >= 1) {
             if let Some(lid) = profile.layer_order.get(usize::from(l - 1)) {
@@ -1179,19 +1219,32 @@ impl WorkbenchStore {
                 self.v070_hardware.projection.active_joystick_mode = Some(cached_mode);
             }
         }
+        let mut unpinned = false;
+        let mut source_synced = false;
         if !is_expected_echo
             && self.document_store.locked_profile_id().is_none()
             && self.six_layer_user_pinned
         {
             self.six_layer_user_pinned = false;
             self.sync_six_layer_routing_context();
+            source_synced = self.sync_live_session_source();
+            unpinned = true;
         }
         if is_expected_echo {
             self.v070_hardware.projection.status_message =
                 format!("方案切层联动已切至 P{profile_index} · 第 {layer_index} 层（RAM 零擦写）");
         }
-        self.sync_v070_session_sa_rgb();
-        self.commit_runtime_update();
+        if unpinned {
+            if !source_synced {
+                self.refresh_four_app_lighting();
+                self.commit_runtime_update();
+            } else if is_expected_echo {
+                self.commit_runtime_update();
+            }
+        } else {
+            self.sync_v070_session_sa_rgb();
+            self.commit_runtime_update();
+        }
     }
 }
 

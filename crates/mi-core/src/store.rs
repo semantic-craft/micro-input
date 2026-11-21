@@ -792,8 +792,6 @@ impl WorkbenchStore {
         if store.config.auto_connect_usb
             && env::var("MI_AUTO_HOST_READY").ok().as_deref() != Some("0")
         {
-            store.lighting_popover.only_glow_on_attention_or_completed = false;
-            store.lighting_arbiter.only_glow_on_attention_or_completed = false;
             store.initialize_auto_host_ready(preserve_saved_host_state);
             store.sync_live_session_source();
             store.start_mac_usb_discovery_watcher();
@@ -1923,6 +1921,7 @@ impl WorkbenchStore {
             if self.six_layer_running.is_some() {
                 self.sync_six_layer_routing_context();
             }
+            self.refresh_four_app_lighting();
         }
         self.six_layer_view = self.six_layer_running.as_ref().map(|running| {
             let observed_layer = running.observed_layer.load(Ordering::Acquire);
