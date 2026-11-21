@@ -432,14 +432,10 @@ mod tests {
                 continue;
             }
             if profile_name == crate::preset::LOCAL_CODEX_PROFILE_NAME {
-                assert_eq!(by_id("AG00")["available"], true);
-                assert_eq!(by_id("AG00")["label"], "选择 Subagent");
-                assert_eq!(by_id("AG01")["available"], true);
-                assert_eq!(by_id("AG01")["label"], "左键点击");
-                for slot in 2..6 {
+                for slot in 0..6 {
                     let binding = format!("AG{slot:02}");
-                    assert_eq!(by_id(&binding)["available"], false);
-                    assert_eq!(by_id(&binding)["label"], "不可用 / 未配置");
+                    assert_eq!(by_id(&binding)["available"], true);
+                    assert_eq!(by_id(&binding)["label"], format!("会话 {}", slot + 1));
                 }
                 assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
                 assert_eq!(by_id("AG07")["label"], "聚焦输入框");

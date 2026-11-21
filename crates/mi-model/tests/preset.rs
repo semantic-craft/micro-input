@@ -203,48 +203,146 @@ fn previous_local_codex_starter() -> Draft {
     draft
 }
 
+fn v2_subagent_local_codex_starter() -> Draft {
+    let mut draft = Draft::default();
+    preset::install_agent_starter_profiles(&mut draft).unwrap();
+    let (pid, lid) = local_codex_ids(&draft);
+    for slot in 0..=5u32 {
+        draft.unassign(&json!(pid), &json!(lid), slot).unwrap();
+    }
+    draft
+        .assign(
+            &json!(pid),
+            &json!(lid),
+            0,
+            Action {
+                id: "agent-subagent".into(),
+                name: "选择 Subagent".into(),
+                category: "Agent".into(),
+                detail:
+                    "打开当前目标 Agent 的子智能体（Subagent）选择弹层，支持旋钮上下选择并短按打开"
+                        .into(),
+                payload: json!({"type": "agent_command", "adapter": "host", "command": "subagent"}),
+            },
+        )
+        .unwrap();
+    draft
+        .assign(
+            &json!(pid),
+            &json!(lid),
+            1,
+            Action {
+                id: "host-mouse-click-left".into(),
+                name: "鼠标左键点击".into(),
+                category: "鼠标控制".into(),
+                detail: "在当前光标位置发送左键按下与抬起（CGEvent）".into(),
+                payload: json!({"type": "agent_command", "adapter": "host", "command": "mouse-click:left"}),
+            },
+        )
+        .unwrap();
+    draft
+}
+
 #[test]
-fn local_codex_top_six_route_to_subagent_left_click_and_unbound_second_row() {
+fn local_codex_top_six_route_to_session_open_slots_and_migrate_v2_subagent_starter() {
     use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
     let mut draft = Draft::default();
     preset::install_agent_starter_profiles(&mut draft).unwrap();
     let (pid, lid) = local_codex_ids(&draft);
     let layer = &draft.document.editable.graph.layers[&lid];
+    let cs = layer.control_settings.as_ref().unwrap();
+    assert_eq!(cs.joystick_mode, "mouse");
+    assert_eq!(cs.active_sectors, 0);
+    for slot in 0..6u32 {
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
+        let binding = layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == format!("logical-{slot}"))
+            .unwrap();
+        let action = &draft.document.editable.graph.actions[binding.action_id.as_ref().unwrap()];
+        assert_eq!(action.id, format!("slot-open-{slot}"));
+        assert_eq!(action.name, format!("会话 {}", slot + 1));
+        assert_eq!(action.category, "Codex 会话");
+        assert_eq!(action.detail, "切换并回读对应状态的 Codex 会话");
+    }
+    for slot in 16..=19u32 {
+        let binding = layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == format!("logical-{slot}"))
+            .unwrap();
+        assert!(binding.action_id.is_none());
+    }
+    assert!(!preset::local_codex_profile_needs_starter_slot_migration(
+        &draft.document,
+        &pid
+    ));
+
+    let mut legacy_v2 = v2_subagent_local_codex_starter();
+    let (v2_pid, _) = local_codex_ids(&legacy_v2);
+    let dsh_pid = legacy_v2
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, profile)| profile.name == "DeepSeek Coder (DSH)")
+        .unwrap()
+        .0
+        .clone();
+    assert!(preset::local_codex_profile_needs_starter_slot_migration(
+        &legacy_v2.document,
+        &v2_pid
+    ));
+    preset::install_agent_starter_profiles(&mut legacy_v2).unwrap();
+    assert!(!preset::local_codex_profile_needs_starter_slot_migration(
+        &legacy_v2.document,
+        &v2_pid
+    ));
+    for slot in 0..6u32 {
+        assert_eq!(
+            resolve_host_action(
+                &legacy_v2.document,
+                Some(&v2_pid),
+                &format!("AG{slot:02}"),
+                true
+            ),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
+    }
     assert_eq!(
-        resolve_host_action(&draft.document, Some(&pid), "AG00", true),
+        resolve_host_action(&legacy_v2.document, Some(&dsh_pid), "AG00", true),
         Some(ResolvedHostAction::AgentCommand {
-            adapter: "codex".into(),
+            adapter: "dsh-desktop".into(),
             command: "subagent".into(),
         })
     );
     assert_eq!(
-        resolve_host_action(&draft.document, Some(&pid), "AG01", true),
+        resolve_host_action(&legacy_v2.document, Some(&dsh_pid), "AG01", true),
         Some(ResolvedHostAction::AgentCommand {
             adapter: "host".into(),
             command: "mouse-click:left".into(),
         })
     );
-    let b0 = layer
-        .controls
-        .values()
-        .find(|binding| binding.logical_control == "logical-0")
-        .unwrap();
-    let a0 = &draft.document.editable.graph.actions[b0.action_id.as_ref().unwrap()];
-    assert_eq!(a0.id, "agent-subagent");
-    assert_eq!(a0.name, "选择 Subagent");
-    let b1 = layer
-        .controls
-        .values()
-        .find(|binding| binding.logical_control == "logical-1")
-        .unwrap();
-    let a1 = &draft.document.editable.graph.actions[b1.action_id.as_ref().unwrap()];
-    assert_eq!(a1.id, "host-mouse-click-left");
-    assert_eq!(a1.name, "鼠标左键点击");
     for slot in 2..6u32 {
         assert_eq!(
-            resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
-            None,
-            "second row slot {slot} must be unbound by default"
+            resolve_host_action(
+                &legacy_v2.document,
+                Some(&dsh_pid),
+                &format!("AG{slot:02}"),
+                true
+            ),
+            None
         );
     }
 }
@@ -308,6 +406,7 @@ fn local_codex_bottom_seven_route_to_distinct_commands() {
 fn unchanged_local_codex_starters_migrate_top_six_and_bottom_seven_preserving_native_profile() {
     use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
     for mut draft in [
+        v2_subagent_local_codex_starter(),
         r26_local_codex_starter(),
         r25_local_codex_starter(),
         previous_local_codex_starter(),
@@ -333,24 +432,13 @@ fn unchanged_local_codex_starters_migrate_top_six_and_bottom_seven_preserving_na
         let before = draft.document.editable.clone();
         preset::install_agent_starter_profiles(&mut draft).unwrap();
         assert!(draft.document.editable != before);
-        assert_eq!(
-            resolve_host_action(&draft.document, Some(&pid), "AG00", true),
-            Some(ResolvedHostAction::AgentCommand {
-                adapter: "codex".into(),
-                command: "subagent".into(),
-            })
-        );
-        assert_eq!(
-            resolve_host_action(&draft.document, Some(&pid), "AG01", true),
-            Some(ResolvedHostAction::AgentCommand {
-                adapter: "host".into(),
-                command: "mouse-click:left".into(),
-            })
-        );
-        for slot in 2..6u32 {
+        for slot in 0..6u32 {
             assert_eq!(
                 resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
-                None
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "four-app".into(),
+                    command: format!("slot-open:{slot}"),
+                })
             );
         }
         assert_eq!(
@@ -389,6 +477,7 @@ fn unchanged_local_codex_starters_migrate_top_six_and_bottom_seven_preserving_na
 #[test]
 fn customized_local_codex_assignments_are_never_migrated() {
     for mut draft in [
+        v2_subagent_local_codex_starter(),
         r26_local_codex_starter(),
         r25_local_codex_starter(),
         previous_local_codex_starter(),

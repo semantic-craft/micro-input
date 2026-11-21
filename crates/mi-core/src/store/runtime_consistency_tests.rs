@@ -600,22 +600,14 @@ fn native_codex_all_controls_keep_existing_actions_in_locked_and_manual_routes()
         let local = store.local_codex_profile_id().unwrap();
         let local_plan = store.compile_profile_twenty_slots(&local).unwrap();
         assert_eq!(plan.actions, local_plan.actions);
-        assert_eq!(
-            plan.actions[0],
-            Some(ResolvedHostAction::AgentCommand {
-                adapter: "codex".into(),
-                command: "subagent".into(),
-            })
-        );
-        assert_eq!(
-            plan.actions[1],
-            Some(ResolvedHostAction::AgentCommand {
-                adapter: "host".into(),
-                command: "mouse-click:left".into(),
-            })
-        );
-        for action in &plan.actions[2..6] {
-            assert_eq!(*action, None);
+        for (slot, action) in plan.actions.iter().enumerate().take(6) {
+            assert_eq!(
+                *action,
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "four-app".into(),
+                    command: format!("slot-open:{slot}"),
+                })
+            );
         }
         assert_eq!(
             store.desired_live_session_source(),
