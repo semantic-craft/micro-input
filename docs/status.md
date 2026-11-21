@@ -4,8 +4,8 @@
 
 ## 当前版本与架构基线
 
-- **最新发行标签**：[v0.11.4](releases/v0.11.4.md)（`CFBundleShortVersionString = 0.11.4`；历次发行说明归档于 [releases/](releases/v0.11.4.md)）。
-- **主线演进（v0.11.4 基线）**：在 v0.11.3 工作台原生灯光预览接线基础上合入全局「按键映射」开关焦点隔离、菜单栏暂停三态图标与悬浮提示，以及静态门禁 `R-C15`（PR #167）。
+- **最新发行标签**：[v0.12.0](releases/v0.12.0.md)（`CFBundleShortVersionString = 0.12.0`；历次发行说明归档于 [releases/](releases/v0.12.0.md)）。
+- **主线演进（v0.12.0 基线）**：合入响应驱动逐键状态灯与 `sa: true` 底光同步、第 1 层 Codex 与第 2 层 Antigravity 双源槽位实时共存及存量预设幂等迁移（PR #170、#171），以及 18 项架构决策沉淀与零普通注释门禁（PR #169）。
 - **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C15`。
 
 ## 已实现与已验证能力
@@ -14,7 +14,7 @@
 
 - **USB 独占与跨固件支持**：支持 Creator Micro 2（USB `303A:8298`）固件 `0.6.3` 与官方预发布 `0.7.0-rc.16`。所有写操作均先保存原字节与完整恢复链再写入、逐块读回核对；不静默改写设备 Flash。
 - **六层物理路由与按层混合摇杆**：
-  - 第 1 层（`Codex · Micro Input`）：接管全部 20 个控制位，在 `0.7.0-rc.16+` 上摇杆默认采用硬件 `MOUSE` 模式；
+  - 第 1 层（`Codex · Micro Input`）：接管全部 20 个控制位，顶部 `AG00–AG05` 独立承载 6 槽 Codex 会话状态灯与直达跳转，在 `0.7.0-rc.16+` 上摇杆默认采用硬件 `MOUSE` 模式；
   - 第 2 层（`Antigravity`）：顶部 `AG00–AG05` 为 6 槽会话状态灯与直达跳转，摇杆默认采用四向 `RADIAL`（上/下滚动对话、左划打开右边栏、右划关闭右边栏）；
   - 第 3 层（`DeepSeek Harness`）：顶部两键为 `Subagent` + `左键点击`（`AG02–AG05` 留空），摇杆默认采用硬件 `MOUSE` 模式；
   - 第 4–6 层：保留未分配。
