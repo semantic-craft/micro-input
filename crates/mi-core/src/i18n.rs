@@ -102,6 +102,12 @@ pub const CORE_EN_TABLE: &[(&str, &str)] = &[
     ("● 已完成待查看", "● Completed · Unread"),
     (":: 正在运行", ":: Running"),
     ("空闲已读", "Idle · Read"),
+    ("Antigravity 后台重连中", "Reconnecting Antigravity Daemon"),
+    ("Antigravity 后台断连", "Antigravity Daemon Disconnected"),
+    ("等待审批或用户输入", "Waiting for approval or user input"),
+    ("子代理等待审批或用户输入", "Subagent waiting for approval or user input"),
+    ("已完成未读 · 按键直达", "Completed unread · Press key to jump"),
+    ("执行出错，点击查看", "Execution error, click to inspect"),
     ("纯白", "Pure White"),
     ("翡翠绿", "Emerald"),
     ("海洋蓝", "Ocean Blue"),
@@ -1471,4 +1477,48 @@ pub fn concise_keycap_caption_en(raw_label: &str) -> String {
         }
     }
     segment.chars().take(10).collect()
+}
+
+pub fn localize_session_title(title: &str, locale: ResolvedLocale) -> String {
+    if locale == ResolvedLocale::ZhHans {
+        return title.to_string();
+    }
+    match title {
+        "Antigravity 后台重连中" | "Antigravity 后台断连" => tr(title, locale).to_string(),
+        _ => title.to_string(),
+    }
+}
+
+pub fn localize_session_status_detail(detail: &str, locale: ResolvedLocale) -> String {
+    if locale == ResolvedLocale::ZhHans {
+        return detail.to_string();
+    }
+    let translated = tr(detail, locale);
+    if translated != detail {
+        return translated.to_string();
+    }
+    if let Some(rest) = detail.strip_prefix("模型自动重试（第 ") {
+        if let Some((attempt, after)) = rest.split_once(" 次）：") {
+            return format!("Model retrying (attempt {attempt}): {after}");
+        }
+    }
+    if let Some(rest) = detail.strip_prefix("等待模型响应已 ") {
+        if let Some(dur) = rest.strip_suffix("（超 60s 无进展）") {
+            return format!("Waiting for model response for {dur} (>60s stalled)");
+        }
+    }
+    if let Some(rest) = detail.strip_prefix("正在重连 Antigravity 后台服务（") {
+        if let Some(secs) = rest.strip_suffix("s）") {
+            return format!("Reconnecting Antigravity daemon ({secs}s)");
+        }
+    }
+    if let Some(rest) = detail.strip_prefix("Antigravity 后台守护进程无响应已 ") {
+        if let Some(secs) = rest.strip_suffix('s') {
+            return format!("Antigravity daemon unresponsive for {secs}s");
+        }
+    }
+    if let Some(reason) = detail.strip_prefix("API 报错：") {
+        return format!("API error: {reason}");
+    }
+    detail.to_string()
 }

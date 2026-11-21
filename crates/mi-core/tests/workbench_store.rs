@@ -3643,6 +3643,7 @@ fn open_isolated_migrates_persisted_v2_local_codex_and_lights_six_layer_session_
             last_modified_ms: (10_000 - slot * 100) as u64,
             last_user_view_ms: 1_000,
             updated_at_ms: (10_000 - slot * 100) as u64,
+            status_detail: None,
         })
         .collect();
     reopened.ingest_four_app_candidates(codex_candidates);

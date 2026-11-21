@@ -111,6 +111,7 @@ pub(crate) mod runtime_stamp;
 use runtime_stamp::RuntimeCommitStamp;
 
 mod antigravity_daemon;
+mod antigravity_log;
 mod device_sync;
 mod host_execution;
 mod inspector_editor_actions;

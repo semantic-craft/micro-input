@@ -416,6 +416,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
             last_modified_ms: 9_000,
             last_user_view_ms: 9_000,
             updated_at_ms: 9_000,
+            status_detail: None,
         },
         FourAppLiveCandidate {
             place: place_viewed_done.clone(),
@@ -425,6 +426,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
             last_modified_ms: 5_200,
             last_user_view_ms: 5_000,
             updated_at_ms: 8_000,
+            status_detail: None,
         },
         FourAppLiveCandidate {
             place: place_unread_done.clone(),
@@ -434,6 +436,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
             last_modified_ms: 6_000,
             last_user_view_ms: 2_000,
             updated_at_ms: 6_000,
+            status_detail: None,
         },
         FourAppLiveCandidate {
             place: place_working.clone(),
@@ -443,6 +446,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
             last_modified_ms: 7_000,
             last_user_view_ms: 7_000,
             updated_at_ms: 7_000,
+            status_detail: None,
         },
         FourAppLiveCandidate {
             place: place_attention.clone(),
@@ -452,6 +456,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
             last_modified_ms: 6_500,
             last_user_view_ms: 1_000,
             updated_at_ms: 6_500,
+            status_detail: None,
         },
     ]);
 
@@ -497,6 +502,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
         last_modified_ms: 20_000,
         last_user_view_ms: 20_000,
         updated_at_ms: 20_000,
+        status_detail: None,
     }]);
     assert_eq!(
         store.projection().session_strip.slots[0].mode,
@@ -525,6 +531,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
         last_modified_ms: 30_000,
         last_user_view_ms: 2_000,
         updated_at_ms: 30_000,
+        status_detail: None,
     }]);
     assert_eq!(store.projection().session_strip.unread_completed_count, 1);
     assert_eq!(

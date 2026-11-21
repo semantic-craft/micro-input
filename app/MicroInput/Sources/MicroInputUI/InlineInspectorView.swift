@@ -555,6 +555,13 @@ private struct SessionSlotExplanationSection: View {
             Text(locale == .en ? "Current slot: \(slotTitle)" : "当前槽位：\(slotTitle)")
                 .font(UITheme.caption)
                 .foregroundStyle(UITheme.textSecondary)
+            if let detail = sessionSlot?.statusDetail, !detail.isEmpty {
+                Text(detail)
+                    .font(UITheme.micro)
+                    .foregroundStyle(UITheme.sessionDetailColor(for: sessionSlot?.kind))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(detail)
+            }
             HStack(spacing: 8) {
                 Button(store.tr("立即跳转到此会话")) {
                     store.dispatch("session_strip", ["ActivateSlot": slot])

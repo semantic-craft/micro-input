@@ -44,6 +44,16 @@ public enum UITheme {
 
     public static let statusSuccess = adaptive(light: (22, 163, 74), dark: (74, 222, 128))
     public static let statusSuccessSoft = statusSuccess.opacity(0.10)
+    public static let statusWarningText = adaptive(light: (180, 83, 9), dark: (251, 191, 36))
+    public static let statusErrorText = adaptive(light: (220, 38, 38), dark: (248, 113, 113))
+
+    public static func sessionDetailColor(for kind: String?) -> Color {
+        switch kind {
+        case "Error": return statusErrorText
+        case "NeedsAttention": return statusWarningText
+        default: return textMuted
+        }
+    }
 
     public static let caution = textSecondary
     public static let cautionSoft = subtleSurface

@@ -1698,6 +1698,68 @@ final class MicroInputTests: XCTestCase {
         XCTAssertFalse(afterEnd.previewActive)
         XCTAssertEqual(afterEnd.previewRemainingSecs, 0)
     }
+
+    func testSessionSlotStatusDetailDecodingAndEquatablePropagation() throws {
+        let baseSlotJSON: [String: Any] = [
+            "slot_index": 0,
+            "key_binding_id": "AG00",
+            "mode": "Recent",
+            "status": "NeedsInteraction",
+            "kind": "NeedsAttention",
+            "agent_monogram": "AG",
+            "title": "Build Retry Conv",
+            "subtitle": "待处理审批/输入",
+            "place": ["Antigravity": ["conversation_id": "c-1", "workspace_path": "/ws"]],
+            "watermark": "wm-1",
+            "is_unread_blue_dot": false,
+            "is_working_animated": false,
+            "is_bound_to_top_key": true,
+            "led_color_hex": "#FFAA00",
+            "status_detail": "模型自动重试（第 2 次）：unexpected EOF · 4s"
+        ]
+        let parsed1 = CoreStore.parseProjection([
+            "session_strip": [
+                "slots": [baseSlotJSON],
+                "attention_count": 1,
+                "unread_completed_count": 0,
+                "working_count": 0
+            ]
+        ])
+        XCTAssertEqual(parsed1.sessionSlots.count, 1)
+        XCTAssertEqual(
+            parsed1.sessionSlots[0].statusDetail,
+            "模型自动重试（第 2 次）：unexpected EOF · 4s"
+        )
+
+        var updatedSlotJSON = baseSlotJSON
+        updatedSlotJSON["status_detail"] = "等待模型响应已 1m05s（超 60s 无进展）"
+        let parsed2 = CoreStore.parseProjection([
+            "session_strip": [
+                "slots": [updatedSlotJSON],
+                "attention_count": 1,
+                "unread_completed_count": 0,
+                "working_count": 0
+            ]
+        ])
+        XCTAssertEqual(
+            parsed2.sessionSlots[0].statusDetail,
+            "等待模型响应已 1m05s（超 60s 无进展）"
+        )
+        XCTAssertNotEqual(parsed1.sessionSlots[0], parsed2.sessionSlots[0])
+
+        var clearedSlotJSON = baseSlotJSON
+        clearedSlotJSON.removeValue(forKey: "status_detail")
+        let parsed3 = CoreStore.parseProjection([
+            "session_strip": [
+                "slots": [clearedSlotJSON],
+                "attention_count": 0,
+                "unread_completed_count": 0,
+                "working_count": 0
+            ]
+        ])
+        XCTAssertNil(parsed3.sessionSlots[0].statusDetail)
+        XCTAssertNotEqual(parsed2.sessionSlots[0], parsed3.sessionSlots[0])
+    }
 }
 
 @MainActor

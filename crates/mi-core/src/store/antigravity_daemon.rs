@@ -157,25 +157,30 @@ impl WorkbenchStore {
         std::thread::spawn(move || {
             let mut seen_running_ids = BTreeSet::new();
             let mut completed_transition_watermarks = BTreeMap::new();
+            let mut liveness = AntigravityLivenessTracker::new();
             loop {
                 let source_gen = {
                     let (lock, _) = &*live_source;
                     lock.lock().unwrap().generation
                 };
                 let epoch = epoch_source.load(Ordering::Acquire);
-                let ag_catalog = poll_antigravity_daemon_candidates(
-                    &mut seen_running_ids,
-                    &mut completed_transition_watermarks,
-                );
-                if tx
-                    .send(HardwareLoopEvent::LiveCandidatesUpdated {
-                        epoch,
-                        source: LiveSessionSource::Antigravity,
-                        catalog: ag_catalog,
-                    })
-                    .is_err()
+                if let AntigravityPollUpdate::Replace(ag_catalog) =
+                    poll_antigravity_daemon_candidates_with_liveness(
+                        &mut seen_running_ids,
+                        &mut completed_transition_watermarks,
+                        &mut liveness,
+                    )
                 {
-                    break;
+                    if tx
+                        .send(HardwareLoopEvent::LiveCandidatesUpdated {
+                            epoch,
+                            source: LiveSessionSource::Antigravity,
+                            catalog: ag_catalog,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 let codex_catalog = poll_codex_session_candidates();
                 if tx
@@ -210,22 +215,6 @@ fn current_uid() -> u32 {
         fn getuid() -> u32;
     }
     unsafe { getuid() }
-}
-
-#[cfg(unix)]
-fn antigravity_hub_open_flags() -> i32 {
-    #[cfg(target_os = "macos")]
-    {
-        0x0100 | 0x0004
-    }
-    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86")))]
-    {
-        0o400000 | 0o4000
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    {
-        0o100000 | 0o4000
-    }
 }
 
 pub(super) fn ensure_private_document_dir(dir: &Path) -> Result<(), WorkbenchError> {
@@ -269,7 +258,7 @@ fn read_antigravity_hub_file(path: &Path) -> Option<ParsedAntigravityHub> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(antigravity_hub_open_flags());
+        options.custom_flags(mi_macos::regular_file_nofollow_open_flags());
     }
     let file = options.open(path).ok()?;
     let meta = file.metadata().ok()?;
@@ -607,15 +596,26 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
             watermark.push_str(":subwait");
         }
 
-        let (phase, effective_view_ms) = if !killed
-            && (has_waiting
-                || matches!(
-                    status_str,
-                    "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT"
-                        | "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION"
-                )) {
+        let direct_waiting = waiting_steps
+            || matches!(
+                status_str,
+                "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT"
+                    | "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION"
+            );
+        let (phase, effective_view_ms, status_detail) = if !killed
+            && (has_waiting || direct_waiting)
+        {
             seen_running_ids.insert(cid.clone());
-            (FourAppSessionKind::NeedsAttention, raw_view_ms)
+            let detail = if direct_waiting {
+                "等待审批或用户输入"
+            } else {
+                "子代理等待审批或用户输入"
+            };
+            (
+                FourAppSessionKind::NeedsAttention,
+                raw_view_ms,
+                Some(detail.to_string()),
+            )
         } else if !killed
             && (matches!(
                 status_str,
@@ -627,7 +627,7 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
                 || not_fully_idle)
         {
             seen_running_ids.insert(cid.clone());
-            (FourAppSessionKind::Working, raw_view_ms)
+            (FourAppSessionKind::Working, raw_view_ms, None)
         } else {
             let is_errored = errored
                 || matches!(
@@ -649,20 +649,28 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
                         watermark.clone(),
                     ));
                 }
-                (FourAppSessionKind::Idle, last_modified_ms.max(raw_view_ms))
+                (
+                    FourAppSessionKind::Idle,
+                    last_modified_ms.max(raw_view_ms),
+                    None,
+                )
             } else if has_unviewed || just_transitioned {
                 if is_errored {
-                    (FourAppSessionKind::Error, raw_view_ms)
+                    (FourAppSessionKind::Error, raw_view_ms, None)
                 } else {
                     let adj_view_ms = if last_modified_ms > raw_view_ms.saturating_add(500) {
                         raw_view_ms
                     } else {
                         last_modified_ms.saturating_sub(1000)
                     };
-                    (FourAppSessionKind::BlueDotCompleted, adj_view_ms)
+                    (
+                        FourAppSessionKind::BlueDotCompleted,
+                        adj_view_ms,
+                        Some("已完成未读 · 按键直达".to_string()),
+                    )
                 }
             } else {
-                (FourAppSessionKind::Idle, raw_view_ms)
+                (FourAppSessionKind::Idle, raw_view_ms, None)
             }
         };
 
@@ -674,6 +682,7 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
             last_modified_ms,
             last_user_view_ms: effective_view_ms,
             updated_at_ms: last_modified_ms.max(effective_view_ms),
+            status_detail,
         });
     }
 
@@ -686,6 +695,248 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
     (candidates, project_ids, frontmost_acknowledged)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisconnectEpisode {
+    pid: i32,
+    since: Instant,
+    episode: u64,
+}
+
+#[derive(Debug)]
+pub(crate) enum AntigravityPollUpdate {
+    Replace(Option<NavigationCatalog>),
+    KeepExisting,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AntigravityLivenessTracker {
+    progress_by_cid: BTreeMap<String, (u64, u64)>,
+    disconnect: Option<DisconnectEpisode>,
+    next_disconnect_episode: u64,
+    log_reader: antigravity_log::AntigravityLogTailReader,
+}
+
+impl AntigravityLivenessTracker {
+    pub(crate) fn new() -> Self {
+        Self {
+            progress_by_cid: BTreeMap::new(),
+            disconnect: None,
+            next_disconnect_episode: 0,
+            log_reader: antigravity_log::AntigravityLogTailReader::new(),
+        }
+    }
+
+    pub(crate) fn reconcile_poll_result(
+        &mut self,
+        poll_result: Option<NavigationCatalog>,
+        antigravity_pid: impl FnOnce() -> Option<i32>,
+        now_instant: Instant,
+        now_ms: u64,
+    ) -> AntigravityPollUpdate {
+        if let Some(mut catalog) = poll_result {
+            self.disconnect = None;
+            let log = self.log_reader.read_snapshot(now_ms);
+            apply_antigravity_liveness(
+                &mut catalog.candidates,
+                &log,
+                &mut self.progress_by_cid,
+                now_ms,
+            );
+            return AntigravityPollUpdate::Replace(Some(catalog));
+        }
+        self.reconcile_rpc_failure(antigravity_pid(), now_instant, now_ms)
+    }
+
+    fn reconcile_rpc_failure(
+        &mut self,
+        antigravity_pid: Option<i32>,
+        now_instant: Instant,
+        now_ms: u64,
+    ) -> AntigravityPollUpdate {
+        let Some(pid) = antigravity_pid else {
+            self.disconnect = None;
+            self.progress_by_cid.clear();
+            return AntigravityPollUpdate::Replace(None);
+        };
+        let active = match self.disconnect {
+            Some(ep) if ep.pid == pid => ep,
+            _ => {
+                self.next_disconnect_episode = self.next_disconnect_episode.wrapping_add(1);
+                let ep = DisconnectEpisode {
+                    pid,
+                    since: now_instant,
+                    episode: self.next_disconnect_episode,
+                };
+                self.disconnect = Some(ep);
+                ep
+            }
+        };
+        let elapsed = now_instant
+            .saturating_duration_since(active.since)
+            .as_secs();
+        if elapsed < 3 {
+            return AntigravityPollUpdate::KeepExisting;
+        }
+        let episode = active.episode;
+        let (phase, title, status_detail, watermark) = if elapsed < 12 {
+            (
+                FourAppSessionKind::NeedsAttention,
+                "Antigravity 后台重连中".to_string(),
+                format!("正在重连 Antigravity 后台服务（{elapsed}s）"),
+                format!("disconnect:warn:{pid}:{episode}"),
+            )
+        } else {
+            (
+                FourAppSessionKind::Error,
+                "Antigravity 后台断连".to_string(),
+                format!("Antigravity 后台守护进程无响应已 {elapsed}s"),
+                format!("disconnect:error:{pid}:{episode}"),
+            )
+        };
+        AntigravityPollUpdate::Replace(Some(NavigationCatalog {
+            instance: CatalogInstance::Antigravity(AntigravityInstance {
+                hub: "disconnected".to_string(),
+                pid,
+                ui_port: 0,
+            }),
+            observed_at: now_instant,
+            candidates: vec![FourAppLiveCandidate {
+                place: NavigationPlace::app("com.google.antigravity"),
+                title,
+                phase,
+                watermark,
+                last_modified_ms: now_ms,
+                last_user_view_ms: 0,
+                updated_at_ms: now_ms,
+                status_detail: Some(status_detail),
+            }],
+            project_ids: BTreeMap::new(),
+            frontmost_acknowledged: None,
+        }))
+    }
+}
+
+fn format_retry_detail(retry: &antigravity_log::AntigravityLogRetry) -> String {
+    let raw = match retry.retry_delay.as_deref().filter(|d| !d.is_empty()) {
+        Some(delay) => format!(
+            "模型自动重试（第 {} 次）：{} · {delay}",
+            retry.attempt, retry.reason
+        ),
+        None => format!("模型自动重试（第 {} 次）：{}", retry.attempt, retry.reason),
+    };
+    antigravity_log::truncate_chars(&raw, 140)
+}
+
+fn format_stall_detail(stalled_ms: u64) -> String {
+    let total_secs = stalled_ms / 1000;
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("等待模型响应已 {mins}m{secs:02}s（超 60s 无进展）")
+}
+
+fn retry_active_window_ms(retry: &antigravity_log::AntigravityLogRetry) -> u64 {
+    retry
+        .retry_delay
+        .as_deref()
+        .and_then(antigravity_log::parse_go_duration_ms)
+        .map(|delay_ms| delay_ms.saturating_add(45_000).clamp(90_000, 240_000))
+        .unwrap_or(120_000)
+}
+
+pub(crate) fn apply_antigravity_liveness(
+    candidates: &mut [FourAppLiveCandidate],
+    log: &antigravity_log::AntigravityLogSnapshot,
+    progress_by_cid: &mut BTreeMap<String, (u64, u64)>,
+    now_ms: u64,
+) {
+    let mut active_working_ids = BTreeSet::new();
+    for cand in candidates.iter_mut() {
+        let cid = cand.place.target_id();
+        if cand.phase == FourAppSessionKind::Working {
+            active_working_ids.insert(cid.clone());
+            let entry = progress_by_cid.entry(cid).or_insert_with(|| {
+                let initial_progress = if cand.last_modified_ms > 0 {
+                    cand.last_modified_ms.min(now_ms)
+                } else {
+                    now_ms
+                };
+                (cand.last_modified_ms, initial_progress)
+            });
+            if entry.0 != cand.last_modified_ms {
+                entry.0 = cand.last_modified_ms;
+                entry.1 = now_ms;
+            }
+            let last_progress_observed_at_ms = entry.1;
+            let stalled_ms = now_ms.saturating_sub(last_progress_observed_at_ms);
+            let active_retry = log.latest_retry.as_ref().filter(|retry| {
+                now_ms.saturating_sub(retry.ts_ms) <= retry_active_window_ms(retry)
+                    && retry.ts_ms.saturating_add(2_000) >= last_progress_observed_at_ms
+            });
+            if let Some(retry) = active_retry {
+                cand.phase = FourAppSessionKind::NeedsAttention;
+                cand.status_detail = Some(format_retry_detail(retry));
+            } else if stalled_ms >= 60_000 {
+                cand.phase = FourAppSessionKind::NeedsAttention;
+                cand.status_detail = Some(format_stall_detail(stalled_ms));
+            } else {
+                cand.status_detail = None;
+            }
+        } else {
+            progress_by_cid.remove(&cid);
+            match cand.phase {
+                FourAppSessionKind::Error if cand.status_detail.is_none() => {
+                    let matched_err = log.latest_api_error.as_ref().filter(|err| {
+                        if cand.last_modified_ms == 0 {
+                            now_ms.saturating_sub(err.ts_ms) <= 120_000
+                        } else {
+                            err.ts_ms.abs_diff(cand.last_modified_ms) <= 90_000
+                        }
+                    });
+                    cand.status_detail = Some(match matched_err {
+                        Some(err) => antigravity_log::truncate_chars(
+                            &format!("API 报错：{}", err.reason),
+                            168,
+                        ),
+                        None => "执行出错，点击查看".to_string(),
+                    });
+                }
+                FourAppSessionKind::BlueDotCompleted if cand.status_detail.is_none() => {
+                    cand.status_detail = Some("已完成未读 · 按键直达".to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    progress_by_cid.retain(|cid, _| active_working_ids.contains(cid));
+    candidates.sort_by(|a, b| {
+        a.phase
+            .cmp(&b.phase)
+            .then_with(|| b.last_modified_ms.cmp(&a.last_modified_ms))
+            .then_with(|| a.place.target_id().cmp(&b.place.target_id()))
+    });
+}
+
+pub(super) fn poll_antigravity_daemon_candidates_with_liveness(
+    seen_running_ids: &mut BTreeSet<String>,
+    completed_transition_watermarks: &mut BTreeMap<String, String>,
+    tracker: &mut AntigravityLivenessTracker,
+) -> AntigravityPollUpdate {
+    let poll_result = poll_antigravity_daemon_candidates_with_frontmost(
+        seen_running_ids,
+        completed_transition_watermarks,
+        true,
+    );
+    let now_instant = Instant::now();
+    let now_ms = antigravity_log::system_now_ms();
+    tracker.reconcile_poll_result(
+        poll_result,
+        mi_macos::session_navigation::antigravity_process_id,
+        now_instant,
+        now_ms,
+    )
+}
+
+#[cfg(test)]
 pub(super) fn poll_antigravity_daemon_candidates(
     seen_running_ids: &mut BTreeSet<String>,
     completed_transition_watermarks: &mut BTreeMap<String, String>,
@@ -838,6 +1089,7 @@ pub fn codex_observations_to_catalog_with_ack(
             last_modified_ms,
             last_user_view_ms,
             updated_at_ms: obs.updated_at_ms,
+            status_detail: None,
         });
     }
 
@@ -884,4 +1136,593 @@ pub(crate) fn poll_codex_session_candidates() -> Option<NavigationCatalog> {
         &observations,
         frontmost_acknowledged,
     ))
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+    use crate::store::antigravity_log::{
+        AntigravityLogApiError, AntigravityLogRetry, AntigravityLogSnapshot,
+    };
+
+    fn make_ag_candidate(
+        cid: &str,
+        phase: FourAppSessionKind,
+        last_modified_ms: u64,
+    ) -> FourAppLiveCandidate {
+        FourAppLiveCandidate {
+            place: NavigationPlace::antigravity(cid, "/ws/ag"),
+            title: format!("Conv {cid}"),
+            phase,
+            watermark: format!("wm:{cid}:{last_modified_ms}"),
+            last_modified_ms,
+            last_user_view_ms: 0,
+            updated_at_ms: last_modified_ms,
+            status_detail: None,
+        }
+    }
+
+    #[test]
+    fn retry_promotes_working_and_clears_on_progress_or_adaptive_window_expiry() {
+        let mut progress = BTreeMap::new();
+        let now_ms = 1_700_000_100_000u64;
+        let retry_log = AntigravityLogSnapshot {
+            latest_retry: Some(AntigravityLogRetry {
+                attempt: 2,
+                reason: "stream reading error: unexpected EOF".to_string(),
+                retry_delay: Some("4s".to_string()),
+                ts_ms: now_ms - 1_000,
+            }),
+            latest_api_error: None,
+        };
+
+        let mut cands = vec![make_ag_candidate(
+            "c1",
+            FourAppSessionKind::Working,
+            now_ms - 5_000,
+        )];
+        apply_antigravity_liveness(&mut cands, &retry_log, &mut progress, now_ms);
+        assert_eq!(cands[0].phase, FourAppSessionKind::NeedsAttention);
+        assert_eq!(
+            cands[0].status_detail.as_deref(),
+            Some("模型自动重试（第 2 次）：stream reading error: unexpected EOF · 4s")
+        );
+
+        let mut cands_progress = vec![make_ag_candidate(
+            "c1",
+            FourAppSessionKind::Working,
+            now_ms + 4_000,
+        )];
+        apply_antigravity_liveness(
+            &mut cands_progress,
+            &retry_log,
+            &mut progress,
+            now_ms + 5_000,
+        );
+        assert_eq!(cands_progress[0].phase, FourAppSessionKind::Working);
+        assert_eq!(cands_progress[0].status_detail, None);
+
+        let mut progress_expiry = BTreeMap::new();
+        let mut cands_expired = vec![make_ag_candidate(
+            "c2",
+            FourAppSessionKind::Working,
+            now_ms + 50_000,
+        )];
+        apply_antigravity_liveness(
+            &mut cands_expired,
+            &retry_log,
+            &mut progress_expiry,
+            now_ms + 95_000,
+        );
+        assert_eq!(cands_expired[0].phase, FourAppSessionKind::Working);
+        assert_eq!(cands_expired[0].status_detail, None);
+    }
+
+    #[test]
+    fn stall_seeds_from_last_modified_and_reorders_ahead_of_healthy_working() {
+        let mut progress = BTreeMap::new();
+        let log = AntigravityLogSnapshot::default();
+        let t0 = 1_700_000_100_000u64;
+
+        let mut immediate = vec![make_ag_candidate(
+            "pre-stalled",
+            FourAppSessionKind::Working,
+            t0 - 75_000,
+        )];
+        apply_antigravity_liveness(&mut immediate, &log, &mut progress, t0);
+        assert_eq!(immediate[0].phase, FourAppSessionKind::NeedsAttention);
+        assert_eq!(
+            immediate[0].status_detail.as_deref(),
+            Some("等待模型响应已 1m15s（超 60s 无进展）")
+        );
+
+        let mut progress2 = BTreeMap::new();
+        let mut tick1 = vec![
+            make_ag_candidate("healthy", FourAppSessionKind::Working, t0 - 2_000),
+            make_ag_candidate("stalled", FourAppSessionKind::Working, t0 - 5_000),
+        ];
+        apply_antigravity_liveness(&mut tick1, &log, &mut progress2, t0);
+        assert_eq!(tick1[0].phase, FourAppSessionKind::Working);
+        assert_eq!(tick1[0].status_detail, None);
+        assert_eq!(tick1[1].phase, FourAppSessionKind::Working);
+        assert_eq!(tick1[1].status_detail, None);
+
+        let mut tick2 = vec![
+            make_ag_candidate("healthy", FourAppSessionKind::Working, t0 + 60_000),
+            make_ag_candidate("stalled", FourAppSessionKind::Working, t0 - 5_000),
+        ];
+        apply_antigravity_liveness(&mut tick2, &log, &mut progress2, t0 + 60_000);
+        assert_eq!(
+            tick2[0].place,
+            NavigationPlace::antigravity("stalled", "/ws/ag")
+        );
+        assert_eq!(tick2[0].phase, FourAppSessionKind::NeedsAttention);
+        assert_eq!(
+            tick2[0].status_detail.as_deref(),
+            Some("等待模型响应已 1m05s（超 60s 无进展）")
+        );
+        assert_eq!(
+            tick2[1].place,
+            NavigationPlace::antigravity("healthy", "/ws/ag")
+        );
+        assert_eq!(tick2[1].phase, FourAppSessionKind::Working);
+        assert_eq!(tick2[1].status_detail, None);
+    }
+
+    #[test]
+    fn api_error_enriches_matching_error_candidate_and_falls_back_when_stale() {
+        let mut progress = BTreeMap::new();
+        let err_ts = 1_700_000_100_000u64;
+        let log = AntigravityLogSnapshot {
+            latest_retry: None,
+            latest_api_error: Some(AntigravityLogApiError {
+                reason: "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 13m8s"
+                    .to_string(),
+                ts_ms: err_ts,
+            }),
+        };
+
+        let mut cands = vec![
+            make_ag_candidate("matched", FourAppSessionKind::Error, err_ts - 15_000),
+            make_ag_candidate("stale", FourAppSessionKind::Error, err_ts - 200_000),
+            make_ag_candidate("done", FourAppSessionKind::BlueDotCompleted, err_ts - 5_000),
+        ];
+        apply_antigravity_liveness(&mut cands, &log, &mut progress, err_ts + 2_000);
+        let by_id: BTreeMap<String, &FourAppLiveCandidate> =
+            cands.iter().map(|c| (c.place.target_id(), c)).collect();
+        assert_eq!(
+            by_id[&NavigationPlace::antigravity("matched", "/ws/ag").target_id()]
+                .status_detail
+                .as_deref(),
+            Some("API 报错：RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 13m8s")
+        );
+        assert_eq!(
+            by_id[&NavigationPlace::antigravity("stale", "/ws/ag").target_id()]
+                .status_detail
+                .as_deref(),
+            Some("执行出错，点击查看")
+        );
+        assert_eq!(
+            by_id[&NavigationPlace::antigravity("done", "/ws/ag").target_id()]
+                .status_detail
+                .as_deref(),
+            Some("已完成未读 · 按键直达")
+        );
+    }
+
+    #[test]
+    fn liveness_tracker_keeps_existing_during_grace_resets_on_pid_restart_and_bumps_episodes() {
+        let mut tracker = AntigravityLivenessTracker::new();
+        let t0 = Instant::now();
+        let now_ms = 1_700_000_000_000u64;
+
+        assert!(matches!(
+            tracker.reconcile_poll_result(None, || Some(4242), t0, now_ms),
+            AntigravityPollUpdate::KeepExisting
+        ));
+        assert!(matches!(
+            tracker.reconcile_poll_result(
+                None,
+                || Some(4242),
+                t0 + Duration::from_secs(2),
+                now_ms + 2_000
+            ),
+            AntigravityPollUpdate::KeepExisting
+        ));
+
+        let AntigravityPollUpdate::Replace(Some(warn_cat)) = tracker.reconcile_poll_result(
+            None,
+            || Some(4242),
+            t0 + Duration::from_secs(5),
+            now_ms + 5_000,
+        ) else {
+            panic!("expected warn synthetic catalog");
+        };
+        assert_eq!(warn_cat.candidates.len(), 1);
+        assert_eq!(
+            warn_cat.candidates[0].place,
+            NavigationPlace::app("com.google.antigravity")
+        );
+        assert_eq!(
+            warn_cat.candidates[0].phase,
+            FourAppSessionKind::NeedsAttention
+        );
+        assert_eq!(warn_cat.candidates[0].title, "Antigravity 后台重连中");
+        assert_eq!(warn_cat.candidates[0].watermark, "disconnect:warn:4242:1");
+        assert_eq!(
+            warn_cat.candidates[0].status_detail.as_deref(),
+            Some("正在重连 Antigravity 后台服务（5s）")
+        );
+
+        let AntigravityPollUpdate::Replace(Some(err_cat_1)) = tracker.reconcile_poll_result(
+            None,
+            || Some(4242),
+            t0 + Duration::from_secs(14),
+            now_ms + 14_000,
+        ) else {
+            panic!("expected error synthetic catalog");
+        };
+        assert_eq!(err_cat_1.candidates[0].phase, FourAppSessionKind::Error);
+        assert_eq!(err_cat_1.candidates[0].title, "Antigravity 后台断连");
+        assert_eq!(err_cat_1.candidates[0].watermark, "disconnect:error:4242:1");
+        assert_eq!(
+            err_cat_1.candidates[0].status_detail.as_deref(),
+            Some("Antigravity 后台守护进程无响应已 14s")
+        );
+
+        let healthy_cat = NavigationCatalog {
+            instance: CatalogInstance::Antigravity(AntigravityInstance {
+                hub: "hub-ok".into(),
+                pid: 4242,
+                ui_port: 8443,
+            }),
+            observed_at: t0 + Duration::from_secs(20),
+            candidates: Vec::new(),
+            project_ids: BTreeMap::new(),
+            frontmost_acknowledged: None,
+        };
+        assert!(matches!(
+            tracker.reconcile_poll_result(
+                Some(healthy_cat),
+                || Some(4242),
+                t0 + Duration::from_secs(20),
+                now_ms + 20_000,
+            ),
+            AntigravityPollUpdate::Replace(Some(_))
+        ));
+
+        assert!(matches!(
+            tracker.reconcile_poll_result(
+                None,
+                || Some(4242),
+                t0 + Duration::from_secs(30),
+                now_ms + 30_000,
+            ),
+            AntigravityPollUpdate::KeepExisting
+        ));
+        let AntigravityPollUpdate::Replace(Some(err_cat_2)) = tracker.reconcile_poll_result(
+            None,
+            || Some(4242),
+            t0 + Duration::from_secs(45),
+            now_ms + 45_000,
+        ) else {
+            panic!("expected second disconnect error catalog");
+        };
+        assert_eq!(err_cat_2.candidates[0].watermark, "disconnect:error:4242:2");
+        assert_ne!(
+            err_cat_2.candidates[0].watermark,
+            err_cat_1.candidates[0].watermark
+        );
+
+        assert!(matches!(
+            tracker.reconcile_poll_result(
+                None,
+                || Some(9999),
+                t0 + Duration::from_secs(46),
+                now_ms + 46_000,
+            ),
+            AntigravityPollUpdate::KeepExisting
+        ));
+        let AntigravityPollUpdate::Replace(Some(restarted_warn)) = tracker.reconcile_poll_result(
+            None,
+            || Some(9999),
+            t0 + Duration::from_secs(50),
+            now_ms + 50_000,
+        ) else {
+            panic!("expected restarted pid warn catalog");
+        };
+        assert_eq!(
+            restarted_warn.candidates[0].phase,
+            FourAppSessionKind::NeedsAttention
+        );
+        assert_eq!(
+            restarted_warn.candidates[0].watermark,
+            "disconnect:warn:9999:3"
+        );
+
+        assert!(matches!(
+            tracker.reconcile_poll_result(
+                None,
+                || None,
+                t0 + Duration::from_secs(55),
+                now_ms + 55_000,
+            ),
+            AntigravityPollUpdate::Replace(None)
+        ));
+    }
+
+    #[test]
+    fn activating_disconnect_slot_acknowledges_episode_and_second_episode_relights_red() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        let place = NavigationPlace::app("com.google.antigravity");
+
+        let make_disconnect_cat = |episode: u64| NavigationCatalog {
+            instance: CatalogInstance::Antigravity(AntigravityInstance {
+                hub: "disconnected".into(),
+                pid: 4242,
+                ui_port: 0,
+            }),
+            observed_at: Instant::now(),
+            candidates: vec![FourAppLiveCandidate {
+                place: place.clone(),
+                title: "Antigravity 后台断连".into(),
+                phase: FourAppSessionKind::Error,
+                watermark: format!("disconnect:error:4242:{episode}"),
+                last_modified_ms: 10_000 + episode,
+                last_user_view_ms: 0,
+                updated_at_ms: 10_000 + episode,
+                status_detail: Some("Antigravity 后台守护进程无响应已 14s".into()),
+            }],
+            project_ids: BTreeMap::new(),
+            frontmost_acknowledged: None,
+        };
+
+        store.update_navigation_catalog_for_source(
+            LiveSessionSource::Antigravity,
+            Some(make_disconnect_cat(1)),
+        );
+        assert_eq!(
+            store.projection().session_strip.slots[0].kind,
+            FourAppSessionKind::Error
+        );
+        assert_eq!(store.projection().canvas.underglow_hex, "#FF2200");
+
+        store.session_navigation.test_worker = Some(Box::new(|selected, reply| {
+            let _ = reply.send(Ok(selected));
+        }));
+        store
+            .dispatch_session_strip_action(SessionStripAction::ActivateSlot(0))
+            .unwrap();
+        store.poll_session_navigation();
+        assert_eq!(
+            store
+                .lighting_arbiter
+                .acknowledged_watermarks
+                .get(&place.target_id())
+                .map(String::as_str),
+            Some("disconnect:error:4242:1")
+        );
+        assert_eq!(
+            store.projection().session_strip.slots[0].kind,
+            FourAppSessionKind::Idle
+        );
+        assert_eq!(
+            store.projection().session_strip.slots[0].status_detail,
+            None
+        );
+        assert_eq!(store.projection().canvas.underglow_hex, "#000000");
+
+        store.update_navigation_catalog_for_source(
+            LiveSessionSource::Antigravity,
+            Some(make_disconnect_cat(2)),
+        );
+        assert_eq!(
+            store.projection().session_strip.slots[0].kind,
+            FourAppSessionKind::Error
+        );
+        assert_eq!(store.projection().canvas.underglow_hex, "#FF2200");
+    }
+
+    #[test]
+    fn status_detail_updates_projection_without_churning_slot_revision_or_hardware_led_and_localizes_en(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        let place = NavigationPlace::antigravity("conv-detail", "/ws/ag");
+
+        let make_cat = |title: &str, phase, detail: Option<&str>| NavigationCatalog {
+            instance: CatalogInstance::Antigravity(AntigravityInstance {
+                hub: "hub-1".into(),
+                pid: 100,
+                ui_port: 8443,
+            }),
+            observed_at: Instant::now(),
+            candidates: vec![FourAppLiveCandidate {
+                place: place.clone(),
+                title: title.into(),
+                phase,
+                watermark: "wm-err-1".into(),
+                last_modified_ms: 10_000,
+                last_user_view_ms: 0,
+                updated_at_ms: 10_000,
+                status_detail: detail.map(str::to_string),
+            }],
+            project_ids: BTreeMap::new(),
+            frontmost_acknowledged: None,
+        };
+
+        store.update_navigation_catalog_for_source(
+            LiveSessionSource::Antigravity,
+            Some(make_cat(
+                "Retry Conv",
+                FourAppSessionKind::NeedsAttention,
+                Some("等待模型响应已 1m01s（超 60s 无进展）"),
+            )),
+        );
+        let gen1 = store.projection_generation();
+        let rev1 = store
+            .session_navigation
+            .dispatch
+            .slots
+            .lock()
+            .unwrap()
+            .antigravity_revision;
+        let digest1 = store.lighting_arbiter.last_hardware_sync_json.clone();
+        assert_eq!(
+            store.projection().session_strip.slots[0]
+                .status_detail
+                .as_deref(),
+            Some("等待模型响应已 1m01s（超 60s 无进展）")
+        );
+
+        store.update_navigation_catalog_for_source(
+            LiveSessionSource::Antigravity,
+            Some(make_cat(
+                "Retry Conv",
+                FourAppSessionKind::NeedsAttention,
+                Some("等待模型响应已 1m05s（超 60s 无进展）"),
+            )),
+        );
+        let gen2 = store.projection_generation();
+        let rev2 = store
+            .session_navigation
+            .dispatch
+            .slots
+            .lock()
+            .unwrap()
+            .antigravity_revision;
+        let digest2 = store.lighting_arbiter.last_hardware_sync_json.clone();
+        assert!(gen2 > gen1);
+        assert_eq!(rev2, rev1);
+        assert_eq!(digest2, digest1);
+
+        store
+            .dispatch_header_action(HeaderAction::SetUiLanguage {
+                language: mi_model::UiLanguagePreference::En,
+            })
+            .unwrap();
+        assert_eq!(
+            store.projection().session_strip.slots[0]
+                .status_detail
+                .as_deref(),
+            Some("Waiting for model response for 1m05s (>60s stalled)")
+        );
+
+        store.update_navigation_catalog_for_source(
+            LiveSessionSource::Antigravity,
+            Some(make_cat(
+                "Antigravity 后台重连中",
+                FourAppSessionKind::NeedsAttention,
+                Some("正在重连 Antigravity 后台服务（5s）"),
+            )),
+        );
+        assert_eq!(
+            store.projection().session_strip.slots[0].title,
+            "Reconnecting Antigravity Daemon"
+        );
+        assert_eq!(
+            store.projection().session_strip.slots[0]
+                .status_detail
+                .as_deref(),
+            Some("Reconnecting Antigravity daemon (5s)")
+        );
+
+        store.update_navigation_catalog_for_source(
+            LiveSessionSource::Antigravity,
+            Some(make_cat(
+                "Antigravity 后台断连",
+                FourAppSessionKind::Error,
+                Some("API 报错：RESOURCE_EXHAUSTED (code 429)"),
+            )),
+        );
+        assert_eq!(
+            store.projection().session_strip.slots[0].title,
+            "Antigravity Daemon Disconnected"
+        );
+        assert_eq!(
+            store.projection().session_strip.slots[0]
+                .status_detail
+                .as_deref(),
+            Some("API error: RESOURCE_EXHAUSTED (code 429)")
+        );
+
+        assert_eq!(
+            crate::i18n::localize_session_status_detail(
+                "模型自动重试（第 2 次）：unexpected EOF · 4s",
+                mi_model::ResolvedLocale::En,
+            ),
+            "Model retrying (attempt 2): unexpected EOF · 4s"
+        );
+        assert_eq!(
+            crate::i18n::localize_session_status_detail(
+                "Antigravity 后台守护进程无响应已 14s",
+                mi_model::ResolvedLocale::En,
+            ),
+            "Antigravity daemon unresponsive for 14s"
+        );
+        assert_eq!(
+            crate::i18n::localize_session_status_detail(
+                "子代理等待审批或用户输入",
+                mi_model::ResolvedLocale::En,
+            ),
+            "Subagent waiting for approval or user input"
+        );
+
+        store.lighting_arbiter.acknowledge_slot(&place, "wm-err-1");
+        let acks_after = store.lighting_arbiter.acknowledged_watermarks.clone();
+        store.slot_table.refresh_with_watermarks(&acks_after);
+        store.refresh_four_app_lighting();
+        store.commit_runtime_update();
+        assert_eq!(
+            store.projection().session_strip.slots[0].kind,
+            FourAppSessionKind::Idle
+        );
+        assert_eq!(
+            store.projection().session_strip.slots[0].status_detail,
+            None
+        );
+    }
+
+    #[test]
+    fn classify_sets_direct_waiting_and_descendant_waiting_status_details() {
+        let summaries = serde_json::json!({
+            "main-direct": {
+                "summary": "Direct Wait",
+                "status": "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION",
+                "lastModifiedTime": "2026-11-21T14:00:00Z",
+                "workspaces": [{ "workspaceFolderAbsoluteUri": "file:///ws/a" }]
+            },
+            "main-parent": {
+                "summary": "Parent With Subagent",
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "lastModifiedTime": "2026-11-21T14:00:00Z",
+                "workspaces": [{ "workspaceFolderAbsoluteUri": "file:///ws/a" }]
+            },
+            "child-sub": {
+                "summary": "Subagent",
+                "status": "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT",
+                "trajectoryMetadata": { "parentConversationId": "main-parent" },
+                "workspaces": [{ "workspaceFolderAbsoluteUri": "file:///ws/a" }]
+            }
+        });
+        let mut seen = BTreeSet::new();
+        let mut wms = BTreeMap::new();
+        let (cands, _, _) = classify_antigravity_trajectory_summaries(
+            summaries.as_object().unwrap(),
+            None,
+            &mut seen,
+            &mut wms,
+        );
+        let by_title: BTreeMap<&str, &FourAppLiveCandidate> =
+            cands.iter().map(|c| (c.title.as_str(), c)).collect();
+        assert_eq!(
+            by_title["Direct Wait"].status_detail.as_deref(),
+            Some("等待审批或用户输入")
+        );
+        assert_eq!(
+            by_title["Parent With Subagent"].status_detail.as_deref(),
+            Some("子代理等待审批或用户输入")
+        );
+    }
 }

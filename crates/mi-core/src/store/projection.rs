@@ -1472,7 +1472,7 @@ impl ProjectionInputs<'_> {
                 place: cand.place.clone(),
                 agent,
                 agent_monogram: agent.badge_monogram_localized(locale).to_string(),
-                title: cand.title.clone(),
+                title: crate::i18n::localize_session_title(&cand.title, locale),
                 kind: eff_kind,
                 badge_text: eff_kind.badge_prefix().to_string(),
                 color_hex: eff_kind.capsule_hex().to_string(),
@@ -1541,6 +1541,10 @@ impl ProjectionInputs<'_> {
                 FourAppSessionKind::Idle => "空闲已读",
             };
             let subtitle = crate::i18n::tr(subtitle_zh, locale).to_string();
+            let title = crate::i18n::localize_session_title(&slot.title, locale);
+            let status_detail = cand
+                .and_then(|c| c.effective_status_detail(acks))
+                .map(|detail| crate::i18n::localize_session_status_detail(&detail, locale));
 
             SessionSlotCardProjection {
                 slot_index: idx,
@@ -1550,7 +1554,7 @@ impl ProjectionInputs<'_> {
                 kind,
                 agent,
                 agent_monogram,
-                title: slot.title.clone(),
+                title,
                 subtitle,
                 place: slot.place.clone(),
                 watermark: cand.map(|c| c.watermark.clone()).unwrap_or_default(),
@@ -1558,6 +1562,7 @@ impl ProjectionInputs<'_> {
                 is_working_animated,
                 is_bound_to_top_key,
                 led_color_hex,
+                status_detail,
             }
         });
 

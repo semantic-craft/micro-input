@@ -47,6 +47,8 @@ pub struct FourAppLiveCandidate {
     pub last_modified_ms: u64,
     pub last_user_view_ms: u64,
     pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_detail: Option<String>,
 }
 
 impl FourAppLiveCandidate {
@@ -114,6 +116,18 @@ impl FourAppLiveCandidate {
             FourAppSessionKind::Working => SlotStatus::Running,
             FourAppSessionKind::Error => SlotStatus::Error,
             FourAppSessionKind::Idle => SlotStatus::Idle,
+        }
+    }
+
+    pub fn effective_status_detail(
+        &self,
+        acknowledged_watermarks: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        match self.effective_kind(acknowledged_watermarks) {
+            FourAppSessionKind::NeedsAttention
+            | FourAppSessionKind::Error
+            | FourAppSessionKind::BlueDotCompleted => self.status_detail.clone(),
+            FourAppSessionKind::Working | FourAppSessionKind::Idle => None,
         }
     }
 }
@@ -486,6 +500,8 @@ pub struct SessionSlotCardProjection {
     pub is_working_animated: bool,
     pub is_bound_to_top_key: bool,
     pub led_color_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -523,6 +539,7 @@ impl Default for SessionStripProjection {
                 is_working_animated: false,
                 is_bound_to_top_key: false,
                 led_color_hex: "#222222".to_string(),
+                status_detail: None,
             }),
             completed_blue_dot_pills: Vec::new(),
             working_pills: Vec::new(),

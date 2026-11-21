@@ -185,6 +185,9 @@ impl SessionNavigation {
     pub(super) fn source_for_place(place: &NavigationPlace) -> Option<LiveSessionSource> {
         match place {
             NavigationPlace::Antigravity { .. } => Some(LiveSessionSource::Antigravity),
+            NavigationPlace::App { bundle_id } if bundle_id == "com.google.antigravity" => {
+                Some(LiveSessionSource::Antigravity)
+            }
             NavigationPlace::Codex { .. } => Some(LiveSessionSource::Codex),
             NavigationPlace::Session { adapter, .. } if adapter == "codex" => {
                 Some(LiveSessionSource::Codex)
@@ -1152,6 +1155,7 @@ mod tests {
             last_modified_ms: 5000,
             last_user_view_ms: 0,
             updated_at_ms: 5000,
+            status_detail: None,
         }
     }
     fn catalog(candidates: Vec<FourAppLiveCandidate>, hub: &str) -> NavigationCatalog {
@@ -2954,6 +2958,7 @@ mod tests {
                 last_modified_ms: 9_000 + idx,
                 last_user_view_ms: 9_000 + idx,
                 updated_at_ms: 9_000 + idx,
+                status_detail: None,
             });
         }
         rows.push(FourAppLiveCandidate {
@@ -2964,6 +2969,7 @@ mod tests {
             last_modified_ms: 9_999,
             last_user_view_ms: 9_999,
             updated_at_ms: 9_999,
+            status_detail: None,
         });
         rows.push(FourAppLiveCandidate {
             place: NavigationPlace::antigravity("done-unread", "/work"),
@@ -2973,6 +2979,7 @@ mod tests {
             last_modified_ms: 1_200,
             last_user_view_ms: 100,
             updated_at_ms: 1_200,
+            status_detail: None,
         });
         rows.push(FourAppLiveCandidate {
             place: NavigationPlace::antigravity("err-older", "/work"),
@@ -2982,6 +2989,7 @@ mod tests {
             last_modified_ms: 1_100,
             last_user_view_ms: 1_100,
             updated_at_ms: 1_100,
+            status_detail: None,
         });
         rows.push(FourAppLiveCandidate {
             place: NavigationPlace::antigravity("attn-oldest", "/work"),
@@ -2991,6 +2999,7 @@ mod tests {
             last_modified_ms: 1_000,
             last_user_view_ms: 1_000,
             updated_at_ms: 1_000,
+            status_detail: None,
         });
 
         store.update_navigation_catalog(Some(catalog(rows, "/tmp/hub")));
@@ -3116,6 +3125,7 @@ mod tests {
                     last_modified_ms: 4_000,
                     last_user_view_ms: 100,
                     updated_at_ms: 4_000,
+                    status_detail: None,
                 },
                 FourAppLiveCandidate {
                     place: NavigationPlace::antigravity("ag-err", "/work"),
@@ -3125,6 +3135,7 @@ mod tests {
                     last_modified_ms: 3_000,
                     last_user_view_ms: 3_000,
                     updated_at_ms: 3_000,
+                    status_detail: None,
                 },
             ];
             store.update_navigation_catalog_for_source(LiveSessionSource::Codex, Some(codex_cat));
@@ -3173,6 +3184,7 @@ mod tests {
                 last_modified_ms: 8_000,
                 last_user_view_ms: 8_000,
                 updated_at_ms: 8_000,
+                status_detail: None,
             });
             store.update_navigation_catalog_for_source(
                 LiveSessionSource::Antigravity,
@@ -3399,6 +3411,7 @@ mod tests {
                         last_modified_ms: 2_000,
                         last_user_view_ms: 2_000,
                         updated_at_ms: 2_000,
+                        status_detail: None,
                     }],
                     "/tmp/hub",
                 )),
@@ -3547,6 +3560,7 @@ mod tests {
                         last_modified_ms: 1_000,
                         last_user_view_ms: 1_000,
                         updated_at_ms: 1_000,
+                        status_detail: None,
                     }],
                     "/tmp/hub",
                 )),
@@ -3599,6 +3613,7 @@ mod tests {
                             last_modified_ms: 1_000,
                             last_user_view_ms: 1_000,
                             updated_at_ms: 1_000,
+                            status_detail: None,
                         },
                         FourAppLiveCandidate {
                             place: NavigationPlace::antigravity("ag-2", "/work/ag-repo"),
@@ -3608,6 +3623,7 @@ mod tests {
                             last_modified_ms: 4_000,
                             last_user_view_ms: 4_000,
                             updated_at_ms: 4_000,
+                            status_detail: None,
                         },
                     ],
                     "/tmp/hub",
@@ -3694,6 +3710,7 @@ mod tests {
                     last_modified_ms: 5_000,
                     last_user_view_ms: 5_000,
                     updated_at_ms: 5_000,
+                    status_detail: None,
                 }],
                 "/tmp/hub",
             )),
