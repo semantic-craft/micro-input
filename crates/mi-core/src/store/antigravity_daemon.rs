@@ -340,6 +340,66 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
     seen_running_ids: &mut BTreeSet<String>,
     completed_transition_watermarks: &mut BTreeMap<String, String>,
 ) -> ClassifiedAntigravityTrajectories {
+    let mut parent_map: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut waiting_sources: Vec<&str> = Vec::new();
+    for (cid, item) in summaries {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let ann = obj.get("annotations").and_then(Value::as_object);
+        if ann.and_then(|a| a.get("archived")).and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let killed = obj.get("killed").and_then(Value::as_bool).unwrap_or(false);
+        if killed {
+            continue;
+        }
+        if let Some(parent_id) = obj
+            .get("trajectoryMetadata")
+            .and_then(Value::as_object)
+            .and_then(|m| m.get("parentConversationId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            parent_map.insert(cid.as_str(), parent_id);
+        }
+        let waiting_steps = obj
+            .get("waitingSteps")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        let status_str = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("CASCADE_RUN_STATUS_IDLE");
+        if waiting_steps
+            || matches!(
+                status_str,
+                "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT"
+                    | "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION"
+            )
+        {
+            waiting_sources.push(cid.as_str());
+        }
+    }
+
+    let mut descendant_waiting_cids: BTreeSet<String> = BTreeSet::new();
+    for start_cid in waiting_sources {
+        let mut visited = BTreeSet::new();
+        visited.insert(start_cid);
+        let mut current = start_cid;
+        for _ in 0..8 {
+            let Some(&parent) = parent_map.get(current) else {
+                break;
+            };
+            if !visited.insert(parent) {
+                break;
+            }
+            descendant_waiting_cids.insert(parent.to_string());
+            current = parent;
+        }
+    }
+
     let mut candidates = Vec::new();
     let mut project_ids = BTreeMap::new();
     let mut frontmost_acknowledged = None;
@@ -471,14 +531,19 @@ pub(crate) fn classify_antigravity_trajectory_summaries(
 
         let last_modified_ms = parse_iso8601_utc_ms(last_mod_str);
         let raw_view_ms = parse_iso8601_utc_ms(view_str);
-        let watermark = if marked_unread {
+        let descendant_waiting = !killed && descendant_waiting_cids.contains(cid.as_str());
+        let has_waiting = waiting_steps || descendant_waiting;
+        let mut watermark = if marked_unread {
             format!("{status_str}:{last_mod_str}:{term_str}:unread")
         } else {
             format!("{status_str}:{last_mod_str}:{term_str}")
         };
+        if !waiting_steps && descendant_waiting {
+            watermark.push_str(":subwait");
+        }
 
         let (phase, effective_view_ms) = if !killed
-            && (waiting_steps
+            && (has_waiting
                 || matches!(
                     status_str,
                     "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT"
@@ -643,10 +708,23 @@ pub fn codex_observations_to_catalog(
     codex_home: std::path::PathBuf,
     observations: &[mi_macos::CodexThreadObservation],
 ) -> NavigationCatalog {
+    codex_observations_to_catalog_with_ack(codex_home, observations, None)
+}
+
+pub fn codex_observations_to_catalog_with_ack(
+    codex_home: std::path::PathBuf,
+    observations: &[mi_macos::CodexThreadObservation],
+    frontmost_acknowledged: Option<(NavigationPlace, String)>,
+) -> NavigationCatalog {
     let mut candidates = Vec::new();
 
     for obs in observations {
         let (phase, last_modified_ms, last_user_view_ms) = match &obs.status {
+            mi_macos::CodexObservedStatus::NeedsAttention => (
+                FourAppSessionKind::NeedsAttention,
+                obs.updated_at_ms,
+                obs.updated_at_ms,
+            ),
             mi_macos::CodexObservedStatus::Working => (
                 FourAppSessionKind::Working,
                 obs.updated_at_ms,
@@ -709,12 +787,33 @@ pub fn codex_observations_to_catalog(
         observed_at: Instant::now(),
         candidates,
         project_ids: BTreeMap::new(),
-        frontmost_acknowledged: None,
+        frontmost_acknowledged,
     }
 }
 
 pub(crate) fn poll_codex_session_candidates() -> Option<NavigationCatalog> {
     let codex_home = mi_macos::default_codex_home()?;
-    let observations = mi_macos::observe_codex_threads(&codex_home, 64).ok()?;
-    Some(codex_observations_to_catalog(codex_home, &observations))
+    let mut observations = mi_macos::observe_codex_threads(&codex_home, 64).ok()?;
+    let frontmost_acknowledged = if observations.iter().any(|obs| {
+        matches!(
+            obs.status,
+            mi_macos::CodexObservedStatus::Working | mi_macos::CodexObservedStatus::Unread
+        )
+    }) {
+        mi_macos::observe_codex_live_window_signals()
+            .and_then(|signals| mi_macos::apply_codex_window_signals(&mut observations, &signals))
+            .map(|(thread_id, host_id, workspace_path, watermark)| {
+                (
+                    NavigationPlace::codex(thread_id, host_id, workspace_path),
+                    watermark,
+                )
+            })
+    } else {
+        None
+    };
+    Some(codex_observations_to_catalog_with_ack(
+        codex_home,
+        &observations,
+        frontmost_acknowledged,
+    ))
 }

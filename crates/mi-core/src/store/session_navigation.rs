@@ -2518,4 +2518,188 @@ mod tests {
         reply_unlocked.send(Ok(requested_unlocked)).unwrap();
         store.poll_session_navigation();
     }
+
+    #[test]
+    fn antigravity_subagent_waiting_steps_roll_up_across_hops_ignore_killed_archived_and_guard_cycles(
+    ) {
+        let payload = json!({
+            "parent-1hop": {
+                "summary": "Parent 1-Hop",
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "hasRunningSubagents": true,
+                "lastModifiedTime": "2026-04-20T10:00:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "child-1hop": {
+                "summary": "Blocked Worker",
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "waitingSteps": [{"stepIndex": 3}],
+                "annotations": {"antigravity.isSubagent": true},
+                "trajectoryMetadata": {"parentConversationId": "parent-1hop", "nestingDepth": 1},
+                "lastModifiedTime": "2026-04-20T10:00:05Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "parent-multihop": {
+                "summary": "Parent Multi-Hop",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "hasRunningSubagents": true,
+                "lastModifiedTime": "2026-04-20T10:01:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "mid-hop": {
+                "summary": "Coordinator Subagent",
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "trajectoryMetadata": {"parentConversationId": "parent-multihop", "nestingDepth": 1},
+                "lastModifiedTime": "2026-04-20T10:01:01Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "leaf-hop": {
+                "summary": "Permission Subagent",
+                "status": "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION",
+                "trajectoryMetadata": {"parentConversationId": "mid-hop", "nestingDepth": 2},
+                "lastModifiedTime": "2026-04-20T10:01:02Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "parent-ignored-subagents": {
+                "summary": "Parent With Killed And Archived Subagents",
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "lastModifiedTime": "2026-04-20T10:02:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "killed-sub": {
+                "summary": "Killed Subagent",
+                "status": "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT",
+                "killed": true,
+                "waitingSteps": [{"stepIndex": 1}],
+                "trajectoryMetadata": {"parentConversationId": "parent-ignored-subagents"},
+                "lastModifiedTime": "2026-04-20T10:02:01Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "archived-sub": {
+                "summary": "Archived Subagent",
+                "status": "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION",
+                "waitingSteps": [{"stepIndex": 2}],
+                "annotations": {"archived": true},
+                "trajectoryMetadata": {"parentConversationId": "parent-ignored-subagents"},
+                "lastModifiedTime": "2026-04-20T10:02:02Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "cycle-a": {
+                "summary": "Cycle A",
+                "status": "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION",
+                "trajectoryMetadata": {"parentConversationId": "cycle-b"},
+                "lastModifiedTime": "2026-04-20T10:03:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "cycle-b": {
+                "summary": "Cycle B",
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "trajectoryMetadata": {"parentConversationId": "cycle-a"},
+                "lastModifiedTime": "2026-04-20T10:03:01Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            }
+        });
+
+        let mut seen_running = BTreeSet::new();
+        let mut completed_watermarks = BTreeMap::new();
+        let (candidates, _, _) = classify_antigravity_trajectory_summaries(
+            payload.as_object().unwrap(),
+            None,
+            &mut seen_running,
+            &mut completed_watermarks,
+        );
+        let by_id: BTreeMap<String, &FourAppLiveCandidate> = candidates
+            .iter()
+            .filter_map(|c| match &c.place {
+                NavigationPlace::Antigravity {
+                    conversation_id, ..
+                } => Some((conversation_id.clone(), c)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(by_id.len(), 3);
+        assert_eq!(
+            by_id["parent-1hop"].phase,
+            FourAppSessionKind::NeedsAttention
+        );
+        assert!(by_id["parent-1hop"].watermark.ends_with(":subwait"));
+        assert_eq!(
+            by_id["parent-multihop"].phase,
+            FourAppSessionKind::NeedsAttention
+        );
+        assert!(by_id["parent-multihop"].watermark.ends_with(":subwait"));
+        assert_eq!(
+            by_id["parent-ignored-subagents"].phase,
+            FourAppSessionKind::Working
+        );
+        assert!(!by_id["parent-ignored-subagents"]
+            .watermark
+            .ends_with(":subwait"));
+    }
+
+    #[test]
+    fn codex_observations_to_catalog_maps_needs_attention_and_propagates_frontmost_acknowledgement()
+    {
+        let observations = vec![
+            codex_obs(
+                "working-1",
+                "local",
+                "Working Task",
+                mi_macos::CodexObservedStatus::Working,
+                9_000,
+                "wm-work",
+            ),
+            codex_obs(
+                "attn-1",
+                "local",
+                "Approval Task",
+                mi_macos::CodexObservedStatus::NeedsAttention,
+                1_000,
+                "wm-attn:attention",
+            ),
+            codex_obs(
+                "acked-1",
+                "local",
+                "Viewed Unread Task",
+                mi_macos::CodexObservedStatus::Idle,
+                5_000,
+                "wm-unread-1",
+            ),
+        ];
+        let ack_place = NavigationPlace::codex("acked-1", "local", "/work/codex-repo");
+        let cat = super::super::codex_observations_to_catalog_with_ack(
+            PathBuf::from("/tmp/codex-home"),
+            &observations,
+            Some((ack_place.clone(), "wm-unread-1".to_string())),
+        );
+        assert_eq!(cat.candidates[0].title, "Approval Task");
+        assert_eq!(cat.candidates[0].phase, FourAppSessionKind::NeedsAttention);
+        assert_eq!(cat.candidates[0].watermark, "wm-attn:attention");
+        assert_eq!(
+            cat.frontmost_acknowledged,
+            Some((ack_place.clone(), "wm-unread-1".to_string()))
+        );
+
+        let (_dir, mut store) = store();
+        store.update_navigation_catalog(Some(cat));
+
+        let away_catalog = codex_observations_to_catalog(
+            PathBuf::from("/tmp/codex-home"),
+            &[codex_obs(
+                "acked-1",
+                "local",
+                "Viewed Unread Task",
+                mi_macos::CodexObservedStatus::Unread,
+                5_000,
+                "wm-unread-1",
+            )],
+        );
+        assert_eq!(
+            away_catalog.candidates[0].phase,
+            FourAppSessionKind::BlueDotCompleted
+        );
+        assert!(!away_catalog.candidates[0]
+            .is_unread_blue_dot(&store.lighting_arbiter.acknowledged_watermarks));
+    }
 }

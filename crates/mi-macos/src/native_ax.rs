@@ -55,12 +55,19 @@ pub fn observe_codex_window_state() -> Result<crate::codex_sessions::CodexWindow
     Err(blocked("macos_required"))
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn observe_codex_live_window_signals() -> Option<crate::codex_sessions::CodexLiveWindowSignals>
+{
+    None
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) use macos::activate_focused_codex_window;
 #[cfg(target_os = "macos")]
 pub use macos::{
     frontmost_selected_antigravity_conversation, observe_antigravity_sidebar_conversations,
-    observe_codex_window_state, NativeAxProvider, NativeSessionNavigation,
+    observe_codex_live_window_signals, observe_codex_window_state, NativeAxProvider,
+    NativeSessionNavigation,
 };
 
 #[cfg(target_os = "macos")]
@@ -1643,14 +1650,36 @@ mod macos {
             .map(str::to_owned)
     }
 
-    fn summarize_codex_window(
-        window_title: String,
-        nodes: &[CodexObservedNode],
-    ) -> crate::codex_sessions::CodexWindowSnapshot {
+    fn is_codex_attention_badge(raw: &str) -> bool {
+        let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if matches!(
+            normalized.as_str(),
+            "需要批准" | "等待批准" | "待审批" | "需要输入"
+        ) {
+            return true;
+        }
+        matches!(
+            normalized.to_ascii_lowercase().as_str(),
+            "needs approval" | "awaiting approval" | "needs input"
+        )
+    }
+
+    struct CodexParsedWindow {
+        toolbar_project: Option<String>,
+        active_sidebar_texts: Vec<String>,
+        attention_sidebar_titles: Vec<String>,
+        main_pane_texts: Vec<String>,
+        saw_failed_to_resume: bool,
+        saw_no_rollout: bool,
+    }
+
+    fn parse_codex_window_nodes(nodes: &[CodexObservedNode]) -> CodexParsedWindow {
         let mut in_toolbar = vec![false; nodes.len()];
         let mut in_web_area = vec![false; nodes.len()];
         let mut is_sidebar_list = vec![false; nodes.len()];
         let mut in_sidebar_list = vec![false; nodes.len()];
+        let mut is_sidebar_row_button = vec![false; nodes.len()];
+        let mut in_sidebar_button = vec![false; nodes.len()];
         let mut in_active_sidebar_button = vec![false; nodes.len()];
 
         for i in 0..nodes.len() {
@@ -1679,6 +1708,11 @@ mod macos {
             let parent_sidebar = nodes[i].parent.is_some_and(|p| in_sidebar_list[p]);
             in_sidebar_list[i] = parent_sidebar || is_sidebar_list[i];
 
+            let parent_sidebar_btn = nodes[i].parent.is_some_and(|p| in_sidebar_button[p]);
+            let row_btn = in_sidebar_list[i] && nodes[i].role == "AXButton" && !parent_sidebar_btn;
+            is_sidebar_row_button[i] = row_btn;
+            in_sidebar_button[i] = parent_sidebar_btn || row_btn;
+
             let parent_active_btn = nodes[i].parent.is_some_and(|p| in_active_sidebar_button[p]);
             let is_active_btn = in_sidebar_list[i]
                 && nodes[i].role == "AXButton"
@@ -1687,6 +1721,37 @@ mod macos {
                     .as_deref()
                     .is_some_and(|v| v.trim() == "page");
             in_active_sidebar_button[i] = parent_active_btn || is_active_btn;
+        }
+
+        let mut attention_sidebar_titles = Vec::new();
+        for (i, &is_row) in is_sidebar_row_button.iter().enumerate() {
+            if !is_row {
+                continue;
+            }
+            let end = codex_subtree_end(nodes, i);
+            let mut row_texts = Vec::new();
+            for node in &nodes[i..end] {
+                if !matches!(
+                    node.role.as_str(),
+                    "AXStaticText" | "AXButton" | "AXHeading" | "AXLink"
+                ) {
+                    continue;
+                }
+                for raw in [&node.value, &node.title, &node.description] {
+                    let trimmed = raw.trim();
+                    if !trimmed.is_empty() && !row_texts.iter().any(|t: &String| t == trimmed) {
+                        row_texts.push(trimmed.to_owned());
+                    }
+                }
+            }
+            if row_texts.iter().any(|t| is_codex_attention_badge(t)) {
+                for text in row_texts {
+                    if !is_codex_attention_badge(&text) && !attention_sidebar_titles.contains(&text)
+                    {
+                        attention_sidebar_titles.push(text);
+                    }
+                }
+            }
         }
 
         let mut toolbar_project = None;
@@ -1738,15 +1803,44 @@ mod macos {
             }
         }
 
-        let has_resume_error = saw_failed_to_resume
-            && (window_title.trim() == "ChatGPT" || (saw_no_rollout && main_pane_texts.len() <= 6));
+        CodexParsedWindow {
+            toolbar_project,
+            active_sidebar_texts,
+            attention_sidebar_titles,
+            main_pane_texts,
+            saw_failed_to_resume,
+            saw_no_rollout,
+        }
+    }
+
+    fn summarize_codex_window(
+        window_title: String,
+        nodes: &[CodexObservedNode],
+    ) -> crate::codex_sessions::CodexWindowSnapshot {
+        let parsed = parse_codex_window_nodes(nodes);
+        let has_resume_error = parsed.saw_failed_to_resume
+            && (window_title.trim() == "ChatGPT"
+                || (parsed.saw_no_rollout && parsed.main_pane_texts.len() <= 6));
 
         crate::codex_sessions::CodexWindowSnapshot {
             window_title,
-            toolbar_project,
-            active_sidebar_texts,
-            main_pane_texts,
+            toolbar_project: parsed.toolbar_project,
+            active_sidebar_texts: parsed.active_sidebar_texts,
+            main_pane_texts: parsed.main_pane_texts,
             has_resume_error,
+        }
+    }
+
+    fn summarize_codex_live_window_signals(
+        is_frontmost: bool,
+        nodes: &[CodexObservedNode],
+    ) -> crate::codex_sessions::CodexLiveWindowSignals {
+        let parsed = parse_codex_window_nodes(nodes);
+        crate::codex_sessions::CodexLiveWindowSignals {
+            is_frontmost,
+            toolbar_project: parsed.toolbar_project,
+            active_sidebar_texts: parsed.active_sidebar_texts,
+            attention_sidebar_titles: parsed.attention_sidebar_titles,
         }
     }
 
@@ -1759,6 +1853,69 @@ mod macos {
         })?;
         window.validate(None)?;
         Ok(summarize_codex_window(window.title, &nodes))
+    }
+
+    pub fn observe_codex_live_window_signals(
+    ) -> Option<crate::codex_sessions::CodexLiveWindowSignals> {
+        if !unsafe { AXIsProcessTrusted() } {
+            return None;
+        }
+        let pid = crate::executor::find_pid_for_bundle_id("com.openai.codex")?;
+        if pid <= 0 {
+            return None;
+        }
+        let application = unsafe { Owned::from_create(AXUIElementCreateApplication(pid)) }?;
+        let deadline = Instant::now() + Duration::from_millis(400);
+        if unsafe { AXUIElementSetMessagingTimeout(application.0, 0.2) } != 0 {
+            return None;
+        }
+        enable_application_accessibility(&application).ok()?;
+        let mut attrs = application
+            .attributes(&["AXFrontmost", "AXFocusedWindow", "AXWindows"], deadline)
+            .ok()?
+            .into_iter();
+        let is_frontmost = bool_attribute(attrs.next().flatten())
+            .ok()?
+            .unwrap_or(false);
+        let focused = attrs.next().flatten();
+        let windows = attrs.next().flatten()?.array().ok()?;
+        let mut visible = Vec::new();
+        for element in windows {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            let Ok(win_attrs) = element.attributes(&["AXRole", "AXMinimized"], deadline) else {
+                continue;
+            };
+            let mut win_attrs = win_attrs.into_iter();
+            let Ok(Some(role)) = text_attribute(win_attrs.next().flatten()) else {
+                continue;
+            };
+            let minimized = bool_attribute(win_attrs.next().flatten())
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+            if role == "AXWindow" && !minimized {
+                visible.push(element);
+            }
+        }
+        if visible.is_empty() {
+            return None;
+        }
+        let index = focused
+            .as_ref()
+            .and_then(|focused| {
+                visible
+                    .iter()
+                    .position(|window| unsafe { CFEqual(window.0, focused.0) } != 0)
+            })
+            .unwrap_or(0);
+        let window = visible.swap_remove(index);
+        let nodes = collect_codex_nodes(window, deadline, |element| {
+            read_codex_ax_node(|names| element.attributes(names, deadline))
+        })
+        .ok()?;
+        Some(summarize_codex_live_window_signals(is_frontmost, &nodes))
     }
 
     fn find_sidebar_conversation_link(
@@ -6002,6 +6159,34 @@ mod macos {
             ];
             let normal_snap = summarize_codex_window("Debug chat".into(), &normal_chat_nodes);
             assert!(!normal_snap.has_resume_error);
+
+            let attention_nodes = vec![
+                n(None, "AXWindow", "Active Thread", "", "", None),
+                n(Some(0), "AXToolbar", "", "Chat toolbar", "", None),
+                n(Some(1), "AXImage", "", "Project: micro-input", "", None),
+                n(Some(0), "AXWebArea", "", "", "", None),
+                n(Some(3), "AXList", "", "Threads", "", None),
+                n(Some(4), "AXButton", "Active Thread", "", "", Some("page")),
+                n(Some(5), "AXStaticText", "", "", "2m", None),
+                n(Some(4), "AXButton", "Deploy Staging", "", "", None),
+                n(Some(7), "AXStaticText", "", "", "Needs approval", None),
+                n(Some(4), "AXButton", "", "", "", None),
+                n(Some(9), "AXStaticText", "", "", "迁移数据库", None),
+                n(Some(9), "AXStaticText", "", "", "需要批准", None),
+                n(Some(4), "AXButton", "Fix needs approval copy", "", "", None),
+                n(Some(12), "AXStaticText", "", "", "Running", None),
+            ];
+            let live_signals = summarize_codex_live_window_signals(true, &attention_nodes);
+            assert!(live_signals.is_frontmost);
+            assert_eq!(live_signals.toolbar_project.as_deref(), Some("micro-input"));
+            assert_eq!(
+                live_signals.active_sidebar_texts,
+                vec!["Active Thread".to_string(), "2m".to_string()]
+            );
+            assert_eq!(
+                live_signals.attention_sidebar_titles,
+                vec!["Deploy Staging".to_string(), "迁移数据库".to_string()]
+            );
         }
 
         #[test]

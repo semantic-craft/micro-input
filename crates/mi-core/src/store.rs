@@ -122,9 +122,11 @@ mod tests;
 mod workbench_actions;
 #[cfg(test)]
 pub(crate) use antigravity_daemon::classify_antigravity_trajectory_summaries;
-pub use antigravity_daemon::codex_observations_to_catalog;
 use antigravity_daemon::ensure_private_document_dir;
 pub(crate) use antigravity_daemon::poll_antigravity_daemon_candidates_with_frontmost;
+pub use antigravity_daemon::{
+    codex_observations_to_catalog, codex_observations_to_catalog_with_ack,
+};
 use inspector_editor_actions::resolve_merged_bottom_slot;
 pub use lighting_preview_store::{
     LightingPreviewBeginFuture, LightingPreviewEndFuture, LightingPreviewHandle,

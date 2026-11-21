@@ -78,11 +78,20 @@ unsafe extern "C" {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexObservedStatus {
+    NeedsAttention,
     Working,
     Error,
     Unread,
     Idle,
     Unknown(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexLiveWindowSignals {
+    pub is_frontmost: bool,
+    pub toolbar_project: Option<String>,
+    pub active_sidebar_texts: Vec<String>,
+    pub attention_sidebar_titles: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +192,21 @@ impl SqliteDb {
             let value = stmt.col_text(0)?;
             if !value.is_empty() {
                 set.insert(value);
+            }
+        }
+        Ok(set)
+    }
+
+    fn query_optional_text_set(&self, sql: &str) -> Result<BTreeSet<String>, String> {
+        let Ok(mut stmt) = self.prepare(sql) else {
+            return Ok(BTreeSet::new());
+        };
+        let mut set = BTreeSet::new();
+        while stmt.step()? {
+            let value = stmt.col_text(0)?;
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                set.insert(trimmed.to_owned());
             }
         }
         Ok(set)
@@ -449,6 +473,16 @@ impl CodexDbs {
         Ok(stmt.step()? && stmt.col_int64(0) != 0)
     }
 
+    fn load_child_thread_ids(&self) -> Result<BTreeSet<String>, String> {
+        let mut ids = self.state.query_optional_text_set(
+            "SELECT id FROM threads WHERE attached_thread_parent_id IS NOT NULL AND attached_thread_parent_id != '' LIMIT 4096",
+        )?;
+        ids.extend(self.state.query_optional_text_set(
+            "SELECT child_thread_id FROM thread_spawn_edges LIMIT 4096",
+        )?);
+        Ok(ids)
+    }
+
     fn load_unread_receipts(&self) -> Result<BTreeMap<String, String>, String> {
         let mut stmt = self.state.prepare(
             "SELECT thread_id, first_unread_turn FROM thread_read_receipts WHERE first_unread_turn IS NOT NULL AND first_unread_turn != '' ORDER BY rowid DESC LIMIT 4096",
@@ -566,12 +600,141 @@ fn map_codex_status(
 
 fn status_priority_rank(status: &CodexObservedStatus) -> u8 {
     match status {
-        CodexObservedStatus::Working | CodexObservedStatus::Error | CodexObservedStatus::Unread => {
-            0
-        }
-        CodexObservedStatus::Idle => 1,
-        CodexObservedStatus::Unknown(_) => 2,
+        CodexObservedStatus::NeedsAttention => 0,
+        CodexObservedStatus::Error => 1,
+        CodexObservedStatus::Unread => 2,
+        CodexObservedStatus::Working => 3,
+        CodexObservedStatus::Idle => 4,
+        CodexObservedStatus::Unknown(_) => 5,
     }
+}
+
+fn sort_codex_observations(observations: &mut [CodexThreadObservation]) {
+    observations.sort_by(|a, b| {
+        status_priority_rank(&a.status)
+            .cmp(&status_priority_rank(&b.status))
+            .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
+    });
+}
+
+fn workspace_basename(workspace_path: &str) -> Option<&str> {
+    let trimmed = workspace_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+}
+
+fn workspace_matches_toolbar_project(workspace_path: &str, toolbar_project: Option<&str>) -> bool {
+    let Some(proj) = toolbar_project.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    match workspace_basename(workspace_path) {
+        Some(base) => base.eq_ignore_ascii_case(proj),
+        None => true,
+    }
+}
+
+pub fn apply_codex_window_signals(
+    observations: &mut [CodexThreadObservation],
+    signals: &CodexLiveWindowSignals,
+) -> Option<(String, String, String, String)> {
+    let mut working_title_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for obs in observations.iter() {
+        if obs.status == CodexObservedStatus::Working {
+            let title = obs.display_title.trim();
+            if !title.is_empty() {
+                *working_title_counts.entry(title.to_owned()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut status_mutated = false;
+    for obs in observations.iter_mut() {
+        if obs.status != CodexObservedStatus::Working {
+            continue;
+        }
+        let title = obs.display_title.trim();
+        if title.is_empty() || working_title_counts.get(title) != Some(&1) {
+            continue;
+        }
+        if signals
+            .attention_sidebar_titles
+            .iter()
+            .any(|candidate| candidate.trim() == title)
+        {
+            obs.status = CodexObservedStatus::NeedsAttention;
+            if obs.watermark.is_empty() {
+                obs.watermark = format!("{}:attention", obs.updated_at_ms);
+            } else if !obs.watermark.ends_with(":attention") {
+                obs.watermark.push_str(":attention");
+            }
+            status_mutated = true;
+        }
+    }
+
+    let mut frontmost_ack = None;
+    if signals.is_frontmost {
+        let toolbar_proj = signals
+            .toolbar_project
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let unread_matches: Vec<usize> = observations
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, obs)| {
+                if obs.status != CodexObservedStatus::Unread {
+                    return None;
+                }
+                let title = obs.display_title.trim();
+                if title.is_empty() {
+                    return None;
+                }
+                let in_active_sidebar = signals
+                    .active_sidebar_texts
+                    .iter()
+                    .any(|text| text.trim() == title);
+                (in_active_sidebar
+                    && workspace_matches_toolbar_project(&obs.workspace_path, toolbar_proj))
+                .then_some(idx)
+            })
+            .collect();
+        if let [idx] = unread_matches.as_slice() {
+            let target_title = observations[*idx].display_title.trim();
+            let total_matching = observations
+                .iter()
+                .filter(|obs| {
+                    obs.display_title.trim() == target_title
+                        && workspace_matches_toolbar_project(&obs.workspace_path, toolbar_proj)
+                })
+                .count();
+            if total_matching == 1 {
+                let obs = &mut observations[*idx];
+                let watermark = if obs.watermark.is_empty() {
+                    obs.updated_at_ms.to_string()
+                } else {
+                    obs.watermark.clone()
+                };
+                frontmost_ack = Some((
+                    obs.thread_id.clone(),
+                    obs.host_id.clone(),
+                    obs.workspace_path.trim().to_owned(),
+                    watermark,
+                ));
+                obs.status = CodexObservedStatus::Idle;
+                status_mutated = true;
+            }
+        }
+    }
+
+    if status_mutated {
+        sort_codex_observations(observations);
+    }
+    frontmost_ack
 }
 
 pub fn observe_codex_threads(
@@ -585,6 +748,7 @@ pub fn observe_codex_threads(
     let archived_ids = dbs.state.query_text_set(
         "SELECT id FROM threads WHERE archived != 0 ORDER BY rowid DESC LIMIT 4096",
     )?;
+    let child_thread_ids = dbs.load_child_thread_ids()?;
     let active_turn_ids = dbs.codex.query_text_set(
         "SELECT thread_id FROM active_chat_turns GROUP BY thread_id ORDER BY MAX(rowid) DESC LIMIT 256",
     )?;
@@ -608,7 +772,10 @@ pub fn observe_codex_threads(
     let mut observations = Vec::with_capacity(limit.min(64));
     while catalog.step()? {
         let thread_id = catalog.col_text(0)?;
-        if !is_valid_uuid(&thread_id) || archived_ids.contains(&thread_id) {
+        if !is_valid_uuid(&thread_id)
+            || archived_ids.contains(&thread_id)
+            || child_thread_ids.contains(&thread_id)
+        {
             continue;
         }
         let in_active_turns = active_turn_ids.contains(&thread_id);
@@ -650,11 +817,7 @@ pub fn observe_codex_threads(
             watermark,
         });
     }
-    observations.sort_by(|a, b| {
-        status_priority_rank(&a.status)
-            .cmp(&status_priority_rank(&b.status))
-            .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
-    });
+    sort_codex_observations(&mut observations);
     observations.truncate(limit);
     Ok(observations)
 }
