@@ -599,11 +599,11 @@ private struct SessionStripDTO: Decodable {
         let isOpen, lightingEnabled, autoSessionColor, onlyGlowOnAttentionOrCompleted, glowOnWorking, suspendedByProtectedLayer: Bool?
         let ambientColor, workingColor, brightness, autoOffTimeout, manualPreviewPhase: String?
     }
-    let unreadCompletedCount, workingCount: Int?; let topSixBoundAsSessionKeys, canMutateLayout: Bool?
+    let attentionCount, unreadCompletedCount, workingCount: Int?; let topSixBoundAsSessionKeys, canMutateLayout: Bool?
     let slots: [SlotDTO]?; let lightingPopover: LightingPopoverDTO?
 
     func apply(to m: inout ProjectionModel) {
-        m.unreadCompletedCount = unreadCompletedCount ?? 0; m.workingCount = workingCount ?? 0
+        m.attentionCount = attentionCount ?? 0; m.unreadCompletedCount = unreadCompletedCount ?? 0; m.workingCount = workingCount ?? 0
         m.topSixBoundAsSessionKeys = topSixBoundAsSessionKeys ?? false; m.canMutateSessionLayout = canMutateLayout ?? true
         if let slots {
             m.sessionSlots = slots.map {
@@ -620,7 +620,7 @@ private struct SessionStripDTO: Decodable {
             m.simpleLighting = SimpleLightingModel(
                 isOpen: lp.isOpen ?? false, lightingEnabled: lp.lightingEnabled ?? true,
                 autoSessionColor: lp.autoSessionColor ?? true, onlyGlowOnAttentionOrCompleted: lp.onlyGlowOnAttentionOrCompleted ?? true,
-                glowOnWorking: lp.glowOnWorking ?? true, ambientColor: lp.ambientColor ?? "OceanBlue",
+                glowOnWorking: lp.glowOnWorking ?? false, ambientColor: lp.ambientColor ?? "OceanBlue",
                 workingColor: lp.workingColor ?? "EmeraldGreen", brightness: lp.brightness ?? "Standard",
                 autoOffTimeout: lp.autoOffTimeout ?? "ThreeMinutes", manualPreviewPhase: lp.manualPreviewPhase,
                 suspendedByProtectedLayer: lp.suspendedByProtectedLayer ?? false

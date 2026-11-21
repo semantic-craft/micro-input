@@ -167,7 +167,7 @@ public struct SimpleLightingModel: Equatable {
     public var lightingEnabled: Bool = true
     public var autoSessionColor: Bool = true
     public var onlyGlowOnAttentionOrCompleted: Bool = true
-    public var glowOnWorking: Bool = true
+    public var glowOnWorking: Bool = false
     public var ambientColor: String = "OceanBlue"
     public var workingColor: String = "EmeraldGreen"
     public var brightness: String = "Standard"
@@ -733,6 +733,7 @@ public struct CanvasSliceModel: Equatable {
 
 public struct SessionStripSliceModel: Equatable {
     public var sessionSlots: [SessionSlotModel] = []
+    public var attentionCount: Int = 0
     public var unreadCompletedCount: Int = 0
     public var workingCount: Int = 0
     public var topSixBoundAsSessionKeys: Bool = false
@@ -742,6 +743,7 @@ public struct SessionStripSliceModel: Equatable {
 
     public init(from m: ProjectionModel) {
         self.sessionSlots = m.sessionSlots
+        self.attentionCount = m.attentionCount
         self.unreadCompletedCount = m.unreadCompletedCount
         self.workingCount = m.workingCount
         self.topSixBoundAsSessionKeys = m.topSixBoundAsSessionKeys
@@ -917,6 +919,7 @@ public struct ProjectionModel: Equatable {
     public var canExportOrCopyLayer: Bool = true
 
     public var sessionSlots: [SessionSlotModel] = []
+    public var attentionCount: Int = 0
     public var unreadCompletedCount: Int = 0
     public var workingCount: Int = 0
     public var topSixBoundAsSessionKeys: Bool = false
