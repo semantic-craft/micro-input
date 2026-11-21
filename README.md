@@ -1,6 +1,8 @@
 # Micro Input
 
-[简体中文](#简体中文) · [English](#english) · [最新发行版 v0.11.4](docs/releases/v0.11.4.md) · [开发状态与历史验收日志](docs/status.md)
+[简体中文](#简体中文) · [English](#english) · [最新发行版 v0.12.0](docs/releases/v0.12.0.md) · [24 秒演示短片](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-landing-zh.mp4) · [开发状态与历史验收日志](docs/status.md)
+
+[![Micro Input v0.12.0 演示短片](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-readme-preview.webp)](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-landing-zh.mp4)
 
 ## 简体中文
 
@@ -11,7 +13,7 @@ Micro Input 采用纯 Rust 内核、极简 C-ABI 边界与原生 SwiftUI 和 App
 ### 谁能用上 Micro Input
 
 - **想给自己现有外设开发 Antigravity 联动的玩家与开发者。** 你不需要购买 Creator Micro 2。市面上大多数桌面外设、宏键盘、LCD 按键盒、旋钮控制台或脚踏板只缺一个可靠的 Antigravity 本地状态与窗口定位入口；本仓已具备经实测收敛的 `GetAllCascadeTrajectories` 摘要轮询、主会话过滤规则、`/c/<id>` 零弹窗直达与辅助功能极速聚焦方案，可直接用作你开发自有外设插件、灯效同步或驱动桥的参考与底层基石。
-- **不插任何小键盘、纯在 macOS 上使用的 AI 编码用户。** 不连接 USB 外设也能打开工作台与 `⇧⌘M` 菜单栏面板，通过本地解析直接观察 Antigravity、Codex 与 Deepseek Harness 会话的运行绿点与未读海洋蓝点，点击面板槽位直达对应对话窗口，并用「试运行此动作」触发快捷粘贴与桌面自动化命令。
+- **不插任何小键盘、纯在 macOS 上使用的 AI 编码用户。** 不连接 USB 外设也能打开工作台与 `⇧⌘M` 菜单栏面板，通过本地解析直接观察 Antigravity 与 Codex 会话的待审批琥珀金提示、未读报错珊瑚红提示与未读完成海洋蓝点，点击面板槽位直达对应对话窗口，并用「试运行此动作」触发快捷粘贴与桌面自动化命令。
 - **需要替代 `Input.app` 与重塑 Codex 的 Creator Micro 2 使用者。** 插上 `303A:8298` 设备即可在 macOS 脱离跨平台客户端完成 281 项硬件键码映射、更新官方最新固件 `0.7.0-rc.16`、启用 Antigravity 物理工作流并打破原厂 Codex 插件的固定动作限制。
 
 ### 不插键盘也能用于自有外设开发的本机 Antigravity 解析方案
@@ -30,19 +32,19 @@ Creator Micro 2 配备 13 个机械开关、1 个旋钮与 1 个摇杆共 20 个
 Micro Input 一方面在 macOS 上完整接管日常配置、通用快捷键映射与官方固件升级，另一方面把这块左手边的小键盘改造成可按工作流定制的**独立物理控制台**。
 
 - **接管日常按键配置与最新固件更新，不必再依赖 Electron 版官方软件。** 支持 281 项设备硬件键码、系统快捷键与苹果专属 `Fn` 语音键录制、本地宏、文本指令安全粘贴、桌面鼠标控制及直连键盘原生 `lights.preview` 的两区实时灯效预览，并可直接下载、校验并安全刷入含 `0.7.0-rc.16` 在内的官方最新固件，解锁板载硬件鼠标与无写 Flash 切层。
-- **从盲按快捷键变成带余光感知的副屏。** 顶部机械键承担后台 Agent 会话状态指示与一键直达，不用频繁切换编辑窗口或扫视侧边栏，仅靠键帽灯光颜色就能掌握推理与完成进度。
+- **从盲按快捷键变成只报待办、不造噪音的余光收件箱。** 顶部机械键按「运行静默、待办亮灯」原则指示后台会话，进行中的推理默认保持熄灯零干扰，已完成未读仅点亮对应单键常亮海洋蓝，仅当主会话或子代理卡在待审批输入或出现未读报错时才呼吸琥珀金或珊瑚红并联动底部氛围光（`sa: true`），单键直达或前台检视即刻核销熄灯。
 - **突破原生插件限制，按个人习惯重塑 Codex 与多 Agent 手感。** 针对 **Antigravity** 打磨全套物理键位与零弹窗直达链路，同时接管并扩展固定死的官方 **Codex** 插件，允许自由重绑所有 20 个控制位，并与 **Deepseek Harness**、**Herdr** 及「其他软件」共用同一套稳健路由。
 
 #### 专为 Antigravity 优化的物理工作流
 
-- **开箱即用的 Antigravity 全键位映射。** 顶部 6 键（`AG00–AG05`）对应会话状态槽位与绿/蓝逐键状态灯；下排 7 键（`AG06–AG12`）预置为 Gemini Live 实时语音、聚焦当前输入框、受控 AX 直达内置浏览器（自动展开侧栏、清理旧搜索词并剪除访客 `WebContentsView` 噪音节点）、打开 Side Question、在项目中新建会话、按住说话与先停听写再发送消息；右上角摇杆采用四向扇区（上/下滚动对话、左划打开右边栏、右划关闭右边栏）。
+- **开箱即用的 Antigravity 全键位映射。** 顶部 6 键（`AG00–AG05`）对应按行动优先级排序的会话槽位与响应驱动逐键状态灯；下排 7 键（`AG06–AG12`）预置为 Gemini Live 实时语音、聚焦当前输入框、受控 AX 直达内置浏览器（自动展开侧栏、清理旧搜索词并剪除访客 `WebContentsView` 噪音节点）、打开 Side Question、在项目中新建会话、按住说话与先停听写再发送消息；右上角摇杆采用四向扇区（上/下滚动对话、左划打开右边栏、右划关闭右边栏）。
 - **物理键帽按待响应优先级点亮真实状态。** 顶部状态键按行动优先级排序主会话（待回应与异常优先于未读完成与运行中），默认保持进行中会话安静熄灯，将未读完成会话点亮为沉稳常亮海洋蓝（`solid`），并在会话或子代理需要审批输入与报错时以琥珀金或珊瑚红呼吸灯同步点亮环境底光（`sa: true`），前台打开对应 `/c/<cid>` 会话后自动核销熄灯。
 - **围绕语音与选模型重构的硬件操控。** 直接旋转旋钮即可在 Antigravity 内原位展开并切换模型与推理档位，按下或长按旋钮直接搜索会话（`Cmd+K`），无需先聚焦输入框或抬手点选菜单。底行中键合并为 2U 宽键后适合连续口述代码需求，并由底层防抖确保松开最后一侧微动才停录，也可随时拆回两颗 1U 按键分别承担新建会话与按住说话。
 - **跟手且零侵入的辅助功能执行。** 所有 Antigravity 集成均基于可观测界面与辅助功能实现，不向宿主应用打 `.patch` 补丁，并在 Antigravity 2.31.0 下把 release 构建聚焦输入框中位耗时压至 284.3 ms，让单键切换窗口和输入几乎感受不到等待。
 
 #### 超越内置插件的可自定义 Codex 交互
 
-- **解放官方插件写死的 20 个控制位。** 出厂固件内置 Codex 布局将顶部 `KV_OAI_AG00` 至 `AG05`、底部 `KV_OAI_ACT06` 至 `ACT12` 与旋钮摇杆绑定为原厂插件固定动作，日常缺少高频编码与模型操控入口，且多窗口并存时难以稳定命中焦点。Micro Input 独占 USB Vendor 接口并用可编辑本机方案 `Codex · Micro Input` 接管全部 20 个控制位，在保留原设备配置不被静默覆写的同时，开放每一个键位供个人习惯重塑。
+- **解放官方插件写死的 20 个控制位，与 Antigravity 双层独立亮灯共存。** 出厂固件内置 Codex 布局将顶部 `KV_OAI_AG00` 至 `AG05`、底部 `KV_OAI_ACT06` 至 `ACT12` 与旋钮摇杆绑定为原厂插件固定动作，日常缺少高频编码与模型操控入口，且多窗口并存时难以稳定命中焦点。Micro Input 独占 USB Vendor 接口并用可编辑本机方案 `Codex · Micro Input` 接管全部 20 个控制位；顶部 6 键（六层第 1 层 `AG00–AG05`）开箱独立呈现 Codex 待审批、未读报错与未读完成会话并支持一键直达，自动识别多项目窗口侧栏审批徽标与子代理状态上卷，与第 2 层 Antigravity（`AG06–AG11`）实时共存且互不抢占槽位。
 - **补齐原厂插件缺少的实用编码动作。** 默认下排七键直接提供实时语音、聚焦 `com.openai.codex` 输入框、新建标签页 `Cmd+T`、切换内置浏览器与工作区布局 `Cmd+Shift+B`、在当前项目新建对话 `Cmd+N`、点击听写以及停听写提交；所有多窗口场景自动锁定当前焦点 Codex 窗口，避免误操作切到背景项目。
 - **模型、推理力度、滚动与短语指令随心组合。** 可在工作台为 Codex 单独绑定推理档位递增与递减、切换 Fast 与 Standard 速度模式、不抢窗口焦点的对话上下滚动与一键跳到底部、直接旋转旋钮原位切模型与按下旋钮搜会话，或是将「点击听写」改回「按住说话」、把单键映射成不破坏原剪贴板的 `Continue`、`Test`、`Review`、`Commit`、`Summary` 与自定义工程短语粘贴或显式提交，也能混搭通用 Mac 快捷键与跨应用审批和停止按键。
 
@@ -110,7 +112,7 @@ Work Louder Creator Micro 2 (USB 303A:8298, HID Report 0x06)
 
 - 当前开发进度、历史验收记录与原始调研入口见 [开发状态与历史验收日志](docs/status.md)。
 - 产品规格、未决项与证据台账见 [SPEC](docs/spec/SPEC.md)、[UNKNOWNS](docs/spec/UNKNOWNS.md) 与 [EVIDENCE](docs/spec/EVIDENCE.md)。
-- 模块边界、视觉规范与设备契约见 [模块契约](docs/module-contracts.md)、[DESIGN.md](docs/designs/DESIGN.md)、[桌面应用控制](docs/designs/four-app-control.md)、[固件更新契约](docs/firmware-update.md) 与 [0.7.0 进阶硬件能力](docs/firmware-v070-capabilities.md)。
+- 模块边界、架构决策、视觉规范与设备契约见 [模块契约](docs/module-contracts.md)、[DECISIONS.md](docs/DECISIONS.md)、[DESIGN.md](docs/designs/DESIGN.md)、[桌面应用控制](docs/designs/four-app-control.md)、[固件更新契约](docs/firmware-update.md) 与 [0.7.0 进阶硬件能力](docs/firmware-v070-capabilities.md)。
 
 ### 本地构建与离线验证
 
@@ -137,12 +139,14 @@ scripts/run             # 启动当前 checkout 构建的 target/MicroInput.app�
 
 A standalone macOS AI coding workbench and native **Work Louder Creator Micro 2** configurator. Even without owning a Creator Micro 2 keypad, the local **Antigravity** session parser and low-latency macOS Accessibility control chain in this repository stay completely decoupled from hardware HID code, so you can reuse them to build Antigravity integrations for the QMK or VIA keyboard, Stream Deck, Loupedeck, multi-button mouse, voice foot pedal, or DIY controller already on your desk, or run the app offline to inspect and jump directly to active coding sessions. With a Creator Micro 2 connected, Micro Input replaces Electron-based `Input.app` workflows and fixed vendor plugins for daily key remapping, safe official firmware upgrades, Antigravity ergonomics, and customizable Codex controls.
 
-Micro Input uses a pure Rust core, a minimal C-ABI static boundary, and a native SwiftUI and AppKit shell weighing 18 MB in its Apple-notarized installed app bundle (8.5 MB zipped release archive) under the [MIT License](LICENSE). Latest release: [v0.11.4](docs/releases/v0.11.4.md). It drops Electron, refuses silent Flash writes on unverified hardware states, and tracks unverified firmware behaviors openly in repository documentation.
+Micro Input uses a pure Rust core, a minimal C-ABI static boundary, and a native SwiftUI and AppKit shell weighing 18 MB in its Apple-notarized installed app bundle (8.5 MB zipped release archive) under the [MIT License](LICENSE). Latest release: [v0.12.0](docs/releases/v0.12.0.md) ([24s Demo Video](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-landing-en.mp4)). It drops Electron, refuses silent Flash writes on unverified hardware states, and tracks unverified firmware behaviors openly in repository documentation.
+
+[![Micro Input v0.12.0 Demo Video](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-readme-preview-en.webp)](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-landing-en.mp4)
 
 ### Who Micro Input Is For
 
 - **Developers and makers building Antigravity support onto their own peripherals.** You do not need a Creator Micro 2. Most macro pads, LCD key decks, rotary consoles, side-button mice, and foot pedals already send shortcuts, yet lack an official Antigravity status and navigation interface. This repository already provides verified local `GetAllCascadeTrajectories` polling, main-conversation filtering, flicker-free `/c/<id>` sidebar navigation, and fast Accessibility composer focusing so you can power key lights, screen tiles, dials, or pedals on your own hardware.
-- **macOS AI coding users running software-only without an external keypad.** Without plugging in any USB device, you can open the workbench and the `⇧⌘M` menu-bar popover to monitor live green running indicators and ocean-blue unread indicators across Antigravity, Codex, and Deepseek Harness, click session slots to jump directly to target conversations, and test shortcuts, safe clipboard-preserving prompt pastes, and host actions through the built-in action runner.
+- **macOS AI coding users running software-only without an external keypad.** Without plugging in any USB device, you can open the workbench and the `⇧⌘M` menu-bar popover to monitor amber approval prompts, coral-red unread errors, and ocean-blue unread completions across Antigravity and Codex, click session slots to jump directly to target conversations, and test shortcuts, safe clipboard-preserving prompt pastes, and host actions through the built-in action runner.
 - **Creator Micro 2 owners replacing `Input.app` and customizing Codex.** Plug in USB device `303A:8298` on macOS to map all 281 board key tokens, flash verified official `0.7.0-rc.16` firmware updates, use purpose-built Antigravity hardware layouts, and override the rigid built-in Codex firmware plugin.
 
 ### Standalone Local Antigravity Parsing for Any Peripheral
@@ -173,7 +177,7 @@ Micro Input handles daily macOS key configuration and official firmware updates 
 
 #### Customizable Codex Controls Beyond the Stock Plugin
 
-- **Frees all 20 controls locked by the factory Codex plugin.** Firmware 0.6.3 hardcodes top slots `KV_OAI_AG00` through `AG05`, bottom actions `KV_OAI_ACT06` through `ACT12`, and stock encoder bindings, missing common editor controls and failing to track active multi-window focus reliably. Micro Input claims exclusive USB Vendor access and exposes an editable `Codex · Micro Input` profile across every control while preserving factory device originals untouched.
+- **Frees all 20 controls locked by the factory Codex plugin and coexists live with Antigravity.** Firmware 0.6.3 hardcodes top slots `KV_OAI_AG00` through `AG05`, bottom actions `KV_OAI_ACT06` through `ACT12`, and stock encoder bindings, missing common editor controls and failing to track active multi-window focus reliably. Micro Input claims exclusive USB Vendor access and exposes an editable `Codex · Micro Input` profile across every control while preserving factory device originals untouched. Top six slots on Layer 1 (`AG00–AG05`) independently track Codex approvals, unread errors, and unread completions alongside Antigravity on Layer 2 (`AG06–AG11`), including multi-window sidebar badge scanning and child subagent status rollup.
 - **Adds everyday coding shortcuts missing from the vendor plugin.** The upgraded bottom seven keys map real-time voice, `com.openai.codex` input focus, new tab `Cmd+T`, browser and workspace layout toggle `Cmd+Shift+B`, new chat in project `Cmd+N`, click dictation, and submit after confirmed dictation completion, anchored to the currently focused Codex window across multiple projects.
 - **Freely remix models, effort, scroll, voice modes, and prompts.** Remap controls in the workbench to dedicated `effort-up` and `effort-down` adjustments, Fast and Standard mode switching, non-focus-stealing chat scrolling and scroll-to-bottom, direct-turn encoder model picking and press-to-search, switching between click dictation and `push-to-talk`, clipboard-safe `Continue`, `Test`, `Review`, `Commit`, and `Summary` prompt actions, or generic macOS shortcuts and cross-app approval keys.
 
@@ -241,7 +245,7 @@ Further design specifications, research logs, and verification ledgers live insi
 
 - Development progress, historical verification notes, and original research links live in [Development Status and Verification Log](docs/status.md).
 - Product specification, unknowns, and evidence ledgers live in [SPEC](docs/spec/SPEC.md), [UNKNOWNS](docs/spec/UNKNOWNS.md), and [EVIDENCE](docs/spec/EVIDENCE.md).
-- Module boundaries, design rules, and protocol contracts live in [Module Contracts](docs/module-contracts.md), [DESIGN.md](docs/designs/DESIGN.md), [Four-App Control](docs/designs/four-app-control.md), [Firmware Update Contract](docs/firmware-update.md), and [Firmware v0.7.0 Capabilities](docs/firmware-v070-capabilities.md).
+- Module boundaries, architectural decisions, design rules, and protocol contracts live in [Module Contracts](docs/module-contracts.md), [DECISIONS.md](docs/DECISIONS.md), [DESIGN.md](docs/designs/DESIGN.md), [Four-App Control](docs/designs/four-app-control.md), [Firmware Update Contract](docs/firmware-update.md), and [Firmware v0.7.0 Capabilities](docs/firmware-v070-capabilities.md).
 
 ### Local Build and Offline Verification
 
