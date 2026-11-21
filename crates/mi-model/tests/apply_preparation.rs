@@ -521,7 +521,6 @@ fn v070_mouse_tokens_and_joystick_modes_gate_on_firmware_and_apply_cleanly() {
         json!("SCROLL")
     );
 
-    // Selecting "source" (including after switching away from "mouse") normalizes cleanly to retain baseline joystick mode.
     for (fw_label, fw_baseline) in [("0.6.3", &baseline_063), ("0.7.0-rc.16", &baseline_070)] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workbench.json");

@@ -6,7 +6,6 @@ use sha1::{Digest, Sha1};
 fn meta(name: &str, bytes: &[u8]) -> Value {
     json!({"name":name,"size":bytes.len(),"checksum":format!("{:x}",Sha1::digest(bytes))})
 }
-// Public session API over real report codec, with only the OS transport replaced.
 #[tokio::test]
 async fn failed_file_transactions_retain_one_complete_stale_snapshot() {
     for fault in [

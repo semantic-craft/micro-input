@@ -3084,7 +3084,6 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
             .clone()
     };
 
-    // Antigravity starter defaults: top-6 are live session status keys + left/right sidebar joystick.
     let ag_pid = find_pid(&store, "Antigravity");
     let ag_lid =
         store.document_store.draft.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
@@ -3129,7 +3128,6 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
         assert_eq!(cell.is_session_slot, Some(slot));
     }
 
-    // DSH & Codex starter defaults remain subagent + mouse-click:left + unbound 2..5 + mouse mode.
     for (name, expected_adapter) in [
         ("DeepSeek Coder (DSH)", "dsh-desktop"),
         (mi_model::preset::LOCAL_CODEX_PROFILE_NAME, "codex"),
@@ -3170,9 +3168,6 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
         }
     }
 
-    // Simulate #160 Antigravity (subagent + mouse-click:left + unbound 2..5 + mouse mode)
-    // AND legacy DSH with slot-open-0 + cockpit-slot-1..5 + logical_sectors,
-    // verify reopen migrates Antigravity to session top-6 + logical_sectors sidebar, and DSH to #160 + mouse.
     let dsh_pid = find_pid(&store, "DeepSeek Coder (DSH)");
     let dsh_lid = store.document_store.draft.document.editable.graph.profiles[&dsh_pid].layer_order
         [0]
@@ -3338,7 +3333,6 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
         );
     }
 
-    // Explicit BindTopSixAsSessionKeys on DSH must survive reopen without being overwritten.
     migrated.select_and_activate_profile(&dsh_pid).unwrap();
     migrated
         .dispatch_session_strip_action(mi_core::SessionStripAction::BindTopSixAsSessionKeys)
@@ -3357,8 +3351,6 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
         );
     }
 
-    // Inspector TaskKey override on DSH must be cleared by RestoreDefaultLayout so DSH top-6 revert to ActionKey,
-    // while RestoreDefaultLayout on Antigravity restores top-6 TaskKey session keys + logical_sectors joystick.
     reopened.select_and_activate_profile(&dsh_pid).unwrap();
     reopened
         .dispatch_inspector_action(mi_core::InspectorAction::SelectSlot(0))

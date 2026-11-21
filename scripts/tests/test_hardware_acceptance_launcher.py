@@ -41,7 +41,6 @@ class PreparationTests(unittest.TestCase):
         return path
 
     def test_plan_has_one_new_temp_target_and_no_config_or_lighting_operation(self):
-        # Inherited old probe authorization cannot acquire execution authority here.
         with patch.dict(os.environ, {'MI_PROBE_A_OPERATOR': 'I_AUTHORIZE_EXACT_TEMPFILE_A'}), patch('subprocess.Popen', side_effect=AssertionError('no child process')), patch('socket.socket', side_effect=AssertionError('no network')):
             self.prepare()
             manifest = kit.verify(self.output)

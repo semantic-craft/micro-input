@@ -52,7 +52,6 @@ impl Framer for NativeFramer {
             self.clear();
             return Err(ProtoError::Invalid("invalid numbered HID report".into()));
         }
-        // Debug/other channels never enter the RPC accumulator.
         if r[1] != 2 {
             return Ok(vec![]);
         }

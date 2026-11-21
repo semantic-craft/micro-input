@@ -275,8 +275,6 @@ impl DocumentStore {
             .as_ref()
             .filter(|p| p.preview.token == token)
             .ok_or_else(|| invalid("提案预览已失效"))?;
-        // select_independent owns the selection lock itself; hold the source lock across
-        // verification and independent save, so another app save cannot race acceptance.
         let path = self.path.as_ref().ok_or_else(|| invalid("没有文档"))?;
         let _source =
             Lock::acquire(path.with_extension("lock")).map_err(|m| Error::new("conflict", m))?;
@@ -320,7 +318,6 @@ pub fn execute(command: &str, text: &str) -> Result<Value> {
     }
     let mut store = DocumentStore::default();
     store.open(request.workbench).map_err(io)?;
-    // Missing file must be reported before lock creation (which needs its parent).
     if store.expected.is_none() {
         return Err(Error::new("not_found", "本地文档不存在；请先在工作台保存"));
     }

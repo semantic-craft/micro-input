@@ -180,8 +180,6 @@ impl Options {
     }
 }
 
-// A single synchronous request owner is the only reader of this dedicated handle.
-// Typed operations cannot name configuration writes or lighting methods.
 enum Request {
     Status,
     List,
@@ -229,7 +227,7 @@ impl Wire {
                     2 => (short(), 0, true),
                     _ => unreachable!(),
                 };
-                self.chunk += 1; // Never replay an attempted chunk.
+                self.chunk += 1;
                 (
                     "fs.writebin",
                     json!({"file":self.target,"data":STANDARD.encode(data),"offset":offset,"append":true,"completed":completed}),
@@ -319,8 +317,6 @@ impl Wire {
         let chunks: u64 = metadata
             .iter()
             .fold(0u64, |n, v| n.saturating_add(v.size.div_ceil(3072)));
-        // H0 twice, H1 before/after every mutation; reserve all reads in advance.
-        // 14 snapshots + status/list gates + temporary readbacks stay below 999.
         if metadata.iter().any(|v| v.size > 4 * 1024 * 1024)
             || chunks.saturating_mul(14).saturating_add(100) > 999
         {
@@ -439,7 +435,7 @@ pub async fn run(
     options: &Options,
     quiet: Duration,
 ) -> Result<Outcome> {
-    options.validate()?; // Before enumeration and open.
+    options.validate()?;
     let selected = candidate(transport)?;
     if selected.path != options.path {
         return Err("selected_path_mismatch");
@@ -475,7 +471,7 @@ pub async fn run(
         h1_steps(&mut wire, transport, &selected, &status, &list, &files, &mut record, quiet, 0).await?;
         Ok(())
     }).await.map_err(|_|"overall_timeout_unknown").and_then(|r|r);
-    wire.link.close(); // No post-error requests, retry, reconnect, restore or cleanup.
+    wire.link.close();
     transport.stop_discovery();
     let reason = result.err().unwrap_or("passed");
     let attempted = record.mutation_attempted;

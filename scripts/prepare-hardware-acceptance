@@ -41,7 +41,6 @@ def digest(data):
 
 
 def payloads():
-    # The three-byte UTF-8 sequence deliberately crosses the 3072-byte boundary.
     return {'long.bin': ('a' * 3071 + '中😀').encode(), 'short.bin': b'0123456789abcdef' * 4}
 
 
@@ -89,7 +88,7 @@ def prepare(args):
     output = args.output or ROOT / '.scratch' / 'hardware-probes' / ('hardware-kit-' + uuid.uuid4().hex)
     output = output.absolute()
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.mkdir(mode=0o700)  # Never reuse or overwrite an existing kit.
+    output.mkdir(mode=0o700)
     fixtures = payloads()
     target = 'mi_' + uuid.uuid4().hex[:12] + '.txt'
     write_new(output / 'plan.json', encoded(plan(target)))

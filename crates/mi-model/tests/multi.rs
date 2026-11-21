@@ -221,7 +221,6 @@ fn validate_references_rejects_excessive_nesting_depth_cardinality_and_oversized
         .find(|a| a.id == "save")
         .unwrap();
 
-    // Build an acyclic chain of 17 nested multi actions (reverse lexicographical order too).
     let mut graph = Graph::default();
     graph.actions.insert(leaf_id.clone(), leaf_action.clone());
     let mut next_id = leaf_id;

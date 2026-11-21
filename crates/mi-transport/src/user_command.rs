@@ -18,8 +18,6 @@ use std::{
 
 const MAX_DATAGRAM: usize = 256;
 const MAX_PENDING: usize = 32;
-// One AX toggle may need 500 ms traversal + 900 ms readback. A second
-// intentional click may wait for that operation, but never replay an old burst.
 const MAX_AGE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

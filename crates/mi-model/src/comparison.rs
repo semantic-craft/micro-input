@@ -130,7 +130,6 @@ fn merge(
         return b.cloned();
     }
     if let (Some(Value::Object(bo)), Some(Value::Object(lo)), Some(Value::Object(ro))) = (b, l, r) {
-        // A binding's local intent and its original value refer to the same user-visible field.
         if !bo.contains_key("logical_control") {
             let keys: BTreeSet<_> = bo.keys().chain(lo.keys()).chain(ro.keys()).collect();
             let mut result = serde_json::Map::new();
@@ -183,7 +182,6 @@ fn merge(
     });
     value.cloned()
 }
-// Only fields represented by the editable graph are removed. Everything else is opaque.
 fn opaque(config: &DeviceConfig, other: &DeviceConfig) -> Value {
     let mut root = config.raw.clone();
     let mut extras = serde_json::Map::new();
@@ -250,7 +248,6 @@ fn opaque(config: &DeviceConfig, other: &DeviceConfig) -> Value {
                             {
                                 layout.remove("encoders");
                             }
-                            // Joystick metadata remains opaque; bindings are separately compared.
                             if let Some(sectors) = layout
                                 .get_mut("joystick")
                                 .and_then(|j| j.get_mut("sectors"))
@@ -456,7 +453,6 @@ impl Comparison {
             {
                 if doc.editable.graph.layers[&lid].lighting.is_none() {
                     if let Ok(lights) = doc.lighting(&lid) {
-                        // Only existing source state is projected, never default values.
                         doc.editable.graph.layers.get_mut(&lid).unwrap().lighting = Some(lights);
                     }
                 }

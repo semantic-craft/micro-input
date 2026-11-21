@@ -632,7 +632,6 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
 
-        // 1. FIFO at Contents/Info.plist must return None non-blockingly (O_NONBLOCK).
         let fifo_app = temp.path().join("Fifo.app");
         let fifo_contents = fifo_app.join("Contents");
         fs::create_dir_all(&fifo_contents).unwrap();
@@ -642,7 +641,6 @@ mod tests {
         assert!(read_plist_xml_bounded(&fifo_plist).is_none());
         assert!(inspect_app_bundle(&fifo_app, "com.example.fifo").is_none());
 
-        // 2. Symlink at Contents/Info.plist (pointing to valid plist or FIFO) must be rejected.
         let valid_app = write_test_bundle(temp.path(), "Valid.app", "com.example.valid", "Valid");
         let sym_plist_app = temp.path().join("SymPlist.app");
         fs::create_dir_all(sym_plist_app.join("Contents")).unwrap();
@@ -653,25 +651,19 @@ mod tests {
         .unwrap();
         assert!(inspect_app_bundle(&sym_plist_app, "com.example.valid").is_none());
 
-        // 3. Symlinked .app bundle must be rejected.
         let sym_app = temp.path().join("SymBundle.app");
         symlink(&valid_app, &sym_app).unwrap();
         assert!(inspect_app_bundle(&sym_app, "com.example.valid").is_none());
 
-        // 4. World-writable .app bundle must be rejected.
         let ww_app = write_test_bundle(temp.path(), "WorldWritable.app", "com.example.ww", "WW");
         fs::set_permissions(&ww_app, fs::Permissions::from_mode(0o777)).unwrap();
         assert!(inspect_app_bundle(&ww_app, "com.example.ww").is_none());
         fs::set_permissions(&ww_app, fs::Permissions::from_mode(0o755)).unwrap();
 
-        // 5. Small binary plist whose XML expansion exceeds MAX_INFO_PLIST_BYTES must be rejected
-        // via bounded plutil stdout reading without buffering unbounded output.
         let bomb_app = temp.path().join("Bomb.app");
         let bomb_contents = bomb_app.join("Contents");
         fs::create_dir_all(&bomb_contents).unwrap();
         let bomb_plist = bomb_contents.join("Info.plist");
-        // Build an XML plist with many repeated <string>x</string> entries (compact in bplist,
-        // > 1 MiB when expanded to XML).
         let mut xml = String::from(
             r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.bomb</string><key>Items</key><array>"#,
         );
@@ -695,7 +687,6 @@ mod tests {
         assert!(read_plist_xml_bounded(&bomb_plist).is_none());
         assert!(inspect_app_bundle(&bomb_app, "com.example.bomb").is_none());
 
-        // 6. Disallowed /Users/Shared root (including case variants and lexical traversal) is rejected.
         assert!(is_disallowed_mdfind_root(Path::new(
             "/Users/Shared/Decoy.app"
         )));

@@ -780,7 +780,6 @@ mod tests {
             }
         ));
 
-        // Unassigning EncoderHold on Antigravity updates live BoardLayers layer_two immediately
         store
             .dispatch_canvas_action(crate::canvas::CanvasAction::SelectSurface(
                 crate::canvas::ControlSurfaceId::EncoderHold,

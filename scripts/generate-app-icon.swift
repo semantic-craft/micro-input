@@ -15,7 +15,6 @@ for points in [16, 32, 128, 256, 512] {
                                 bytesPerRow: pixels * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         let side = CGFloat(pixels)
-        // Match the legacy macOS 824 px artwork frame on a 1024 px canvas.
         let bounds = CGRect(x: 0, y: 0, width: side, height: side)
             .insetBy(dx: side * 100 / 1024, dy: side * 100 / 1024)
         context.addPath(CGPath(roundedRect: bounds, cornerWidth: bounds.width * 2 / 9,

@@ -161,7 +161,6 @@ pub fn parse_device_files(keymap: &[u8], smart: Option<&[u8]>) -> Result<DeviceC
     })
 }
 
-// Check duplicate keys before Value deserialization can silently choose the last member.
 fn strict_json(bytes: &[u8]) -> Result<Value, ParseError> {
     struct Unique;
     impl<'de> serde::Deserialize<'de> for Unique {

@@ -248,7 +248,6 @@ impl WorkbenchStore {
                 self.firmware_update.projection.ports.clear();
                 self.firmware_update.projection.selected_port = None;
                 self.firmware_update.projection.message = "固件流程已结束。请重新连接设备核对运行版本与键位；新固件的配置兼容性需另行核验。".into();
-                // Keep discovery passive until the user's explicit connect action.
                 self.resume_requires_explicit_connect = true;
                 self.config.auto_connect_usb = false;
             }

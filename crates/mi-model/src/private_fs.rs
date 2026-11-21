@@ -490,7 +490,6 @@ pub fn open_private_file(path: &Path, mode: PrivateOpenMode) -> Result<fs::File,
         let mut flags = libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
         match mode {
             PrivateOpenMode::Truncate => {
-                // Omit O_TRUNC until fstat verifies regular file type and current UID ownership.
                 flags |= libc::O_CREAT;
             }
             PrivateOpenMode::Append => {
@@ -820,7 +819,6 @@ mod tests {
         fs::create_dir_all(&child).unwrap();
         fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
 
-        // World-writable non-sticky ancestor must be rejected by both ensure_private_dir and open_private_file.
         fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o777)).unwrap();
         let err = ensure_private_dir(&child).unwrap_err();
         assert!(
@@ -830,12 +828,10 @@ mod tests {
         let file_under_unsafe = child.join("secret.json");
         assert!(open_private_file(&file_under_unsafe, PrivateOpenMode::Truncate).is_err());
 
-        // Group-writable non-sticky ancestor must also be rejected.
         fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o775)).unwrap();
         assert!(ensure_private_dir(&child).is_err());
         assert!(open_private_file(&file_under_unsafe, PrivateOpenMode::CreateNew).is_err());
 
-        // Sticky bit on writable ancestor (like /tmp) is permitted.
         fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o1777)).unwrap();
         ensure_private_dir(&child).unwrap();
         let mut f = open_private_file(&file_under_unsafe, PrivateOpenMode::CreateNew).unwrap();
@@ -850,45 +846,38 @@ mod tests {
             0o600
         );
 
-        // Truncate mode truncates verified user-owned file after openat + fstat.
         let mut f = open_private_file(&file_under_unsafe, PrivateOpenMode::Truncate).unwrap();
         f.write_all(b"short").unwrap();
         drop(f);
         assert_eq!(fs::read(&file_under_unsafe).unwrap(), b"short");
 
-        // Append mode appends without truncating.
         let mut f = open_private_file(&file_under_unsafe, PrivateOpenMode::Append).unwrap();
         f.write_all(b"+tail").unwrap();
         drop(f);
         assert_eq!(fs::read(&file_under_unsafe).unwrap(), b"short+tail");
 
-        // Leaf symlink is rejected by openat(O_NOFOLLOW) and open_verified_readonly_file_optional.
         let link_file = child.join("link.json");
         symlink(&file_under_unsafe, &link_file).unwrap();
         assert!(open_private_file(&link_file, PrivateOpenMode::Truncate).is_err());
         assert!(open_verified_readonly_file_optional(&link_file).is_err());
 
-        // Missing file returns Ok(None) for open_verified_readonly_file_optional.
         assert!(
             open_verified_readonly_file_optional(&child.join("missing.json"))
                 .unwrap()
                 .is_none()
         );
 
-        // FIFO is rejected non-blockingly by both open_private_file and open_verified_readonly_file_optional.
         let fifo_path = child.join("pipe.fifo");
         let c_fifo = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
         assert!(open_private_file(&fifo_path, PrivateOpenMode::Truncate).is_err());
         assert!(open_verified_readonly_file_optional(&fifo_path).is_err());
 
-        // sync_private_dir succeeds on verified dir and rejects symlinks.
         sync_private_dir(&child).unwrap();
         let dir_link = ancestor.join("dir-link");
         symlink(&child, &dir_link).unwrap();
         assert!(sync_private_dir(&dir_link).is_err());
 
-        // verify_canonical_dir_chain rejects a canonical target whose intermediate ancestor is 0o777 non-sticky.
         let deep_target = child.join("leaf-0755");
         fs::create_dir_all(&deep_target).unwrap();
         let deep_canonical = fs::canonicalize(&deep_target).unwrap();
@@ -904,7 +893,6 @@ mod tests {
             Ok(())
         );
 
-        // Restore ancestor permissions so TempDir cleanup always succeeds.
         fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

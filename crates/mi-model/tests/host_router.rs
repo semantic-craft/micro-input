@@ -61,7 +61,6 @@ fn passthrough_health_inspects_connection_snapshot_and_layer_drift() {
         PassThroughHealth::Ready
     );
 
-    // Stock Input 1.1.0 Codex layer on firmware 0.6.3: 1-based layer_index=1 + AG00..AG05 + ACT06..ACT12
     let identity_one_based = HostIdentityStatus {
         version: Some("0.6.3".into()),
         profile_index: Some(0),
@@ -90,15 +89,11 @@ fn passthrough_health_inspects_connection_snapshot_and_layer_drift() {
         }
     );
 
-    // Multi-layer drift must not be masked by an adjacent passthrough layer:
-    // layers[0] = 13 AG bindings, layers[1] = 0 AG bindings.
     let mut multi_cfg = Draft::default().config;
     multi_cfg.profiles[0].layers[0].keys =
         std::array::from_fn(|i| Binding::Basic(Token(format!("KV_OAI_AG{i:02}"))));
     multi_cfg.profiles[0].layers[1].keys = std::array::from_fn(|_| Binding::Empty);
 
-    // On real firmware 0.6.3 (1-based layer_index), layer_index=1 -> layers[0] (Ready),
-    // layer_index=2 -> layers[1] (LayerDriftWarning with bound_ag_count=0).
     assert_eq!(
         check_passthrough_health(
             Some(&multi_cfg),
@@ -126,7 +121,6 @@ fn passthrough_health_inspects_connection_snapshot_and_layer_drift() {
         }
     );
 
-    // On synthetic-0.6.3 (0-based layer_index), layer_index=1 -> layers[1] (LayerDriftWarning).
     assert_eq!(
         check_passthrough_health(
             Some(&multi_cfg),
@@ -199,10 +193,8 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     let ag_pid = &created[0];
     let herdr_pid = &created[1];
     let dsh_pid = &created[2];
-    // Released events never trigger host actions
     assert!(resolve_host_action(&draft.document, Some(ag_pid), "AG00", false).is_none());
 
-    // AG00..AG05 map to logical-0..logical-5 (Antigravity session status slots)
     for slot in 0..6u32 {
         assert_eq!(
             resolve_host_action(&draft.document, Some(ag_pid), &format!("AG{slot:02}"), true),
@@ -302,7 +294,6 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         assert!(resolve_host_action(&draft.document, Some(dsh_pid), binding, true).is_none());
     }
 
-    // Test Wide-Key fallback: if logical-10 has no action and logical-11 has an action, AG10 falls back to logical-11
     let lid = draft.document.editable.graph.profiles[ag_pid].layer_order[0].clone();
     draft
         .document
@@ -342,12 +333,10 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             target_bundle_id: Some("com.google.antigravity".into()),
         }
     );
-    // Raw ACT10 must also fall back to logical-11 symmetrically
     assert_eq!(
         resolve_host_action(&draft.document, Some(ag_pid), "ACT10", true),
         Some(resolved_fallback.clone())
     );
-    // And when logical-11 is cleared and logical-10 is bound, ACT11 / AG11 fall back to logical-10
     draft
         .document
         .editable
@@ -391,8 +380,6 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             )
             .unwrap();
     }
-    // Joystick sectors (logical-16..19) must only resolve when joystick_mode == "logical_sectors"
-    // and sector_idx < active_sectors.
     draft
         .set_control_settings(
             ag_pid,
@@ -404,8 +391,6 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             },
         )
         .unwrap();
-    // Sector 0 (AG15 -> logical-16) and sector 1 (AG16 -> logical-17) remain active;
-    // sector 2 (AG17 -> logical-18) and sector 3 (AG18 -> logical-19) are inactive.
     assert!(resolve_host_action(&draft.document, Some(ag_pid), "AG15", true).is_some());
     assert!(resolve_host_action(&draft.document, Some(ag_pid), "AG16", true).is_some());
     assert!(resolve_host_action(&draft.document, Some(ag_pid), "AG17", true).is_none());
@@ -794,7 +779,6 @@ fn joystick_prompt_slots_and_submit_control_route_to_target_agent_without_auto_e
             )
             .unwrap();
 
-        // Bind 4-way joystick sectors (slots 16..19 -> AG15..AG18) to Continue, Test, Review, Summary
         draft
             .assign(&json!(pid), &json!(lid), 16, prompt_continue.clone())
             .unwrap();
@@ -807,7 +791,6 @@ fn joystick_prompt_slots_and_submit_control_route_to_target_agent_without_auto_e
         draft
             .assign(&json!(pid), &json!(lid), 19, prompt_summary.clone())
             .unwrap();
-        // Bind slot 9 (AG09) to Commit prompt and slot 12 (AG12) to explicit Submit control
         draft
             .assign(&json!(pid), &json!(lid), 9, prompt_commit.clone())
             .unwrap();
@@ -837,7 +820,6 @@ fn joystick_prompt_slots_and_submit_control_route_to_target_agent_without_auto_e
             );
         }
 
-        // Explicit submit key resolves to the active Desktop Agent's submit command
         assert_eq!(
             resolve_host_action(&draft.document, Some(&pid), "AG12", true),
             Some(ResolvedHostAction::AgentCommand {
@@ -846,7 +828,6 @@ fn joystick_prompt_slots_and_submit_control_route_to_target_agent_without_auto_e
             })
         );
 
-        // Explicit submit-prompt resolves only when explicitly bound
         draft
             .assign(&json!(pid), &json!(lid), 8, agent_prompt_submit.clone())
             .unwrap();
@@ -1167,7 +1148,6 @@ fn other_apps_general_profile_binds_only_ag11_apple_fn_and_activates_manually() 
         target_bundle_id: None,
     };
 
-    // In default Split mode, ONLY AG11 (logical-11, bottom row middle/second microphone key) is bound.
     assert_eq!(
         resolve_host_action_with_layout(
             &store.draft.document,
@@ -1197,7 +1177,6 @@ fn other_apps_general_profile_binds_only_ag11_apple_fn_and_activates_manually() 
         );
     }
 
-    // In Merged 2U mode, both AG10 and AG11 fall back to logical-11 (Apple Fn).
     for wide_binding in ["AG10", "AG11"] {
         assert_eq!(
             resolve_host_action_with_layout(
@@ -1212,7 +1191,6 @@ fn other_apps_general_profile_binds_only_ag11_apple_fn_and_activates_manually() 
         );
     }
 
-    // Manual selection switches cleanly between Antigravity and "其他软件".
     let select_ag = serde_json::from_value(json!({
         "document_id": store.draft.document_id,
         "document_revision": store.draft.revision,

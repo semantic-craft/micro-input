@@ -175,9 +175,6 @@ fn parse_verified_notification(
             } = parse_radial_position(notification)?;
             if distance >= 0.5 {
                 let norm = angle.rem_euclid(1.0);
-                // Firmware 0.6.3 radial turns are normalized [0.0, 1.0) in screen coordinates
-                // (FACTORY-DEFAULTS.md §6): 0.0 = East (Right), 0.25 = South (Down),
-                // 0.5 = West (Left), 0.75 = North (Up).
                 let sector = if (0.625..0.875).contains(&norm) {
                     "AG15"
                 } else if (0.375..0.625).contains(&norm) {
@@ -288,7 +285,6 @@ pub struct InputMonitor {
     decoder: Box<dyn InputDecoder>,
     sequence: u64,
     stopped: bool,
-    // Slot 0 is legacy; slots 1 through 3 are independent board layers.
     presses: [PressState; 4],
     managed: Arc<AtomicBool>,
     was_managed: bool,

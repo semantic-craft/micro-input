@@ -42,7 +42,6 @@ impl BootloaderPort {
         let SerialPortType::UsbPort(usb) = info.port_type else {
             return None;
         };
-        // Input 1.1.0 identifies an Espressif ESP32-S3 USB JTAG/serial loader, not a Work Louder model.
         if usb.vid != 0x303a
             || usb.pid != 0x1001
             || usb.manufacturer.as_deref() != Some("Espressif")
@@ -213,7 +212,6 @@ fn data_partitions(bytes: &[u8]) -> Result<Vec<DataPartition>, String> {
         if entry[..2] != [0xaa, 0x50] {
             return Err("分区表无法识别，不能确认配置保留范围".into());
         }
-        // ESP-IDF data partitions except the PHY calibration slot are persistent state.
         if entry[2] == 1 && entry[3] != 1 {
             let offset = u32::from_le_bytes(entry[4..8].try_into().unwrap());
             let size = u32::from_le_bytes(entry[8..12].try_into().unwrap());
@@ -253,7 +251,6 @@ fn verify_preserved_partitions(original: &[u8], image: &[u8]) -> Result<(), Stri
         {
             return Err("当前数据分区超出 Flash 备份范围，未写入".into());
         }
-        // Erase happens in 4 KiB sectors, including padding past the final image byte.
         let erased_end = image.len().checked_add(0xfff).ok_or("固件范围溢出")? & !0xfff;
         if erased_end > partition.offset as usize {
             return Err("固件写入范围覆盖现有数据分区，未写入".into());
@@ -441,7 +438,6 @@ pub fn flash(
             .map_err(|e| e.to_string())?;
         receipt.status = "flash_verified_restart_pending".into();
         persist(port, &receipt, None)?;
-        // Clear ESP32-S3 download-mode reset register before toggling RTS.
         let mut connection = flasher.into_connection();
         connection
             .write_reg(0x6000_812c, 0, None)

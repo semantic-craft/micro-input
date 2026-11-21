@@ -611,7 +611,6 @@ mod tests {
         let gen = picker.on_encoder_press(7, t0);
         assert_eq!(gen, 1);
 
-        // Before 350ms threshold: timer is a no-op.
         assert_eq!(
             picker.on_hold_timer(
                 gen,
@@ -623,7 +622,6 @@ mod tests {
         );
         assert!(!picker.is_active(t0 + Duration::from_millis(349)));
 
-        // Stale generation is ignored.
         assert_eq!(
             picker.on_hold_timer(
                 gen + 1,
@@ -634,7 +632,6 @@ mod tests {
             EncoderHoldTimerOutcome::Ignored
         );
 
-        // At 350ms while still held: fires hold immediately and enters Active.
         assert_eq!(
             picker.on_hold_timer(
                 gen,
@@ -663,7 +660,6 @@ mod tests {
             Some(EncoderOverlayKind::ModelPicker)
         );
 
-        // Duplicate timer wakeup for same hold generation is ignored.
         assert_eq!(
             picker.on_hold_timer(
                 gen,
@@ -674,13 +670,11 @@ mod tests {
             EncoderHoldTimerOutcome::Ignored
         );
 
-        // Turning while still held AFTER hold fired navigates the newly opened picker!
         assert_eq!(
             picker.on_encoder_turn(true, t0 + Duration::from_millis(420)),
             EncoderTurnOutcome::ModelPicker(ModelPickerCommand::ModelPickerNext)
         );
 
-        // Releasing after hold_fired is consumed with zero short-press fallback, keeping Active open.
         assert_eq!(
             picker.on_encoder_release(
                 7,
@@ -705,14 +699,12 @@ mod tests {
         );
         assert!(picker.turned_while_pressed());
 
-        // Timer arriving after 350ms must NOT fire hold because user turned while pressed.
         assert_eq!(
             picker.on_hold_timer(gen, Some("codex"), true, t0 + Duration::from_millis(380)),
             EncoderHoldTimerOutcome::Ignored
         );
         assert!(!picker.is_active(t0 + Duration::from_millis(380)));
 
-        // Release after push+turn is consumed (no short-press submit, no hold).
         assert_eq!(
             picker.on_encoder_release(3, Some("codex"), true, t0 + Duration::from_millis(500)),
             EncoderReleaseOutcome::Consumed
@@ -725,14 +717,12 @@ mod tests {
         let mut picker = EncoderModelPicker::new();
         let t0 = Instant::now();
 
-        // Normal short tap (< 350ms) when inactive -> ShortPress (slot 15).
         picker.on_encoder_press(1, t0);
         assert_eq!(
             picker.on_encoder_release(1, Some("codex"), true, t0 + Duration::from_millis(120)),
             EncoderReleaseOutcome::ShortPress
         );
 
-        // Synchronous >= 350ms release without async timer wakeup -> fires hold & enters Active upon outcome.
         let t1 = t0 + Duration::from_secs(1);
         picker.on_encoder_press(1, t1);
         assert_eq!(
@@ -750,7 +740,6 @@ mod tests {
         );
         assert!(picker.is_active(t1 + Duration::from_millis(360)));
 
-        // CCW / CW turns while Active route to ModelPickerPrev / ModelPickerNext and refresh activity.
         let t_turn = t1 + Duration::from_secs(8);
         assert_eq!(
             picker.on_encoder_turn(false, t_turn),
@@ -761,7 +750,6 @@ mod tests {
             EncoderTurnOutcome::ModelPicker(ModelPickerCommand::ModelPickerNext)
         );
 
-        // Short tap (< 350ms) while Active -> exits Active and emits ModelPickerConfirm.
         let t_tap = t_turn + Duration::from_secs(9);
         picker.on_encoder_press(1, t_tap);
         assert_eq!(
@@ -773,7 +761,6 @@ mod tests {
         );
         assert!(!picker.is_active(t_tap + Duration::from_millis(90)));
 
-        // Next tap when no longer Active -> normal ShortPress again.
         let t_after = t_tap + Duration::from_secs(1);
         picker.on_encoder_press(1, t_after);
         assert_eq!(
@@ -853,7 +840,6 @@ mod tests {
             );
         }
 
-        // Idle timeout (> 12s after last activity) expires Active automatically.
         let t_expired =
             t0 + Duration::from_millis(350) + Duration::from_secs(12) + Duration::from_millis(1);
         assert_eq!(
@@ -862,7 +848,6 @@ mod tests {
         );
         assert!(!picker.is_active(t_expired));
 
-        // Explicit cancel clears both hold and active session.
         let gen2 = picker.on_encoder_press(5, t_expired);
         picker.on_hold_timer(
             gen2,
@@ -893,13 +878,11 @@ mod tests {
             Some(EncoderOverlayKind::SearchConversations)
         );
 
-        // Mouse flicks are strictly disabled in SearchConversations
         assert_eq!(
             picker.on_mouse_delta(50.0, 0.0, t0 + Duration::from_millis(10)),
             None
         );
 
-        // Sectors are strictly disabled in SearchConversations
         assert_eq!(
             picker.on_sector_direction_while_active("AG15", t0 + Duration::from_millis(20)),
             None
@@ -964,12 +947,10 @@ mod tests {
         let next_kind = EncoderOverlayKind::from_action(&search_action);
         assert_eq!(next_kind, Some(EncoderOverlayKind::SearchConversations));
 
-        // Transition from ModelPicker to Search requires sending Esc first
         let must_esc = picker.prepare_for_hold_action(next_kind);
         assert!(must_esc);
         assert!(!picker.is_active(t0));
 
-        // Successful execution enters SearchConversations
         let transition = picker.apply_hold_execution_outcome(
             "antigravity",
             next_kind,
@@ -1057,8 +1038,6 @@ mod tests {
         assert_eq!(closed, ConfirmExecutionDisposition::Completed);
         assert!(!picker.is_active(t0 + Duration::from_millis(195)));
 
-        // Direct one-shot subagent open must not hijack knob into SubagentPicker overlay,
-        // whereas popup open does activate SubagentPicker.
         let subagent_action = ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
             command: "subagent".into(),

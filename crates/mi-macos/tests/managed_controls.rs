@@ -211,7 +211,6 @@ impl ManagedAxProvider for Provider {
         Ok(window)
     }
     fn press(&mut self, target: &ManagedWindowIdentity, control: u64) -> Result<(), String> {
-        // Yield to another simultaneous request before changing observed AX state.
         std::thread::sleep(Duration::from_millis(2));
         let mut state = self.0.lock().unwrap();
         assert_eq!(*target, state.window.identity);
@@ -433,7 +432,6 @@ fn toggle_observes_mouse_changes_and_replacement_controls() {
         controls.toggle_dictation("dsh-desktop").unwrap(),
         ObservedDictationState::Recording
     );
-    // A user stopped recording externally; the next click must start again.
     provider.0.lock().unwrap().window.controls[0].label = "开始听写".into();
     provider.0.lock().unwrap().effect = PressEffect::Replace;
     assert_eq!(
@@ -2158,7 +2156,6 @@ fn model_picker_navigation_keys_deliver_direct_window_keys_without_refocusing_co
 
 #[test]
 fn model_picker_open_supports_antigravity_codex_and_dsh_with_ax_fallbacks() {
-    // 1. Antigravity: composer-focused Cmd+/ shortcut.
     let ag_provider = Provider::with_target("com.google.antigravity", "Start dictation");
     let ag_executor = LiveHostActionExecutor::new(Driver {
         controls: ag_provider.controls(),
@@ -2184,7 +2181,6 @@ fn model_picker_open_supports_antigravity_codex_and_dsh_with_ax_fallbacks() {
         2
     );
 
-    // 2a. Codex: Ctrl+Shift+M direct window key without refocusing composer.
     let codex_provider = Provider::codex();
     let codex_executor = LiveHostActionExecutor::new(Driver {
         controls: codex_provider.controls(),
@@ -2207,7 +2203,6 @@ fn model_picker_open_supports_antigravity_codex_and_dsh_with_ax_fallbacks() {
         .iter()
         .any(|ev| ev.starts_with("focus:")));
 
-    // 2b. Codex: falls back to AXPopUpButton + "Select model" when send_window_key is unavailable.
     let codex_ax_provider = Provider::codex();
     {
         let mut st = codex_ax_provider.0.lock().unwrap();
@@ -2243,7 +2238,6 @@ fn model_picker_open_supports_antigravity_codex_and_dsh_with_ax_fallbacks() {
         .events()
         .contains(&"press:Select model".to_string()));
 
-    // 3a. DSH: presses AXPopUpButton model trigger directly without composer refocus.
     let dsh_provider = Provider::dsh();
     dsh_provider
         .0
@@ -2282,7 +2276,6 @@ fn model_picker_open_supports_antigravity_codex_and_dsh_with_ax_fallbacks() {
         .iter()
         .any(|ev| ev.starts_with("focus:")));
 
-    // 3b. DSH: falls back to Cmd+/ shortcut when no AX model trigger is present.
     let dsh_fallback_provider = Provider::dsh();
     let dsh_fallback_executor = LiveHostActionExecutor::new(Driver {
         controls: dsh_fallback_provider.controls(),
@@ -2306,14 +2299,12 @@ fn model_picker_open_supports_antigravity_codex_and_dsh_with_ax_fallbacks() {
 fn model_picker_mouse_capture_bridge_is_noop_in_isolated_mode_and_drains_cleanly() {
     use mi_macos::executor::{MacHostExecutor, MacOsSystemDriver, RecordingOsDriver};
 
-    // Isolated MacHostExecutor must never install a live CGEventTap and drains empty.
     let isolated_exec = MacHostExecutor::new(MacOsSystemDriver::new_isolated());
     isolated_exec.set_model_picker_mouse_capture(true);
     assert!(isolated_exec.drain_model_picker_mouse_deltas().is_empty());
     isolated_exec.set_model_picker_mouse_capture(false);
     assert!(isolated_exec.drain_model_picker_mouse_deltas().is_empty());
 
-    // RecordingOsDriver captures deltas while enabled and clears on disable / stop_owned_actions.
     let rec_driver = RecordingOsDriver::new(true);
     let rec_exec = LiveHostActionExecutor::new(rec_driver.clone());
     rec_driver.push_model_picker_mouse_delta(16.0, 2.0);
@@ -3238,8 +3229,6 @@ fn focus_input_with_primary_and_unfocused_side_question_input_focuses_primary() 
 
 #[test]
 fn subagent_picker_opens_steps_and_confirms_across_antigravity_dsh_and_codex() {
-    // 1) Antigravity: presses latest AXPopUpButton ("2 subagents running"), ignores "Stop subagent",
-    //    then steps Up/Down and confirms with Return.
     let ag = Provider::with_target("com.google.antigravity", "开始听写");
     {
         let mut state = ag.0.lock().unwrap();
@@ -3320,8 +3309,6 @@ fn subagent_picker_opens_steps_and_confirms_across_antigravity_dsh_and_codex() {
     assert!(ag_events.contains(&"window_key:arrow_down".to_string()));
     assert!(ag_events.contains(&"window_key:return".to_string()));
 
-    // 2) DeepSeek Harness: matches Chinese SubagentHeaderLineage button ("3 个子智能体")
-    //    and keeps dialog open across knob step without re-pressing the toggle button.
     let dsh = Provider::dsh();
     {
         let mut state = dsh.0.lock().unwrap();
@@ -3370,7 +3357,6 @@ fn subagent_picker_opens_steps_and_confirms_across_antigravity_dsh_and_codex() {
     assert!(dsh_events.contains(&"window_key:arrow_down".to_string()));
     assert!(dsh_events.contains(&"window_key:return".to_string()));
 
-    // 3) Codex without any subagent control reports blocked:subagent_picker_unavailable with zero presses.
     let codex = Provider::codex();
     let codex_controls = codex.controls();
     let err = codex_controls.open_subagent_picker("codex").unwrap_err();
@@ -3380,7 +3366,6 @@ fn subagent_picker_opens_steps_and_confirms_across_antigravity_dsh_and_codex() {
         "missing subagent picker must never press unrelated controls"
     );
 
-    // 4) Antigravity with 0 subagents must NOT click "Toggle Overview Panel" or "Improvement Coding Worker Stop subagent".
     let ag_zero = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = ag_zero.0.lock().unwrap();
@@ -3419,7 +3404,6 @@ fn subagent_picker_opens_steps_and_confirms_across_antigravity_dsh_and_codex() {
         "0-subagent conversation must never toggle Overview panel or press Stop subagent"
     );
 
-    // 5) Antigravity direct "Open Subagent: ..." button reports OpenedDirectly and never sends stray Return on confirm.
     let ag_direct = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = ag_direct.0.lock().unwrap();
@@ -3468,7 +3452,6 @@ fn subagent_picker_opens_steps_and_confirms_across_antigravity_dsh_and_codex() {
         "direct subagent button must never fire stray Return into composer"
     );
 
-    // 6) DSH live composer model picker label ("选择模型，当前 ...") is recognized directly as AXPopUpButton.
     let dsh_model = Provider::dsh();
     {
         let mut state = dsh_model.0.lock().unwrap();
@@ -3539,27 +3522,22 @@ fn antigravity_side_panel_open_and_close_are_directional_idempotent_and_verified
             .collect()
     };
 
-    // 1. Closing when already closed is an idempotent no-op (zero presses).
     let r_close_noop = exec.execute("antigravity", "AG18", &close_cmd);
     assert_eq!(r_close_noop.outcome, "executed", "{r_close_noop:?}");
     assert!(press_events().is_empty());
 
-    // 2. Opening when closed presses once and confirms expanded=true.
     let r_open = exec.execute("antigravity", "AG16", &open_cmd);
     assert_eq!(r_open.outcome, "executed", "{r_open:?}");
     assert_eq!(press_events(), vec!["press:Toggle Side Panel".to_string()]);
 
-    // 3. Opening again when already open is an idempotent no-op (still 1 press total).
     let r_open_noop = exec.execute("antigravity", "AG16", &open_cmd);
     assert_eq!(r_open_noop.outcome, "executed", "{r_open_noop:?}");
     assert_eq!(press_events().len(), 1);
 
-    // 4. Closing when open presses once and confirms expanded=false.
     let r_close = exec.execute("antigravity", "AG18", &close_cmd);
     assert_eq!(r_close.outcome, "executed", "{r_close:?}");
     assert_eq!(press_events().len(), 2);
 
-    // 5. Unknown expanded state (None) fails closed with zero presses.
     let ag_unknown = Provider::with_target("com.google.antigravity", "Record voice memo");
     ag_unknown
         .0
@@ -3586,7 +3564,6 @@ fn antigravity_side_panel_open_and_close_are_directional_idempotent_and_verified
     assert_eq!(r_unknown.detail, "blocked:side_panel_state_unknown");
     assert!(!ag_unknown.events().iter().any(|e| e.starts_with("press:")));
 
-    // 6. Stuck expanded=false after press reports unconfirmed failure.
     let ag_stuck = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = ag_stuck.0.lock().unwrap();
@@ -3613,7 +3590,6 @@ fn antigravity_side_panel_open_and_close_are_directional_idempotent_and_verified
     assert_eq!(r_stuck.outcome, "failed", "{r_stuck:?}");
     assert_eq!(r_stuck.detail, "unconfirmed:side_panel_open");
 
-    // 7. Transient ax_control_removed during readback falls back to window read and confirms.
     let ag_replaced = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = ag_replaced.0.lock().unwrap();
@@ -3860,7 +3836,6 @@ fn antigravity_browser_clicks_new_tab_when_other_tab_active_and_confirms_toolbar
                 });
             } else if label == "Browser" {
                 fixture.window.controls.retain(|c| c.id != 20 && c.id != 21);
-                // Confirm secondary marker works even if Address bar combobox isn't present.
                 fixture.window.controls.push(ManagedControl {
                     id: 31,
                     role: "AXButton".into(),
@@ -3889,7 +3864,6 @@ fn antigravity_browser_clicks_new_tab_when_other_tab_active_and_confirms_toolbar
 
 #[test]
 fn antigravity_browser_already_open_is_idempotent_and_collapsed_panel_reopens_without_new_tab() {
-    // 1. Already open & expanded -> zero presses.
     let open = Provider::with_target("com.google.antigravity", "Record voice memo");
     open.0.lock().unwrap().window.controls = vec![
         ManagedControl {
@@ -3916,7 +3890,6 @@ fn antigravity_browser_already_open_is_idempotent_and_collapsed_panel_reopens_wi
     open.controls().open_browser("antigravity").unwrap();
     assert!(!open.events().iter().any(|e| e.starts_with("press:")));
 
-    // 2. Side Panel collapsed (expanded=false) with stale mounted Address bar -> must press Toggle Side Panel once.
     let collapsed = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = collapsed.0.lock().unwrap();
@@ -3962,7 +3935,6 @@ fn antigravity_browser_already_open_is_idempotent_and_collapsed_panel_reopens_wi
 
 #[test]
 fn antigravity_browser_clears_new_tab_search_and_does_not_click_new_tab_during_mount_race() {
-    // 1. New Tab has active search text -> clears search first, then clicks Browser.
     let with_query = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = with_query.0.lock().unwrap();
@@ -4051,8 +4023,6 @@ fn antigravity_browser_clears_new_tab_search_and_does_not_click_new_tab_during_m
         ]
     );
 
-    // 2. Transient mount race: after clicking Browser, "New tab" appears 1 frame before Address bar;
-    // open_browser must NOT click "New tab" back away from the Browser tab.
     let race = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = race.0.lock().unwrap();
@@ -4102,7 +4072,6 @@ fn antigravity_browser_clears_new_tab_search_and_does_not_click_new_tab_during_m
                     focused: false,
                     expanded: None,
                 });
-                // Delay Address bar arrival via a separate thread after 40ms.
             }
         });
     }
@@ -4146,7 +4115,6 @@ fn antigravity_browser_clears_new_tab_search_and_does_not_click_new_tab_during_m
 
 #[test]
 fn antigravity_browser_preview_fallback_and_fail_closed_boundaries() {
-    // 1. Preview fallback works ONLY when "Search for content to open" is present.
     let preview_ok = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = preview_ok.0.lock().unwrap();
@@ -4208,7 +4176,6 @@ fn antigravity_browser_preview_fallback_and_fail_closed_boundaries() {
         vec!["press:Preview".to_string()]
     );
 
-    // 2. Stray Preview without New Tab search must NEVER be pressed.
     let stray_preview = Provider::with_target("com.google.antigravity", "Record voice memo");
     stray_preview.0.lock().unwrap().window.controls = vec![ManagedControl {
         id: 25,
@@ -4230,7 +4197,6 @@ fn antigravity_browser_preview_fallback_and_fail_closed_boundaries() {
         .iter()
         .any(|e| e.starts_with("press:")));
 
-    // 3. Disabled Browser button fails closed with zero press.
     let disabled = Provider::with_target("com.google.antigravity", "Record voice memo");
     disabled.0.lock().unwrap().window.controls = vec![
         ManagedControl {
@@ -4260,7 +4226,6 @@ fn antigravity_browser_preview_fallback_and_fail_closed_boundaries() {
     );
     assert!(!disabled.events().iter().any(|e| e.starts_with("press:")));
 
-    // 4. Stuck after pressing Browser reports unconfirmed failure.
     let stuck = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = stuck.0.lock().unwrap();
@@ -4303,7 +4268,6 @@ fn antigravity_browser_preview_fallback_and_fail_closed_boundaries() {
     assert_eq!(r_stuck.outcome, "failed", "{r_stuck:?}");
     assert_eq!(r_stuck.detail, "unconfirmed:browser_open");
 
-    // 5. Non-Antigravity adapter rejected cleanly.
     assert_eq!(
         Provider::codex()
             .controls()
@@ -4312,7 +4276,6 @@ fn antigravity_browser_preview_fallback_and_fail_closed_boundaries() {
         "blocked:unsupported_browser_adapter"
     );
 
-    // 6. Untrusted accessibility blocks before any capture or press.
     let untrusted = Provider::with_target("com.google.antigravity", "Record voice memo");
     let untrusted_exec = LiveHostActionExecutor::new(Driver {
         controls: untrusted.controls(),
@@ -4327,8 +4290,6 @@ fn antigravity_browser_preview_fallback_and_fail_closed_boundaries() {
 #[test]
 fn antigravity_browser_three_step_collapsed_other_tab_to_new_tab_to_browser_and_target_validation()
 {
-    // 1. Collapsed Side Panel with a previously open non-Browser tab requires 3 transitions:
-    //    Toggle Side Panel -> New tab -> Browser -> Address bar + Open in external browser.
     let ag = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = ag.0.lock().unwrap();
@@ -4420,7 +4381,6 @@ fn antigravity_browser_three_step_collapsed_other_tab_to_new_tab_to_browser_and_
         ]
     );
 
-    // 2. Mismatched captured window bundle must fail validation BEFORE activating or pressing.
     let wrong_bundle = Provider::with_target("com.other.app", "Record voice memo");
     let err = wrong_bundle
         .controls()
@@ -4439,7 +4399,6 @@ fn antigravity_browser_three_step_collapsed_other_tab_to_new_tab_to_browser_and_
         wrong_bundle.events()
     );
 
-    // 3. Non-transient press error AFTER Toggle Side Panel was already pressed must report unconfirmed.
     let post_fail = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = post_fail.0.lock().unwrap();
@@ -4469,7 +4428,6 @@ fn antigravity_browser_three_step_collapsed_other_tab_to_new_tab_to_browser_and_
                     focused: false,
                     expanded: None,
                 });
-                // Cause next press on Browser to fail with a non-transient error (LoseTarget).
                 fixture.effect = PressEffect::LoseTarget;
             }
         });
@@ -4500,7 +4458,6 @@ fn antigravity_browser_post_mutation_unavailable_controls_report_unconfirmed_not
             }
         };
 
-    // 1. Toggle Side Panel pressed -> Browser appears disabled -> must wrap as unconfirmed.
     let disabled_browser = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = disabled_browser.0.lock().unwrap();
@@ -4534,7 +4491,6 @@ fn antigravity_browser_post_mutation_unavailable_controls_report_unconfirmed_not
     assert_eq!(receipt.outcome, "failed", "{receipt:?}");
     assert_eq!(receipt.detail, "unconfirmed:blocked:browser_unavailable");
 
-    // 2. Toggle Side Panel pressed -> New Tab search + unpressable Preview -> unconfirmed.
     let disabled_preview = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = disabled_preview.0.lock().unwrap();
@@ -4574,7 +4530,6 @@ fn antigravity_browser_post_mutation_unavailable_controls_report_unconfirmed_not
         "unconfirmed:blocked:browser_unavailable"
     );
 
-    // 3. Toggle Side Panel pressed -> disabled New tab -> unconfirmed.
     let disabled_new_tab = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = disabled_new_tab.0.lock().unwrap();
@@ -4604,7 +4559,6 @@ fn antigravity_browser_post_mutation_unavailable_controls_report_unconfirmed_not
         "unconfirmed:blocked:browser_unavailable"
     );
 
-    // 4. New tab pressed (pressed_toggle_panel=false) -> panel collapses and Toggle Side Panel is disabled -> unconfirmed.
     let disabled_collapsed_toggle =
         Provider::with_target("com.google.antigravity", "Record voice memo");
     {
@@ -4630,8 +4584,6 @@ fn antigravity_browser_post_mutation_unavailable_controls_report_unconfirmed_not
         "unconfirmed:blocked:browser_unavailable"
     );
 
-    // 4b. Already-pressed Toggle Side Panel that stays permanently collapsed & disabled
-    //     still reports unconfirmed (never raw blocked) once the post-mutation deadline expires.
     let stuck_collapsed_toggle =
         Provider::with_target("com.google.antigravity", "Record voice memo");
     {
@@ -4655,7 +4607,6 @@ fn antigravity_browser_post_mutation_unavailable_controls_report_unconfirmed_not
     assert_eq!(stuck_receipt.outcome, "failed", "{stuck_receipt:?}");
     assert_eq!(stuck_receipt.detail, "unconfirmed:browser_open");
 
-    // 5. New tab pressed -> fallback Toggle Side Panel (expanded=None) becomes disabled -> unconfirmed.
     let disabled_fallback_toggle =
         Provider::with_target("com.google.antigravity", "Record voice memo");
     {
@@ -4680,7 +4631,6 @@ fn antigravity_browser_post_mutation_unavailable_controls_report_unconfirmed_not
         "unconfirmed:blocked:browser_unavailable"
     );
 
-    // 6. Pre-mutation disabled Toggle Side Panel and New tab still fail closed with raw blocked: and zero press.
     for pre_controls in [
         vec![make_btn(10, "Toggle Side Panel", false, true, Some(false))],
         vec![make_btn(10, "Toggle Side Panel", true, false, None)],
@@ -4704,8 +4654,6 @@ fn antigravity_browser_post_mutation_unavailable_controls_report_unconfirmed_not
 
 #[test]
 fn antigravity_browser_pre_mutation_fails_fast_while_preserving_post_mutation_deadline() {
-    // 1. Antigravity Home / New Conversation page (no side-panel/browser controls, pressed_any=false)
-    //    must fail fast well before the 3500ms post-mutation deadline using default timeouts.
     let home_page = Provider::with_target("com.google.antigravity", "Record voice memo");
     let started = std::time::Instant::now();
     let err = ManagedAxControls::new(home_page.clone())
@@ -4722,8 +4670,6 @@ fn antigravity_browser_pre_mutation_fails_fast_while_preserving_post_mutation_de
         "pre-mutation discovery should fail fast (~250ms), not wait 3500ms; elapsed={elapsed:?}"
     );
 
-    // 2. Once a mutation press occurs (pressed_any=true), open_browser must honor the full
-    //    post-mutation readback deadline (waiting >250ms for Browser Address bar to mount).
     let delayed_mount = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = delayed_mount.0.lock().unwrap();
@@ -4788,8 +4734,6 @@ fn antigravity_browser_pre_mutation_fails_fast_while_preserving_post_mutation_de
 
 #[test]
 fn antigravity_browser_waits_through_transient_mid_animation_disable_on_already_pressed_controls() {
-    // 1. Toggle Side Panel temporarily disables mid-animation while still reporting expanded=false,
-    //    then expands and mounts Browser. open_browser must wait rather than aborting immediately.
     let animating_panel = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = animating_panel.0.lock().unwrap();
@@ -4865,7 +4809,6 @@ fn antigravity_browser_waits_through_transient_mid_animation_disable_on_already_
         ]
     );
 
-    // 2. New tab temporarily disables while the New Tab screen mounts, then Browser appears.
     let animating_new_tab = Provider::with_target("com.google.antigravity", "Record voice memo");
     {
         let mut state = animating_new_tab.0.lock().unwrap();

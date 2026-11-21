@@ -165,7 +165,6 @@ class RunVerifyLauncherTests(unittest.TestCase):
             self.assertIn('qa.lock', stderr.getvalue())
             popen.assert_not_called()
 
-        # --unique-bundle-id bypasses the shared fixed-bundle lock.
         child = FakeVerifyChild([0])
         captured_plist = {}
 

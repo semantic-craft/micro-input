@@ -148,9 +148,6 @@ pub enum SubagentOpenResult {
 }
 
 const MODEL_PICKER_FALLBACK_TTL: Duration = Duration::from_secs(12);
-/// Short pre-mutation discovery window for Antigravity pages without side-panel/browser controls
-/// (e.g., Home / New Conversation), so `open_browser` fails fast instead of polling the full
-/// 3500ms post-mutation readback deadline.
 const BROWSER_PRE_MUTATION_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(250);
 
 fn is_codex_trigger_excluded(label: &str) -> bool {
@@ -1509,7 +1506,6 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         if let Some(prompt) = prompt {
             provider.insert_text(&window.identity, control, prompt)?;
         }
-        // Re-observe immediately before sending; mouse input can start recording too.
         self.stop_in_window(&mut *provider, &window, adapter)?;
         provider.submit(&window.identity, control)
     }

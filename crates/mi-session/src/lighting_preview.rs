@@ -42,7 +42,6 @@ impl Preview {
         let (state_tx, state) =
             watch::channel(json!({"phase":"Starting","physical_visual":"NOT_RUN"}));
         tokio::spawn(async move {
-            // Owning the queue for this bounded preview reserves IDs against every read/write.
             let mut q = session.queue.lock().await;
             if q.next_id > 995 {
                 let _ = ready_tx.send(Err("request budget insufficient".to_string()));
@@ -76,13 +75,12 @@ impl Preview {
             let mut last = original.clone();
             loop {
                 tokio::select! {biased; _=session.changed.notified()=>{failed=true;break;}, _=tokio::time::sleep_until(deadline)=>break, changed=rx.changed()=>{if changed.is_err(){break;}} }
-                // Latest-only coalescing; never cancel an in-flight transport exchange.
                 tokio::time::sleep(Duration::from_millis(80)).await;
                 let desired = rx.borrow_and_update().clone();
                 let Some(desired) = desired else { break };
                 if q.next_id >= 997 {
                     break;
-                } // two IDs reserved for restoration and readback
+                }
                 let mut target = original.clone();
                 target["lights"]["backlight"] = desired.backlight;
                 target["lights"]["underglow"] = desired.underglow;
@@ -96,8 +94,6 @@ impl Preview {
                     }
                 }
             }
-            // Atomically compare both target and last verified runtime state. External
-            // changes must survive both subsequent updates and restoration.
             if !failed {
                 let mut restore = original.clone();
                 restore["expected"] = last["lights"].clone();
@@ -205,7 +201,6 @@ impl Preview {
                     _ = tokio::time::sleep_until(deadline) => break,
                     change = rx.changed() => if change.is_err() || rx.borrow().is_none() { break; }
                 }
-                // Coalesce pending edits without cancelling an exchange already in flight.
                 tokio::select! { biased;
                     _ = session.wait_disconnected() => { failed = true; break; }
                     _ = tokio::time::sleep_until(deadline) => break,

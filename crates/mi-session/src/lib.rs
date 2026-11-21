@@ -33,7 +33,6 @@ pub enum SessionError {
     #[error("配置读取失败：{0}")]
     Config(String),
 }
-// TODO(UNKNOWN-02): explicit local timeout policy, no retries; firmware timeout defaults unverified.
 #[derive(Clone)]
 pub struct SessionConfig {
     pub timeout: Duration,
@@ -49,7 +48,6 @@ impl Default for SessionConfig {
 }
 mod files;
 pub use files::*;
-// TODO(UNKNOWN-04): current-firmware configuration semantics still require device acceptance.
 pub trait DeviceSchema: Send + Sync {
     fn identity_request(&self) -> Result<(Method, Value), ProtoError>;
     fn list_request(&self) -> Result<(Method, Value), ProtoError>;
@@ -128,8 +126,6 @@ impl Drop for PendingLease {
         }
     }
 }
-// Abandoning a multi-report send can leave an incomplete frame at the device.
-// Only cancellation after all reports were sent may keep the session reusable.
 struct Sending<'a> {
     session: &'a DeviceSession,
     complete: bool,
@@ -401,14 +397,11 @@ impl DeviceSession {
         method: Method,
         params: Value,
     ) -> Result<Value, SessionError> {
-        // At exhaustion the encoded placeholder is never sent: exchange_encoded closes
-        // the connection before framing, retaining the established terminal error.
         let request = RpcRequest::new(method, params, q.next_id.min(998))?;
         mi_proto::validate_read_only(&request)?;
         self.exchange_encoded(q, method.name(), JsonCodec.encode(&request)?)
             .await
     }
-    // Private: callers must validate and encode with the current queue ID before entry.
     async fn exchange_encoded(
         &self,
         q: &mut Queue,
@@ -417,7 +410,6 @@ impl DeviceSession {
     ) -> Result<Value, SessionError> {
         self.exchange_authorized(q, method, encoded, None).await
     }
-    // Only the plan-owning writer reaches this typed, fixed-path entry.
     async fn exchange_keymap_with_tx(
         &self,
         q: &mut Queue,
@@ -504,16 +496,12 @@ impl DeviceSession {
             q.framer.lock().unwrap().clear();
             return Err(self.disconnection_error());
         }
-        // Do not wrap IDs in a connection: a late timed-out response must never satisfy a later request.
         if q.next_id >= 999 {
             let error = SessionError::RequestIdExhausted;
             *self.terminal.lock().unwrap() = Some(error.clone());
-            // guarded() may cancel this request as soon as disconnect wakes it.
-            // Leave the reader handle for lifecycle shutdown to join before reopening.
             self.disconnect();
             return Err(error);
         }
-        // General byte callers remain read-only; typed mutation entries construct their own bytes.
         let synthetic = {
             #[cfg(feature = "synthetic-backend")]
             {
@@ -591,8 +579,6 @@ impl DeviceSession {
             }
             let request = RpcRequest::new(readonly, request["params"].clone(), q.next_id)?;
             mi_proto::validate_read_only(&request)?;
-            // Send only the validated object's canonical representation. Duplicate
-            // keys or alternative escaping in supplied bytes never reach firmware.
             encoded = JsonCodec.encode(&request)?;
         }
         let id = q.next_id;

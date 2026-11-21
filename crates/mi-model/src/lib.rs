@@ -30,7 +30,6 @@ pub struct FileVerification {
     pub size: u64,
     pub sha1: String,
 }
-// TODO(UNKNOWN-06): device/cache schema equivalence and active profile semantics need device evidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActiveProfile {
     Unknown(Value),
@@ -125,7 +124,6 @@ fn integer(v: &Value, key: &str) -> Result<i64, ParseError> {
         .ok_or_else(|| error(&format!("{key} 应为整数")))
 }
 fn binding(v: &Value) -> Binding {
-    // Only our synthetic schema has a proven mapping. Unknown tokens never become Empty.
     if v.is_null() {
         return Binding::Empty;
     }
@@ -214,7 +212,6 @@ pub fn parse_config(bytes: &[u8]) -> Result<DeviceConfig, ParseError> {
     for m in array(&raw, "macros")? {
         let mut events = Vec::new();
         for e in array(m, "events")? {
-            // The 0/1/2 mapping belongs to our synthetic format, not firmware evidence.
             let a = integer(e, "act")?;
             events.push(MacroEvent {
                 token: Token(string(e, "token")?),

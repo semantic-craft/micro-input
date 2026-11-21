@@ -101,8 +101,6 @@ pub fn validate_mutation_response_candidate(
 mod tests {
     use super::*;
 
-    // Matches the hash-pinned Input SDK controlled replay: a UTF-8 code point
-    // may cross raw chunk boundaries; offsets count bytes, never characters.
     #[test]
     fn chunk_boundaries_preserve_utf8_bytes_and_final_marker() {
         let data = format!("{}中😀", "a".repeat(3071)).into_bytes();

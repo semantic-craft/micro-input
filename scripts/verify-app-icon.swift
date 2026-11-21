@@ -1,6 +1,5 @@
 import AppKit
 
-// Compare the packaged artwork frame with a system app, rather than the PNG canvas.
 guard CommandLine.arguments.count == 2 else {
     fputs("Usage: swift scripts/verify-app-icon.swift <AppIcon.iconset>\n", stderr)
     exit(2)

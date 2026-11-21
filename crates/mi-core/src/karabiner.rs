@@ -45,8 +45,6 @@ pub fn rules(
             let other = format!("{prefix}_s{}", if control.slot == 10 { 11 } else { 10 });
             let latch = format!("{prefix}_latch");
             send["conditions"] = json!([{"type":"variable_if","name":latch,"value":0}]);
-            // Karabiner 16.3 evaluates to.conditions before the sequence. Each
-            // producer-local release leaves the latch set while its peer is held.
             json!([
                 {"set_variable":{"name":held,"value":1,"key_up_value":0},"repeat":false},
                 send,

@@ -307,7 +307,6 @@ fn chunk_boundaries_and_tail_flags_are_exact() {
 #[tokio::test]
 async fn exhausted_budget_is_rejected_before_the_first_mutation() {
     let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
-    // Identity + snapshot consumed 4 IDs. Consume 988 more, leaving 7.
     for _ in 0..988 {
         session
             .request(mi_proto::Method::SysVersion, Value::Null)
@@ -316,8 +315,6 @@ async fn exhausted_budget_is_rejected_before_the_first_mutation() {
     }
     let (_dir, plan) = plan(RAW, session.id, 7);
     let writer = ConfigWriter::new(session.clone()).unwrap();
-    // Revalidation uses three, then a write plus three readback calls still fits.
-    // Consume one further ID so the write must be rejected rather than stranding readback.
     session
         .request(mi_proto::Method::SysVersion, Value::Null)
         .await
@@ -524,7 +521,6 @@ async fn durable_phase_faults_distinguish_no_send_unknown_and_verified_local_fai
             assert!(reopened.draft.document.structure_changes().is_empty());
         }
         assert_eq!(mutations(&device), count);
-        // Persisted consumption survives constructing another writer.
         assert_eq!(
             ConfigWriter::new(session.clone()).unwrap().apply(&p).await,
             Outcome::NotSent
@@ -847,7 +843,6 @@ async fn readback_failure_keeps_unknown_until_independent_fresh_check() {
     s.shutdown().await;
 }
 
-// Exercise the actual native writer branch and production byte barrier without HID.
 struct NativeFixtureLink {
     inner: Arc<dyn HidLink>,
     firmware: &'static str,

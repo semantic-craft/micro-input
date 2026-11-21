@@ -101,7 +101,6 @@ impl LocalDocumentV2 {
         baseline: Option<Value>,
         kind: &str,
     ) -> Result<Self, String> {
-        // The established v1 identity check rejects ambiguous source IDs. Never infer from names/indexes.
         LegacyDocumentV1::new(config.clone())?;
         let mut doc = Self {
             schema_version: 2,

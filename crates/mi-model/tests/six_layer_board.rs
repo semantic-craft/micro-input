@@ -340,7 +340,6 @@ fn six_layer_v070_mouse_and_scroll_joystick_modes_gate_by_firmware_and_keep_stri
     .unwrap_err()
     .contains("0.7.0-rc.16"));
 
-    // Strict key/encoder KV_OAI_* and DIRECT_CONTROLS invariants must still reject manual edits!
     let mut tampered_key: Value = serde_json::from_slice(&compiled_mouse.keymap).unwrap();
     tampered_key["profiles"][1]["layers"][1]["layout"]["keymap"][2][0] = json!("KC_A");
     assert!(recognize_six_layer_profile_for_firmware(
@@ -376,7 +375,6 @@ fn six_layer_v070_mouse_and_scroll_joystick_modes_gate_by_firmware_and_keep_stri
     )
     .is_err());
 
-    // Patching six-layer profile between MOUSE -> SCROLL -> logical_sectors preserves exact outer bytes
     let (_, unchanged) = patch_keymap_joystick_hardware_mode(
         &compiled_mouse.keymap,
         "0.7.0-rc.16",
@@ -489,7 +487,6 @@ fn applied_six_layer_plan_tracks_and_gates_v070_joystick_hardware_modes() {
 
     let desired = BoardLayerPlan::recommended(codex_id, ag_id, dsh_id);
 
-    // Offline document (no firmware baseline yet) compiles and records joystick_mode, then gates on live firmware
     let plan =
         AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
             .unwrap();
@@ -511,7 +508,6 @@ fn applied_six_layer_plan_tracks_and_gates_v070_joystick_hardware_modes() {
         json!("RADIAL")
     );
 
-    // Document with known 0.6.3 baseline rejects compile directly
     draft.document.baseline = Some(json!({"firmware": "0.6.3"}));
     assert!(
         AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
@@ -591,7 +587,6 @@ fn starter_plan_compiles_antigravity_layer_as_radial_and_codex_dsh_as_mouse_on_v
         Some("0.7.0-rc.16"),
     ));
 
-    // Upgrading an existing all-MOUSE #159/#160 profile must detect mismatch and rewrite Layer 2 to RADIAL.
     let all_mouse =
         compile_six_layer_profile_for_firmware(ORIGINAL, None, Some("0.7.0-rc.16"), Some("mouse"))
             .unwrap();

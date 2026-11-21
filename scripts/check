@@ -39,3 +39,7 @@ NOTARY_CHECK="${MICRO_INPUT_NOTARY_CHECK:-${HOME:-}/Projects/agent-home/tools/no
 if [[ -f "$NOTARY_CHECK" ]]; then
   python3 -B "$NOTARY_CHECK" "$PWD"
 fi
+COMMENT_RATCHET="${MICRO_INPUT_COMMENT_RATCHET:-${HOME:-}/Projects/agent-home/tools/comment-ratchet/check_comments.py}"
+if [[ -f "$COMMENT_RATCHET" ]]; then
+  python3 -B "$COMMENT_RATCHET" check "$PWD"
+fi

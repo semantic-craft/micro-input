@@ -828,7 +828,6 @@ mod tests {
     #[tokio::test]
     async fn v070_methods_fail_closed_on_v063_missing_version_or_non_exclusive_links_with_zero_frames(
     ) {
-        // 1) Firmware 0.6.3 on exclusive MacHidapi267Numbered: must fail closed before sending.
         let (session_063, link_063, mut out_063) =
             setup_session(true, LinkBackend::MacHidapi267Numbered);
         read_identity(&session_063, &link_063, &mut out_063, "0.6.3").await;
@@ -849,7 +848,6 @@ mod tests {
         assert!(out_063.try_recv().is_err(), "no frame may be sent on 0.6.3");
         session_063.shutdown().await;
 
-        // 2) Unknown/missing firmware version before read_identity_info: must fail closed.
         let (session_missing, _link_missing, mut out_missing) =
             setup_session(true, LinkBackend::MacHidapi267Numbered);
         assert!(matches!(
@@ -862,7 +860,6 @@ mod tests {
         );
         session_missing.shutdown().await;
 
-        // 3) Non-exclusive link even on 0.7.0-rc.16: must fail closed.
         let (session_shared, link_shared, mut out_shared) =
             setup_session(false, LinkBackend::MacHidapi267Numbered);
         read_identity(
@@ -886,7 +883,6 @@ mod tests {
         );
         session_shared.shutdown().await;
 
-        // 4) Non-267 backend even on exclusive 0.7.0-rc.16: must fail closed.
         #[cfg(feature = "synthetic-backend")]
         {
             let (session_syn, link_syn, mut out_syn) =
@@ -902,7 +898,6 @@ mod tests {
             );
             session_syn.shutdown().await;
         }
-        // Keep NativeFramer referenced cleanly so compiler doesn't complain if unused.
         let _ = NativeFramer::default();
     }
 
@@ -947,7 +942,6 @@ mod tests {
         assert!(out_063.try_recv().is_err());
         session_063.shutdown().await;
 
-        // Minimal synthetic responder returning `{}` for `fs.list` degrades gracefully to `Ok(None)`
         let (session_min, link_min, mut out_min) =
             setup_session(true, LinkBackend::MacHidapi267Numbered);
         read_identity(&session_min, &link_min, &mut out_min, "0.7.0-rc.16").await;
@@ -1098,7 +1092,6 @@ mod tests {
         assert_eq!(receipt_mouse.active_layer, Some(2));
         assert_eq!(receipt_mouse.pre_write_keymap, initial_six);
 
-        // Verify immutable backup directory (0700) and file (0600)
         let backup_dir = dir.path().join("v070-keymap-backups");
         assert_eq!(
             std::fs::metadata(&backup_dir).unwrap().permissions().mode() & 0o777,
@@ -1121,7 +1114,6 @@ mod tests {
             initial_six
         );
 
-        // Verify all 6 layers in the six-layer profile were patched to MOUSE and kb.pl.set reloaded (p=1, l=2)
         for layer_1_based in 1..=6_u8 {
             assert_eq!(
                 session
@@ -1136,7 +1128,6 @@ mod tests {
             .iter()
             .any(|(m, p)| m == "kb.pl.set" && p == &json!({"p": 1, "l": 2})));
 
-        // Switch to scroll, then back to logical_sectors; original backup stays untouched
         let receipt_scroll = session
             .apply_joystick_hardware_mode(dir.path(), "scroll")
             .await
@@ -1167,7 +1158,6 @@ mod tests {
             Some("radial")
         );
 
-        // Fault injection: if post-write readback diverges from written bytes, fail and fence session!
         corrupt_readback.store(true, std::sync::atomic::Ordering::SeqCst);
         let err = session
             .apply_joystick_hardware_mode(dir.path(), "mouse")
@@ -1243,12 +1233,10 @@ mod tests {
         fs::create_dir_all(&real_doc).unwrap();
         fs::set_permissions(&real_doc, fs::Permissions::from_mode(0o700)).unwrap();
 
-        // (a) document_dir as a symlink must be rejected.
         let sym_doc = temp.path().join("sym-doc");
         symlink(&real_doc, &sym_doc).unwrap();
         assert!(persist_immutable_v070_keymap_backup(&sym_doc, br#"{"v":1}"#).is_err());
 
-        // (b) pre-existing original-keymap.json as a symlink to an existing file must be rejected.
         let doc_b = temp.path().join("doc-b");
         let backup_b = doc_b.join("v070-keymap-backups");
         fs::create_dir_all(&backup_b).unwrap();
@@ -1257,7 +1245,6 @@ mod tests {
         symlink(&dummy, backup_b.join("original-keymap.json")).unwrap();
         assert!(persist_immutable_v070_keymap_backup(&doc_b, br#"{"v":1}"#).is_err());
 
-        // (c) pre-existing keymap-<sha1>.json as a symlink or FIFO must be rejected non-blockingly.
         let payload = br#"{"keymap":"sample"}"#;
         let sha1_hex = format!("{:x}", Sha1::digest(payload));
 
@@ -1278,7 +1265,6 @@ mod tests {
         assert!(status.success());
         assert!(persist_immutable_v070_keymap_backup(&doc_c_fifo, payload).is_err());
 
-        // (d) normal immutable backup writes 0o600 files in 0o700 dir and preserves original anchor.
         let doc_ok = temp.path().join("doc-ok");
         let first = persist_immutable_v070_keymap_backup(&doc_ok, br#"{"first":1}"#).unwrap();
         assert_eq!(
@@ -1300,7 +1286,6 @@ mod tests {
             br#"{"first":1}"#
         );
 
-        // (e) write_verified_immutable_file must not bypass unsafe ancestor checks when file already exists.
         let unsafe_ancestor = temp.path().join("unsafe-ancestor");
         let child_dir = unsafe_ancestor.join("child");
         fs::create_dir_all(&child_dir).unwrap();

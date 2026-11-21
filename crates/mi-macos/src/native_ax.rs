@@ -285,8 +285,6 @@ mod macos {
 
     #[derive(Debug)]
     struct Owned(Ref);
-    // AX references are retained Core Foundation objects. The provider is only
-    // accessed under ManagedAxControls' mutex, including when its thread changes.
     unsafe impl Send for Owned {}
     impl Drop for Owned {
         fn drop(&mut self) {
@@ -6335,7 +6333,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 1: Sidebar "Clear search" BEFORE New Tab search (must be filtered out)
                     ObservedNode {
                         element: Owned::text("sidebar-clear").unwrap(),
                         parent: Some(0),
@@ -6347,7 +6344,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 2: Code block "Preview" BEFORE New Tab search (must be filtered out)
                     ObservedNode {
                         element: Owned::text("code-preview").unwrap(),
                         parent: Some(0),
@@ -6359,7 +6355,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 3: Capitalized "Open in External Browser" link action (must NOT match)
                     ObservedNode {
                         element: Owned::text("chat-open-external").unwrap(),
                         parent: Some(0),
@@ -6371,7 +6366,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 4: Settings dialog container
                     ObservedNode {
                         element: Owned::text("settings-dialog").unwrap(),
                         parent: Some(0),
@@ -6381,7 +6375,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 5: Settings sidebar "Browser" button (must be filtered out)
                     ObservedNode {
                         element: Owned::text("settings-browser").unwrap(),
                         parent: Some(4),
@@ -6393,7 +6386,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 6: New Tab search input group
                     ObservedNode {
                         element: Owned::text("new-tab-search-group").unwrap(),
                         parent: Some(0),
@@ -6402,7 +6394,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 7: New Tab search input
                     ObservedNode {
                         element: Owned::text("new-tab-search").unwrap(),
                         parent: Some(6),
@@ -6414,7 +6405,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 8: New Tab "Clear search" sibling (must be retained)
                     ObservedNode {
                         element: Owned::text("new-tab-clear").unwrap(),
                         parent: Some(6),
@@ -6426,7 +6416,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 9: New Tab "Browser" card (must be retained)
                     ObservedNode {
                         element: Owned::text("new-tab-browser").unwrap(),
                         parent: Some(0),
@@ -6438,7 +6427,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 10: New Tab "Preview" card after search input (must be retained)
                     ObservedNode {
                         element: Owned::text("new-tab-preview").unwrap(),
                         parent: Some(0),
@@ -6450,7 +6438,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 11: Built-in Browser lowercase "Open in external browser" (must be retained)
                     ObservedNode {
                         element: Owned::text("browser-open-external").unwrap(),
                         parent: Some(0),
@@ -6462,7 +6449,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 12: Built-in Browser "Address bar" combobox (must be retained)
                     ObservedNode {
                         element: Owned::text("browser-address-bar").unwrap(),
                         parent: Some(0),
@@ -6474,7 +6460,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 13: Composer "+" menu item "Browser" (AXMenuItem, must NOT match AXButton)
                     ObservedNode {
                         element: Owned::text("composer-browser-menuitem").unwrap(),
                         parent: Some(0),
@@ -6775,7 +6760,6 @@ mod macos {
 
             let observation = WindowObservation {
                 nodes: vec![
-                    // 0: Window
                     ObservedNode {
                         element: Owned::text("win").unwrap(),
                         parent: None,
@@ -6784,8 +6768,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 1: New Tab search placed BEFORE chat containers to ensure Preview & Clear
-                    // search inside chat containers are rejected by container exclusion, not index order.
                     ObservedNode {
                         element: Owned::text("new-tab-search").unwrap(),
                         parent: Some(0),
@@ -6797,7 +6779,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 2: User message (AXList) right after search (<= 6 nodes away)
                     ObservedNode {
                         element: Owned::text("user-msg").unwrap(),
                         parent: Some(0),
@@ -6807,7 +6788,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 3: False-positive "Clear search" inside User message
                     ObservedNode {
                         element: Owned::text("user-clear-search").unwrap(),
                         parent: Some(2),
@@ -6819,7 +6799,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 4: False-positive "Browser" inside User message
                     ObservedNode {
                         element: Owned::text("user-browser").unwrap(),
                         parent: Some(2),
@@ -6831,7 +6810,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 5: Conversation turns (AXGroup)
                     ObservedNode {
                         element: Owned::text("conv-turns").unwrap(),
                         parent: Some(0),
@@ -6841,7 +6819,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 6: False-positive "Browser" inside Conversation turns
                     ObservedNode {
                         element: Owned::text("turns-browser").unwrap(),
                         parent: Some(5),
@@ -6853,7 +6830,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 7: False-positive "Address bar" combobox inside Conversation turns
                     ObservedNode {
                         element: Owned::text("turns-address-bar").unwrap(),
                         parent: Some(5),
@@ -6865,7 +6841,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 8: Legitimate non-browser chat control inside Conversation turns (must be kept)
                     ObservedNode {
                         element: Owned::text("turns-subagent").unwrap(),
                         parent: Some(5),
@@ -6877,7 +6852,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 9: Agent response (AXScrollArea)
                     ObservedNode {
                         element: Owned::text("agent-resp").unwrap(),
                         parent: Some(0),
@@ -6887,7 +6861,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 10: False-positive "Preview" inside Agent response (after search_idx)
                     ObservedNode {
                         element: Owned::text("agent-preview").unwrap(),
                         parent: Some(9),
@@ -6899,7 +6872,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 11: False-positive "Open in external browser" inside Agent response
                     ObservedNode {
                         element: Owned::text("agent-open-external").unwrap(),
                         parent: Some(9),
@@ -6911,7 +6883,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 12: False-positive "Address bar" textfield inside Agent response
                     ObservedNode {
                         element: Owned::text("agent-address-bar").unwrap(),
                         parent: Some(9),
@@ -6923,7 +6894,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 13: Settings modal (AXDialog)
                     ObservedNode {
                         element: Owned::text("settings-modal").unwrap(),
                         parent: Some(0),
@@ -6933,7 +6903,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 14: False-positive "Open in external browser" inside Settings
                     ObservedNode {
                         element: Owned::text("settings-open-external").unwrap(),
                         parent: Some(13),
@@ -6945,7 +6914,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 15: False-positive "Address bar" inside Settings
                     ObservedNode {
                         element: Owned::text("settings-address-bar").unwrap(),
                         parent: Some(13),
@@ -6957,7 +6925,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 16: Legitimate Side Panel "Browser" (must be kept)
                     ObservedNode {
                         element: Owned::text("side-panel-browser").unwrap(),
                         parent: Some(0),
@@ -6969,7 +6936,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 17: Legitimate Side Panel "Open in external browser" (must be kept)
                     ObservedNode {
                         element: Owned::text("side-panel-open-external").unwrap(),
                         parent: Some(0),
@@ -6981,7 +6947,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 18: Legitimate Side Panel "Address bar" (must be kept)
                     ObservedNode {
                         element: Owned::text("side-panel-address-bar").unwrap(),
                         parent: Some(0),
@@ -7043,14 +7008,8 @@ mod macos {
                 ..Default::default()
             };
 
-            // Mirrors Antigravity 2.33.0 live AX layout:
-            // - Main chat transcript is an unlabeled AXGroup containing sr-only AXHeading("Conversation Log"),
-            //   AXHeading("Agent said"), AXHeading("You said") rather than aria-label="Agent response".
-            // - Subagent tabs omit "Conversation Log" and contain only AXHeading("Agent working" / "Agent said").
-            // - Markdown code blocks wrap "Preview" in AXGroup("Markdown view mode").
             let observation = WindowObservation {
                 nodes: vec![
-                    // 0: Window
                     ObservedNode {
                         element: Owned::text("win").unwrap(),
                         parent: None,
@@ -7059,7 +7018,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 1: Hub AXWebArea
                     ObservedNode {
                         element: Owned::text("hub-web").unwrap(),
                         parent: Some(0),
@@ -7069,7 +7027,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 2: Side Panel New Tab search (placed BEFORE chat logs so index order alone cannot reject Preview/Clear search)
                     ObservedNode {
                         element: Owned::text("new-tab-search").unwrap(),
                         parent: Some(1),
@@ -7081,7 +7038,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 3: Unlabeled main chat transcript container (Antigravity 2.33.0 div.relative.flex.flex-col.gap-y-3)
                     ObservedNode {
                         element: Owned::text("chat-log-group").unwrap(),
                         parent: Some(1),
@@ -7091,7 +7047,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 4: sr-only Conversation Log heading
                     ObservedNode {
                         element: Owned::text("heading-conv-log").unwrap(),
                         parent: Some(3),
@@ -7102,7 +7057,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 5: sr-only Agent said heading
                     ObservedNode {
                         element: Owned::text("heading-agent-said").unwrap(),
                         parent: Some(3),
@@ -7113,7 +7067,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 6: False-positive "Clear search" inside unlabeled chat log (<= 6 nodes after search)
                     ObservedNode {
                         element: Owned::text("chat-clear-search").unwrap(),
                         parent: Some(3),
@@ -7125,7 +7078,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 7: Nested unlabeled step group inside chat log
                     ObservedNode {
                         element: Owned::text("chat-step-group").unwrap(),
                         parent: Some(3),
@@ -7135,7 +7087,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 8: False-positive "Browser" inside unlabeled chat log
                     ObservedNode {
                         element: Owned::text("chat-browser").unwrap(),
                         parent: Some(7),
@@ -7147,7 +7098,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 9: False-positive "Open in external browser" inside unlabeled chat log
                     ObservedNode {
                         element: Owned::text("chat-open-external").unwrap(),
                         parent: Some(7),
@@ -7159,7 +7109,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 10: False-positive "Address bar" inside unlabeled chat log
                     ObservedNode {
                         element: Owned::text("chat-address-bar").unwrap(),
                         parent: Some(7),
@@ -7171,7 +7120,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 11: Legitimate non-browser chat control inside unlabeled chat log (must be kept)
                     ObservedNode {
                         element: Owned::text("chat-open-subagent").unwrap(),
                         parent: Some(7),
@@ -7183,7 +7131,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 12: Unlabeled subagent turn container (no "Conversation Log" heading, only "Agent working")
                     ObservedNode {
                         element: Owned::text("subagent-turn-group").unwrap(),
                         parent: Some(1),
@@ -7193,7 +7140,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 13: sr-only Agent working heading
                     ObservedNode {
                         element: Owned::text("heading-agent-working").unwrap(),
                         parent: Some(12),
@@ -7204,7 +7150,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 14: False-positive "Browser" inside subagent turn container
                     ObservedNode {
                         element: Owned::text("subagent-browser").unwrap(),
                         parent: Some(12),
@@ -7216,7 +7161,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 15: False-positive "Preview" inside subagent turn container (after search_idx)
                     ObservedNode {
                         element: Owned::text("subagent-preview").unwrap(),
                         parent: Some(12),
@@ -7228,7 +7172,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 16: Standalone Markdown code block toggle (outside chat log, after search_idx)
                     ObservedNode {
                         element: Owned::text("markdown-view-mode").unwrap(),
                         parent: Some(1),
@@ -7238,7 +7181,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 17: False-positive "Preview" inside Markdown view mode toggle
                     ObservedNode {
                         element: Owned::text("code-block-preview").unwrap(),
                         parent: Some(16),
@@ -7250,7 +7192,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 18: Legitimate Side Panel "Preview" (after search_idx, outside excluded containers)
                     ObservedNode {
                         element: Owned::text("side-panel-preview").unwrap(),
                         parent: Some(1),
@@ -7262,7 +7203,6 @@ mod macos {
                             ..Default::default()
                         },
                     },
-                    // 19: Legitimate Side Panel "Browser"
                     ObservedNode {
                         element: Owned::text("side-panel-browser").unwrap(),
                         parent: Some(1),
@@ -7298,8 +7238,6 @@ mod macos {
                 "control_paths must remain synchronized after heading-anchored chat filtering"
             );
 
-            // Safety guard: an AXHeading directly under AXWebArea (not AXGroup/AXScrollArea/AXList)
-            // must never mark AXWebArea as an excluded chat container.
             let guarded_obs = WindowObservation {
                 nodes: vec![
                     ObservedNode {

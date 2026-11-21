@@ -1,4 +1,3 @@
-// R-D02: OS notifications only; no device open, report access, or vendor code.
 #include <IOKit/hid/IOHIDManager.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -28,7 +27,6 @@ void mi_watch(const atomic_bool *stop, change_callback notify, void *context) {
     CFRelease(manager);
 }
 
-// Descriptor-only enumeration: never IOHIDManagerOpen/IOHIDDeviceOpen or report I/O.
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>

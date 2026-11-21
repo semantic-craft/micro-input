@@ -512,7 +512,6 @@ mod tests {
         let isolated_run = temp.path().join("isolated-run");
         let prod_doc = PathBuf::from(home).join("Library/Application Support/MicroInput");
 
-        // 1. MI_QA_RUN_DIR inside production dir must be rejected even with isolated MI_DOCUMENT_DIR.
         let err = QaLaunchEnv::from_pairs(
             isolated_doc.to_str(),
             None,
@@ -523,7 +522,6 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("MI_QA_RUN_DIR"), "{err}");
 
-        // 2. MI_HOST_AUDIT_LOG inside production dir must be rejected (including derived run_dir).
         let prod_audit = prod_doc.join("evidence/audit.jsonl");
         let err = QaLaunchEnv::from_pairs(
             isolated_doc.to_str(),
@@ -535,7 +533,6 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("MI_HOST_AUDIT_LOG"), "{err}");
 
-        // 3. MI_DIAGNOSTIC_EVIDENCE_PATH inside production dir must be rejected.
         let prod_report = prod_doc.join("workbench.json");
         let err = QaLaunchEnv::from_pairs(
             isolated_doc.to_str(),
@@ -547,7 +544,6 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("MI_DIAGNOSTIC_EVIDENCE_PATH"), "{err}");
 
-        // 4. All isolated paths remain accepted.
         let ok = QaLaunchEnv::from_pairs(
             isolated_doc.to_str(),
             isolated_run.join("evidence/audit.jsonl").to_str(),

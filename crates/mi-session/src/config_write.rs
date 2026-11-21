@@ -19,8 +19,6 @@ pub struct ConfigWriter {
     consumed: AsyncMutex<BTreeSet<String>>,
     records: Mutex<std::collections::BTreeMap<String, OperationRecord>>,
 }
-// If the caller drops an in-flight verification future, do not leave a reusable
-// connection with a possibly changed device and an unobserved response.
 struct MutationGuard<'a> {
     session: &'a DeviceSession,
     sent: bool,

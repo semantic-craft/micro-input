@@ -669,7 +669,6 @@ pub struct Action {
     pub name: String,
     pub category: String,
     pub detail: String,
-    // Raw payload preserves future action types. Unsupported payloads lock editing.
     pub payload: Value,
 }
 impl Action {
@@ -960,7 +959,6 @@ impl LegacyDocumentV1 {
             original.as_object_mut().unwrap().remove(key);
         }
         let future_fields = normalized != original;
-        // Future fields/types must not be silently discarded by a subsequent save.
         d.read_only = future_fields
             || d.edits.values().any(|a| a.validate().is_err())
             || raw.as_object().unwrap().keys().any(|k| {

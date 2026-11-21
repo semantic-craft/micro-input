@@ -1653,7 +1653,7 @@ mod macos_pasteboard {
                                 uti.as_ptr()
                             },
                             uti.len(),
-                            4, // NSUTF8StringEncoding
+                            4,
                         );
                         if ns_type.is_null() {
                             continue;
@@ -2500,7 +2500,6 @@ impl HostOsDriver for MacOsSystemDriver {
             if source.is_null() {
                 return Err("cg_event_source_null".to_string());
             }
-            // Per NSEvent.h, horizontal deltaX uses + for left and - for right.
             let event = CGEventCreateScrollWheelEvent2(
                 source,
                 CG_SCROLL_EVENT_UNIT_LINE,
@@ -4492,7 +4491,6 @@ mod serialized_effect_tests {
             )
         };
 
-        // Default speed tier 1 -> 22px move, 4 scroll lines.
         assert_eq!(run("mouse-move:up").outcome, "executed");
         assert_eq!(run("mouse-click:left").outcome, "executed");
         assert_eq!(run("mouse-click:right").outcome, "executed");
@@ -4500,7 +4498,6 @@ mod serialized_effect_tests {
         assert_eq!(run("mouse-scroll:down").outcome, "executed");
         assert_eq!(run("mouse-scroll:left").outcome, "executed");
 
-        // Switch to fine tier 0 (8px / 2 lines), then fast tier 2 (52px / 9 lines), then cycle -> 0.
         assert_eq!(run("mouse-speed:0").detail, "mouse-speed:0");
         assert_eq!(run("mouse-move:right").outcome, "executed");
         assert_eq!(run("mouse-speed:2").detail, "mouse-speed:2");
@@ -4547,7 +4544,6 @@ mod serialized_effect_tests {
     fn clamp_point_to_rects_handles_negative_multimonitor_and_offscreen_bounds() {
         let displays = [(-1920.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 2560.0, 1440.0)];
 
-        // Points inside primary or negative-x secondary monitor stay unchanged.
         assert_eq!(
             clamp_point_to_rects((500.0, 400.0), &displays),
             (500.0, 400.0)
@@ -4557,7 +4553,6 @@ mod serialized_effect_tests {
             (-100.0, 300.0)
         );
 
-        // Offscreen beyond secondary left edge clamps to [-1920, -1] x [0, 1079].
         assert_eq!(
             clamp_point_to_rects((-2400.0, 300.0), &displays),
             (-1920.0, 300.0)
@@ -4571,13 +4566,11 @@ mod serialized_effect_tests {
             (-500.0, 1079.0)
         );
 
-        // Offscreen beyond primary right/bottom clamps to [0, 2559] x [0, 1439].
         assert_eq!(
             clamp_point_to_rects((3000.0, 1600.0), &displays),
             (2559.0, 1439.0)
         );
 
-        // Empty display list falls back to the input point unchanged.
         assert_eq!(clamp_point_to_rects((-30.0, 40.0), &[]), (-30.0, 40.0));
     }
 
@@ -5424,7 +5417,6 @@ mod serialized_effect_tests {
         );
         assert_eq!(c3.count, 3);
 
-        // Fourth rapid click wraps cleanly to 1
         let c4 = next_mouse_click_state(
             Some(c3),
             MouseButtonKind::Left,
@@ -5434,7 +5426,6 @@ mod serialized_effect_tests {
         );
         assert_eq!(c4.count, 1);
 
-        // Slight stick tremor (<= 8pt) within macOS 500ms window still counts as double-click
         let c_slight_jitter = next_mouse_click_state(
             Some(c1),
             MouseButtonKind::Left,
@@ -5444,7 +5435,6 @@ mod serialized_effect_tests {
         );
         assert_eq!(c_slight_jitter.count, 2);
 
-        // Exceeding distance threshold (> 8pt) resets to 1
         let c_moved = next_mouse_click_state(
             Some(c1),
             MouseButtonKind::Left,
@@ -5454,7 +5444,6 @@ mod serialized_effect_tests {
         );
         assert_eq!(c_moved.count, 1);
 
-        // Exceeding interval threshold (> 500ms) resets to 1
         let c_slow = next_mouse_click_state(
             Some(c1),
             MouseButtonKind::Left,

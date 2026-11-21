@@ -646,7 +646,6 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
         Some(FourAppAgentPhase::AwaitingInput)
     );
 
-    // Antigravity starter defaults already bind top-6 as SessionKeys.
     assert!(
         store
             .projection()
@@ -855,7 +854,6 @@ fn codex_dial_preset_switching_and_slot_preservation() {
     );
     assert_eq!(format_concise_keycap_caption("滚动到对话底部"), "跳到底部");
 
-    // Universal mouse pointer + dial scroll preset applies cleanly on both Antigravity and Codex.
     assert!(KnobJoystickPreset::MousePointerAndScroll.is_universal());
     for target_agent in [CanonicalAgent::Antigravity, CanonicalAgent::Codex] {
         let target_pid = store.find_canonical_profile_id(target_agent).unwrap();
@@ -975,7 +973,6 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
     assert_eq!(enc.press_label, "搜索会话");
     assert_eq!(enc.hold_label, "搜索会话");
 
-    // Select EncoderHold surface and verify SetJoystickMode preserves encoder_hold_action_id.
     store
         .dispatch_canvas_action(CanvasAction::SelectSurface(ControlSurfaceId::EncoderHold))
         .unwrap();
@@ -995,7 +992,6 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
     assert_eq!(store.projection().canvas.encoder.hold_label, "搜索会话");
     assert_eq!(store.projection().canvas.joystick.mode_label, "硬件指针");
 
-    // Unassign and reassign EncoderHold via InspectorAction.
     store
         .dispatch_inspector_action(InspectorAction::UnassignSelectedSlot)
         .unwrap();
@@ -1030,7 +1026,6 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
     assert_eq!(open_receipt.detail, "antigravity/model-picker-next");
     assert!(!store.is_model_picker_mouse_capture_enabled());
 
-    // 2. Rotate CW/CCW while active -> model-picker-next / prev.
     let next_receipt = store
         .consume_physical_input_event(
             mk_ev(3, "AG14", InputEventKind::Pressed),
@@ -1046,7 +1041,6 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         .expect("CCW in active picker");
     assert_eq!(prev_receipt.detail, "antigravity/model-picker-prev");
 
-    // 3. Hardware mouse deltas are never intercepted even while model picker is active.
     let before_mouse_count = store.dispatched_receipts().len();
     store.inject_model_picker_mouse_delta_for_test(34.0, 2.0);
     store.poll_at(t0 + Duration::from_millis(200));
@@ -1054,7 +1048,6 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
     store.poll_at(t0 + Duration::from_millis(450));
     assert_eq!(store.dispatched_receipts().len(), before_mouse_count);
 
-    // 4. Sector right (AG18) is not intercepted by model picker in mouse mode.
     assert!(store
         .consume_physical_input_event(
             mk_ev(5, "AG18", InputEventKind::Pressed),
@@ -1062,7 +1055,6 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         )
         .is_none());
 
-    // 5. Short tap ENC_CLK (< 350ms) confirms selection.
     assert!(store
         .consume_physical_input_event(
             mk_ev(6, "ENC_CLK", InputEventKind::Pressed),
@@ -1078,7 +1070,6 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
     assert_eq!(confirm_receipt.detail, "antigravity/model-picker-confirm");
     assert!(!store.is_model_picker_mouse_capture_enabled());
 
-    // 6. Press + turn (< 350ms) cancels hold cleanly without opening model picker.
     let before_count = store.dispatched_receipts().len();
     assert!(store
         .consume_physical_input_event(
