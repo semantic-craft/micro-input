@@ -154,7 +154,10 @@ impl SavedSixLayerState {
                     &format!("slot-open:{slot}"),
                 )
             });
-            if host.adapter == "antigravity" && doc_has_session_top_six && host.actions.len() >= 6 {
+            if matches!(host.adapter.as_str(), "antigravity" | "codex")
+                && doc_has_session_top_six
+                && host.actions.len() >= 6
+            {
                 let b0 = host.actions[0].as_ref();
                 let b1 = host.actions[1].as_ref();
                 let baked_v2_top_six = matches!(

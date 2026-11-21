@@ -189,24 +189,13 @@ fn opening_saved_desktop_presets_migrates_unchanged_local_codex_once() {
         serde_json::to_value(&doc.editable.graph.layers[&native_lid]).unwrap(),
         native_before
     );
-    assert_eq!(
-        resolve_host_action(doc, Some(&pid), "AG00", true),
-        Some(ResolvedHostAction::AgentCommand {
-            adapter: "codex".into(),
-            command: "subagent".into(),
-        })
-    );
-    assert_eq!(
-        resolve_host_action(doc, Some(&pid), "AG01", true),
-        Some(ResolvedHostAction::AgentCommand {
-            adapter: "host".into(),
-            command: "mouse-click:left".into(),
-        })
-    );
-    for slot in 2..6u32 {
+    for slot in 0..6u32 {
         assert_eq!(
             resolve_host_action(doc, Some(&pid), &format!("AG{slot:02}"), true),
-            None
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
         );
     }
     for (slot, command) in [
@@ -3128,10 +3117,38 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
         assert_eq!(cell.is_session_slot, Some(slot));
     }
 
-    for (name, expected_adapter) in [
-        ("DeepSeek Coder (DSH)", "dsh-desktop"),
-        (mi_model::preset::LOCAL_CODEX_PROFILE_NAME, "codex"),
-    ] {
+    let codex_pid = find_pid(&store, mi_model::preset::LOCAL_CODEX_PROFILE_NAME);
+    let codex_lid = store.document_store.draft.document.editable.graph.profiles[&codex_pid]
+        .layer_order[0]
+        .clone();
+    store.select_and_activate_profile(&codex_pid).unwrap();
+    {
+        let doc = &store.document_store.draft.document;
+        for slot in 0..6u32 {
+            assert_eq!(
+                resolve_host_action(doc, Some(&codex_pid), &format!("AG{slot:02}"), true),
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "four-app".into(),
+                    command: format!("slot-open:{slot}"),
+                })
+            );
+        }
+        let codex_cs = doc.editable.graph.layers[&codex_lid]
+            .control_settings
+            .as_ref()
+            .unwrap();
+        assert_eq!(codex_cs.joystick_mode, "mouse");
+        assert_eq!(codex_cs.active_sectors, 0);
+    }
+    for (slot, cell) in store.projection().canvas.keycap_cells[..6]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(cell.slot_role, "TaskKey");
+        assert_eq!(cell.is_session_slot, Some(slot));
+    }
+
+    for (name, expected_adapter) in [("DeepSeek Coder (DSH)", "dsh-desktop")] {
         let pid = find_pid(&store, name);
         store.select_and_activate_profile(&pid).unwrap();
         let doc = &store.document_store.draft.document;
@@ -3430,4 +3447,217 @@ fn non_isolated_store_refuses_synthetic_device_snapshot_when_baseline_is_absent(
     assert!(store.document_store.draft.document.baseline.is_none());
     assert_eq!(store.document_store.draft.revision, before_rev);
     assert!(store.projection().active_modal.is_none());
+}
+
+#[test]
+fn open_isolated_migrates_persisted_v2_local_codex_and_lights_six_layer_session_slots() {
+    use mi_core::{FourAppLiveCandidate, FourAppSessionKind};
+    use mi_model::draft::Action;
+    use mi_model::host_router::{resolve_host_action, BottomRowLayout, ResolvedHostAction};
+    use mi_model::navigation_history::NavigationPlace;
+    use serde_json::json;
+
+    let temp = TempDir::new().unwrap();
+    let mut initial = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let find_pid = |s: &WorkbenchStore, name: &str| {
+        s.document_store
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == name)
+            .unwrap()
+            .0
+            .clone()
+    };
+    let native_codex_pid = find_pid(&initial, "Codex");
+    let local_codex_pid = find_pid(&initial, mi_model::preset::LOCAL_CODEX_PROFILE_NAME);
+    let local_codex_lid = initial
+        .document_store
+        .draft
+        .document
+        .editable
+        .graph
+        .profiles[&local_codex_pid]
+        .layer_order[0]
+        .clone();
+    let ag_pid = find_pid(&initial, "Antigravity");
+    let dsh_pid = find_pid(&initial, "DeepSeek Coder (DSH)");
+
+    initial
+        .document_store
+        .update(|draft| {
+            for slot in 0..6u32 {
+                draft.unassign(&json!(local_codex_pid), &json!(local_codex_lid), slot)?;
+            }
+            draft.assign(
+                &json!(local_codex_pid),
+                &json!(local_codex_lid),
+                0,
+                Action {
+                    id: "agent-subagent".into(),
+                    name: "选择 Subagent".into(),
+                    category: "Agent".into(),
+                    detail: "打开当前目标 Agent 的子智能体（Subagent）选择弹层，支持旋钮上下选择并短按打开".into(),
+                    payload: json!({"type": "agent_command", "adapter": "host", "command": "subagent"}),
+                },
+            )?;
+            draft.assign(
+                &json!(local_codex_pid),
+                &json!(local_codex_lid),
+                1,
+                Action {
+                    id: "host-mouse-click-left".into(),
+                    name: "鼠标左键点击".into(),
+                    category: "鼠标控制".into(),
+                    detail: "在当前光标位置发送左键按下与抬起（CGEvent）".into(),
+                    payload: json!({"type": "agent_command", "adapter": "host", "command": "mouse-click:left"}),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        mi_model::preset::local_codex_profile_needs_starter_slot_migration(
+            &initial.document_store.draft.document,
+            &local_codex_pid
+        )
+    );
+    assert!(!initial.has_all_desktop_agent_presets());
+
+    let desired =
+        mi_model::board_layers::BoardLayerPlan::recommended(native_codex_pid, ag_pid, dsh_pid);
+    let mut applied_plan = mi_model::apply::AppliedSixLayerPlan::compile(
+        &desired,
+        &initial.document_store.draft.document,
+        BottomRowLayout::Split,
+        true,
+    )
+    .unwrap();
+    let mut baked_codex_actions: [Option<ResolvedHostAction>; 20] = std::array::from_fn(|_| None);
+    baked_codex_actions[0] = Some(ResolvedHostAction::AgentCommand {
+        adapter: "codex".into(),
+        command: "subagent".into(),
+    });
+    baked_codex_actions[1] = Some(ResolvedHostAction::AgentCommand {
+        adapter: "host".into(),
+        command: "mouse-click:left".into(),
+    });
+    applied_plan.hosts.push(mi_model::apply::AppliedHostLayer {
+        profile_id: local_codex_pid.clone(),
+        adapter: "codex".into(),
+        actions: baked_codex_actions,
+        encoder_hold_action: Some(ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "search".into(),
+        }),
+        joystick_mode: Some("MOUSE".into()),
+    });
+    let saved_runtime = json!({
+        "version": 1,
+        "installation": {
+            "status": "Applied",
+            "plan": applied_plan,
+            "target": {
+                "vendor_id": 0x303A,
+                "product_id": 0x8298,
+                "location_id": 0,
+                "usb_parent": 0,
+                "vendor_path": ""
+            },
+            "profile_index": 0,
+            "backup": temp.path().join("backup"),
+            "config": {
+                "path": temp.path().join("karabiner.json"),
+                "original": [],
+                "installed": [],
+                "profile_name": "Default profile",
+                "installed_device": {}
+            }
+        }
+    });
+    std::fs::write(
+        temp.path().join("workbench.json"),
+        serde_json::to_vec(&initial.document_store.draft.document).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("six-layer-runtime.json"),
+        serde_json::to_vec_pretty(&saved_runtime).unwrap(),
+    )
+    .unwrap();
+    drop(initial);
+
+    let mut reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert!(reopened.has_all_desktop_agent_presets());
+    for slot in 0..6u32 {
+        assert_eq!(
+            resolve_host_action(
+                &reopened.document_store.draft.document,
+                Some(&local_codex_pid),
+                &format!("AG{slot:02}"),
+                true
+            ),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
+    }
+    let migrated_codex_host = reopened
+        .six_layer_state()
+        .installation
+        .as_ref()
+        .unwrap()
+        .plan
+        .hosts
+        .iter()
+        .find(|h| h.profile_id == local_codex_pid)
+        .unwrap();
+    for (slot, action) in migrated_codex_host.actions.iter().enumerate().take(6) {
+        assert_eq!(
+            *action,
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
+    }
+
+    let codex_candidates: Vec<FourAppLiveCandidate> = (0..6usize)
+        .map(|slot| FourAppLiveCandidate {
+            place: NavigationPlace::codex(
+                format!("thread-{slot}"),
+                "local",
+                format!("/ws/codex-{slot}"),
+            ),
+            title: format!("Codex Session {}", slot + 1),
+            phase: if slot == 0 {
+                FourAppSessionKind::NeedsAttention
+            } else {
+                FourAppSessionKind::BlueDotCompleted
+            },
+            watermark: format!("wm-{slot}"),
+            last_modified_ms: (10_000 - slot * 100) as u64,
+            last_user_view_ms: 1_000,
+            updated_at_ms: (10_000 - slot * 100) as u64,
+        })
+        .collect();
+    reopened.ingest_four_app_candidates(codex_candidates);
+
+    let entries = reopened
+        .lighting_arbiter
+        .last_six_layer_entries()
+        .expect("six-layer entries computed in BoardLayers mode");
+    assert_eq!(entries[0].k, "AG00");
+    assert_eq!(entries[0].c, 0xFFAA00);
+    assert!(entries[0].b > 0.0);
+    assert!(entries[0].sa);
+    for (slot, entry) in entries.iter().enumerate().take(6).skip(1) {
+        assert_eq!(entry.k, format!("AG{slot:02}"));
+        assert_eq!(entry.c, 0x0088FF);
+        assert!(entry.b > 0.0);
+    }
 }

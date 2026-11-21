@@ -1549,28 +1549,7 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
     }
     let codex_r25 = codex_assignments.clone();
     legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_r25.clone()));
-    codex_assignments.retain(|(slot, ..)| !(0..=5).contains(slot));
-    for (slot, id, label, command) in [
-        (0, "slot-open-0", "会话 1", "slot-open:0"),
-        (1, "slot-open-1", "会话 2", "slot-open:1"),
-        (2, "slot-open-2", "会话 3", "slot-open:2"),
-        (3, "slot-open-3", "会话 4", "slot-open:3"),
-        (4, "slot-open-4", "会话 5", "slot-open:4"),
-        (5, "slot-open-5", "会话 6", "slot-open:5"),
-    ] {
-        codex_assignments.push((
-            slot,
-            id,
-            label,
-            "Codex 会话",
-            "切换并回读对应状态的 Codex 会话",
-            ActionKind::AgentCommand {
-                adapter: "four-app".into(),
-                command: command.into(),
-            },
-        ));
-    }
-    codex_assignments.sort_by_key(|(slot, ..)| *slot);
+    replace_codex_top_six_with_session_keys(&mut codex_assignments);
     let codex_r26 = codex_assignments.clone();
     legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_r26.clone()));
     for item in codex_assignments.iter_mut() {
@@ -1745,7 +1724,7 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
     legacy_specs.extend(
         specs
             .iter()
-            .filter(|(name, _)| *name == "Antigravity")
+            .filter(|(name, _)| matches!(*name, "Antigravity" | LOCAL_CODEX_PROFILE_NAME))
             .cloned(),
     );
     if let Some((_, ag_assignments)) = specs.iter_mut().find(|(name, _)| *name == "Antigravity") {
@@ -1753,8 +1732,91 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
         ag_assignments.extend(canonical_antigravity_joystick_assignments());
         ag_assignments.sort_by_key(|(slot, ..)| *slot);
     }
+    if let Some((_, codex_assignments)) = specs
+        .iter_mut()
+        .find(|(name, _)| *name == LOCAL_CODEX_PROFILE_NAME)
+    {
+        replace_codex_top_six_with_session_keys(codex_assignments);
+    }
 
     (specs, legacy_specs)
+}
+
+fn canonical_codex_session_top_six_assignments() -> [AgentAssignment; 6] {
+    [
+        (
+            0,
+            "slot-open-0",
+            "会话 1",
+            "Codex 会话",
+            "切换并回读对应状态的 Codex 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:0".into(),
+            },
+        ),
+        (
+            1,
+            "slot-open-1",
+            "会话 2",
+            "Codex 会话",
+            "切换并回读对应状态的 Codex 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:1".into(),
+            },
+        ),
+        (
+            2,
+            "slot-open-2",
+            "会话 3",
+            "Codex 会话",
+            "切换并回读对应状态的 Codex 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:2".into(),
+            },
+        ),
+        (
+            3,
+            "slot-open-3",
+            "会话 4",
+            "Codex 会话",
+            "切换并回读对应状态的 Codex 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:3".into(),
+            },
+        ),
+        (
+            4,
+            "slot-open-4",
+            "会话 5",
+            "Codex 会话",
+            "切换并回读对应状态的 Codex 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:4".into(),
+            },
+        ),
+        (
+            5,
+            "slot-open-5",
+            "会话 6",
+            "Codex 会话",
+            "切换并回读对应状态的 Codex 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:5".into(),
+            },
+        ),
+    ]
+}
+
+fn replace_codex_top_six_with_session_keys(assignments: &mut Vec<AgentAssignment>) {
+    assignments.retain(|(slot, ..)| !(0..=5).contains(slot));
+    assignments.extend(canonical_codex_session_top_six_assignments());
+    assignments.sort_by_key(|(slot, ..)| *slot);
 }
 
 fn canonical_antigravity_session_top_six_assignments() -> [AgentAssignment; 6] {
@@ -2393,9 +2455,13 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                         for slot in 0..=5u32 {
                             work.unassign(&json!(pid), &json!(lid), slot)?;
                         }
-                        for (slot, id, name, category, detail, kind) in
-                            canonical_coding_agent_top_row_assignments()
-                        {
+                        let replacement_top_six: Vec<AgentAssignment> =
+                            if profile_name == LOCAL_CODEX_PROFILE_NAME {
+                                canonical_codex_session_top_six_assignments().into()
+                            } else {
+                                canonical_coding_agent_top_row_assignments().into()
+                            };
+                        for (slot, id, name, category, detail, kind) in replacement_top_six {
                             let action = crate::draft::Action {
                                 id: id.into(),
                                 name: name.into(),

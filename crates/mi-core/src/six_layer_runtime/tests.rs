@@ -927,6 +927,36 @@ fn saved_state_migrates_antigravity_v160_top_six_and_mouse_joystick_to_session_a
     ag_host.joystick_mode = Some("MOUSE".into());
     ag_host.actions[16..20].fill(None);
 
+    let local_codex_pid = draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, p)| p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+        .unwrap()
+        .0
+        .clone();
+    let mut codex_actions: [Option<ResolvedHostAction>; 20] = std::array::from_fn(|_| None);
+    codex_actions[0] = Some(ResolvedHostAction::AgentCommand {
+        adapter: "codex".into(),
+        command: "subagent".into(),
+    });
+    codex_actions[1] = Some(ResolvedHostAction::AgentCommand {
+        adapter: "host".into(),
+        command: "mouse-click:left".into(),
+    });
+    plan.hosts.push(mi_model::apply::AppliedHostLayer {
+        profile_id: local_codex_pid.clone(),
+        adapter: "codex".into(),
+        actions: codex_actions,
+        encoder_hold_action: Some(ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "search".into(),
+        }),
+        joystick_mode: Some("MOUSE".into()),
+    });
+
     let dir = tempfile::tempdir().unwrap();
     let mut saved = SavedSixLayerState {
         version: 3,
@@ -1004,6 +1034,26 @@ fn saved_state_migrates_antigravity_v160_top_six_and_mouse_joystick_to_session_a
             command: "close-side-panel".into(),
         })
     );
+
+    let migrated_codex = saved
+        .installation
+        .as_ref()
+        .unwrap()
+        .plan
+        .hosts
+        .iter()
+        .find(|h| h.profile_id == local_codex_pid)
+        .unwrap();
+    for (slot, action) in migrated_codex.actions.iter().enumerate().take(6) {
+        assert_eq!(
+            *action,
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
+    }
+    assert_eq!(migrated_codex.joystick_mode.as_deref(), Some("MOUSE"));
 
     const SIX_SOURCE: &[u8] =
         include_bytes!("../../../mi-model/fixtures/device/synthetic-six-layer-source.json");
