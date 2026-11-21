@@ -4,8 +4,8 @@
 
 ## 当前版本与架构基线
 
-- **最新发行标签**：[v0.12.0](releases/v0.12.0.md)（`CFBundleShortVersionString = 0.12.0`；历次发行说明归档于 [releases/](releases/v0.12.0.md)）。
-- **主线演进（v0.12.0 基线）**：合入响应驱动逐键状态灯与 `sa: true` 底光同步、第 1 层 Codex 与第 2 层 Antigravity 双源槽位实时共存及存量预设幂等迁移（PR #170、#171），以及 18 项架构决策沉淀与零普通注释门禁（PR #169）。
+- **最新发行标签**：[v0.12.1](releases/v0.12.1.md)（`CFBundleShortVersionString = 0.12.1`；历次发行说明归档于 [releases/](releases/v0.12.1.md)）。
+- **主线演进（v0.12.1 基线）**：合入 Antigravity 后台日志存活感知、自动重试/60 秒慢等/`429` 报错与守护进程断连异常呼吸灯效及双语悬停原因提示（PR #173），延续 v0.12.0 响应驱动双源状态灯、存量预设迁移与零普通注释门禁基线（PR #169、#170、#171）。
 - **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C15`。
 
 ## 已实现与已验证能力
