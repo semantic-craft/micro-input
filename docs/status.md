@@ -4,9 +4,9 @@
 
 ## 当前版本与架构基线
 
-- **最新发行标签**：[v0.12.2](releases/v0.12.2.md)（`CFBundleShortVersionString = 0.12.2`；历次发行说明归档于 [releases/](releases/v0.12.2.md)）。
-- **主线演进（v0.12.2 基线）**：合入 `worklouder/input-kit` v0.3.0 单设备 10 秒滚动写入预算器（USB 60/10s、BLE 40/10s + 250ms 节流）、跨 `VendorBridge` 900 次轮换共享预算注册表、非阻塞 `DeviceSession` 限流与零新依赖 `mi-proto::input_kit` 协议基础层（PR #175），延续 v0.12.1 Antigravity 后台日志存活感知（PR #173）与 v0.12.0 双源状态灯及零普通注释门禁基线（PR #169、#170、#171）。
-- **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C15`。
+- **最新发行标签**：[v0.12.3](releases/v0.12.3.md)（`CFBundleShortVersionString = 0.12.3`；历次发行说明归档于 [releases/](releases/v0.12.3.md)）。
+- **主线演进（v0.12.3 基线）**：合入 `Grok Bot`（`com.anysphere.sand`）三键原生无障碍方案替换 `Herdr` 与未修改存量方案自动退役（PR #179）、Antigravity 中英双语 AX 标签单源收口与 `R-C16` 门禁（PR #178），延续 v0.12.2 InputKit v0.3.0 写入预算与协议基础层（PR #175）及 v0.12.1 Antigravity 后台日志存活感知（PR #173）。
+- **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C16`。
 
 ## 已实现与已验证能力
 
