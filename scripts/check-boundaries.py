@@ -745,6 +745,63 @@ def find_scattered_antigravity_ax_label_violations(rel_path: str, src: str) -> l
     return violations
 
 
+def find_ui_layout_and_modal_contract_violations(
+    classic_workbench_src: str,
+    board_src: str,
+    status_menu_src: str,
+) -> list[str]:
+    violations: list[str] = []
+    if '编辑层灯光' in board_src:
+        violations.append(
+            'app/MicroInput/Sources/MicroInputUI/CreatorMicroBoardView.swift: '
+            'SimpleLightingControlCard must not duplicate "编辑层灯光"; keep it solely on the lighting settings page in ClassicWorkbenchView.swift'
+        )
+    lighting_btn_count = classic_workbench_src.count('"编辑层灯光"')
+    if lighting_btn_count != 1:
+        violations.append(
+            'app/MicroInput/Sources/MicroInputUI/ClassicWorkbenchView.swift: '
+            f'Lighting settings page must expose exactly one "编辑层灯光" action (found {lighting_btn_count})'
+        )
+    if 'ToggleCheatSheet' in status_menu_src:
+        violations.append(
+            'app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift: '
+            'forbidden "ToggleCheatSheet" found in StatusMenuPopoverView; remove the redundant bottom 按键速查 toggle row'
+        )
+    if '隐藏按键速查' in status_menu_src:
+        violations.append(
+            'app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift: '
+            'forbidden "隐藏按键速查" found in StatusMenuPopoverView; keep the inline cheat sheet always visible without a hide toggle'
+        )
+    sheet_marker = 'struct LightingEditorSheet: View'
+    next_marker = 'struct ReconnectComparisonSheet: View'
+    sheet_start = status_menu_src.find(sheet_marker)
+    sheet_end = status_menu_src.find(next_marker, sheet_start) if sheet_start != -1 else -1
+    if sheet_start == -1 or sheet_end == -1:
+        violations.append(
+            'app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift: '
+            'expected struct LightingEditorSheet: View followed by struct ReconnectComparisonSheet: View'
+        )
+    else:
+        sheet_src = status_menu_src[sheet_start:sheet_end]
+        for required_token in (
+            'LightingBeginPreview',
+            'LightingEndPreview',
+            '在键盘上预览',
+            '.surfaceButton(.secondary)',
+        ):
+            if required_token not in sheet_src:
+                violations.append(
+                    'app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift: '
+                    f'LightingEditorSheet must preserve {required_token!r} for the hardware lighting preview button contract'
+                )
+        if '.tint(' in sheet_src:
+            violations.append(
+                'app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift: '
+                'LightingEditorSheet must not use .tint(; keep the sheet monochrome using .surfaceButton(.secondary)'
+            )
+    return violations
+
+
 def run_boundary_checks(root: Path = ROOT) -> None:
     sources = list((root / 'crates').rglob('*.rs'))
     found = set()
@@ -1281,6 +1338,16 @@ def run_boundary_checks(root: Path = ROOT) -> None:
     assert not rc15_violations, (
         'R-C15 violation (global key-mapping kill-switch focus isolation and paused status item state):\n  '
         + '\n  '.join(rc15_violations)
+    )
+
+    ui_contract_violations = find_ui_layout_and_modal_contract_violations(
+        classic_workbench_src,
+        ui_sources['app/MicroInput/Sources/MicroInputUI/CreatorMicroBoardView.swift'],
+        status_menu_src,
+    )
+    assert not ui_contract_violations, (
+        'UI layout and modal contract violation:\n  '
+        + '\n  '.join(ui_contract_violations)
     )
 
     ag_labels_path = root / 'crates/mi-macos/src/antigravity_ax_labels.rs'

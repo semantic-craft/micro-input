@@ -491,3 +491,66 @@ fn match_exec(label: &str) -> bool {
                 for v in exec_violations
             )
         )
+
+    def test_ui_layout_and_modal_contract_checks_catch_regressions(self):
+        valid_classic = 'Button("编辑层灯光") {}'
+        valid_board = 'struct SimpleLightingControlCard: View {}'
+        valid_modals = """
+struct StatusMenuPopoverView: View {
+    var body: some View { EmptyView() }
+}
+struct LightingEditorSheet: View {
+    var body: some View {
+        Button("在键盘上预览") {
+            store.dispatch("modal", "LightingBeginPreview")
+            store.dispatch("modal", "LightingEndPreview")
+        }
+        .surfaceButton(.secondary)
+    }
+}
+struct ReconnectComparisonSheet: View {}
+"""
+        self.assertEqual(
+            module.find_ui_layout_and_modal_contract_violations(
+                valid_classic, valid_board, valid_modals
+            ),
+            [],
+        )
+
+        toggle_regression = valid_modals.replace(
+            "EmptyView()",
+            'Button("隐藏按键速查") { store.dispatch("overlay", "ToggleCheatSheet") }',
+        )
+        toggle_violations = module.find_ui_layout_and_modal_contract_violations(
+            valid_classic, valid_board, toggle_regression
+        )
+        self.assertTrue(any("ToggleCheatSheet" in v for v in toggle_violations))
+        self.assertTrue(any("隐藏按键速查" in v for v in toggle_violations))
+        self.assertTrue(all("ModalsAndStatusMenuView.swift" in v for v in toggle_violations))
+
+        tint_regression = valid_modals.replace(
+            ".surfaceButton(.secondary)",
+            ".surfaceButton(.secondary)\n.tint(.blue)",
+        )
+        tint_violations = module.find_ui_layout_and_modal_contract_violations(
+            valid_classic, valid_board, tint_regression
+        )
+        self.assertEqual(len(tint_violations), 1)
+        self.assertIn(".tint(", tint_violations[0])
+        self.assertIn("ModalsAndStatusMenuView.swift", tint_violations[0])
+
+        dup_board_violations = module.find_ui_layout_and_modal_contract_violations(
+            valid_classic,
+            'Button("编辑层灯光") {}',
+            valid_modals,
+        )
+        self.assertEqual(len(dup_board_violations), 1)
+        self.assertIn("CreatorMicroBoardView.swift", dup_board_violations[0])
+
+        dup_classic_violations = module.find_ui_layout_and_modal_contract_violations(
+            'Button("编辑层灯光") {} Button("编辑层灯光") {}',
+            valid_board,
+            valid_modals,
+        )
+        self.assertEqual(len(dup_classic_violations), 1)
+        self.assertIn("ClassicWorkbenchView.swift", dup_classic_violations[0])

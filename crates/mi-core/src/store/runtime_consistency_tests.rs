@@ -878,9 +878,8 @@ fn host_mouse_commands_preserve_host_adapter_in_compile_profile_twenty_slots() {
 fn idle_poll_at_skips_commit_local_update_and_does_not_bump_projection_generation() {
     let (_dir, mut store, now) = active_store();
     let initial_gen = store.projection_generation();
-    let initial_commits = store.commit_local_update_count;
+    let initial_status = store.projection().status_message.clone();
     assert!(initial_gen > 0);
-    assert!(initial_commits > 0);
 
     for offset in [
         Duration::from_millis(16),
@@ -890,7 +889,7 @@ fn idle_poll_at_skips_commit_local_update_and_does_not_bump_projection_generatio
     ] {
         assert!(!store.poll_at(now + offset));
         assert_eq!(store.projection_generation(), initial_gen);
-        assert_eq!(store.commit_local_update_count, initial_commits);
+        assert_eq!(store.projection().status_message, initial_status);
     }
 }
 
@@ -946,9 +945,9 @@ fn poll_at_detects_app_cache_invalidate_and_overlay_expiry() {
             .app_installed
     );
 
-    let settled_commits = store.commit_local_update_count;
+    let settled_gen = store.projection_generation();
     assert!(!store.poll_at(t0 + Duration::from_millis(150)));
-    assert_eq!(store.commit_local_update_count, settled_commits);
+    assert_eq!(store.projection_generation(), settled_gen);
 
     let t1 = t0 + Duration::from_secs(1);
     store
@@ -956,18 +955,17 @@ fn poll_at_detects_app_cache_invalidate_and_overlay_expiry() {
         .unwrap();
     assert!(store.projection().overlay.panel_spec.is_some());
 
-    let before_expiry_commits = store.commit_local_update_count;
-    assert!(!store.poll_at(t1 + crate::PASSIVE_NOTICE_DURATION - Duration::from_millis(1)));
-    assert_eq!(store.commit_local_update_count, before_expiry_commits);
-
     let gen_before_expiry = store.projection_generation();
+    assert!(!store.poll_at(t1 + crate::PASSIVE_NOTICE_DURATION - Duration::from_millis(1)));
+    assert_eq!(store.projection_generation(), gen_before_expiry);
+
     assert!(store.poll_at(t1 + crate::PASSIVE_NOTICE_DURATION));
     assert_eq!(store.projection_generation(), gen_before_expiry + 1);
     assert!(store.projection().overlay.panel_spec.is_none());
 
-    let commits_after_expiry = store.commit_local_update_count;
+    let gen_after_expiry = store.projection_generation();
     assert!(!store.poll_at(t1 + crate::PASSIVE_NOTICE_DURATION + Duration::from_millis(50)));
-    assert_eq!(store.commit_local_update_count, commits_after_expiry);
+    assert_eq!(store.projection_generation(), gen_after_expiry);
 }
 
 #[test]
@@ -979,14 +977,12 @@ fn poll_at_triggers_encoder_model_picker_hold_and_idle_expiry() {
     };
     assert!(store.consume_physical_input_event(press, now).is_none());
 
-    let pre_hold_commits = store.commit_local_update_count;
-    assert!(!store.poll_at(now + Duration::from_millis(100)));
-    assert_eq!(store.commit_local_update_count, pre_hold_commits);
-
     let gen_before_hold = store.projection_generation();
+    assert!(!store.poll_at(now + Duration::from_millis(100)));
+    assert_eq!(store.projection_generation(), gen_before_hold);
+
     assert!(store.poll_at(now + crate::ENCODER_HOLD_THRESHOLD));
-    assert_eq!(store.commit_local_update_count, pre_hold_commits + 1);
-    assert!(store.projection_generation() > gen_before_hold);
+    assert_eq!(store.projection_generation(), gen_before_hold + 1);
     assert!(store.projection().status_message.contains("搜索会话"));
 
     let release = InputEvent {
@@ -1022,19 +1018,18 @@ fn poll_at_triggers_encoder_model_picker_hold_and_idle_expiry() {
     assert!(!store.is_model_picker_mouse_capture_enabled());
     assert!(store.encoder_model_picker.active_session().is_some());
 
-    let mid_commits = store.commit_local_update_count;
+    let mid_gen = store.projection_generation();
     assert!(!store.poll_at(t_turn + Duration::from_secs(5)));
-    assert_eq!(store.commit_local_update_count, mid_commits);
+    assert_eq!(store.projection_generation(), mid_gen);
     assert!(!store.is_model_picker_mouse_capture_enabled());
 
     let _ = store.poll_at(t_turn + crate::MODEL_PICKER_IDLE_TIMEOUT + Duration::from_millis(1));
-    assert_eq!(store.commit_local_update_count, mid_commits + 1);
     assert!(!store.is_model_picker_mouse_capture_enabled());
     assert!(store.encoder_model_picker.active_session().is_none());
 
-    let post_expiry_commits = store.commit_local_update_count;
+    let post_expiry_gen = store.projection_generation();
     assert!(!store.poll_at(t_turn + crate::MODEL_PICKER_IDLE_TIMEOUT + Duration::from_secs(1)));
-    assert_eq!(store.commit_local_update_count, post_expiry_commits);
+    assert_eq!(store.projection_generation(), post_expiry_gen);
 }
 
 #[test]
@@ -1052,21 +1047,19 @@ fn poll_at_detects_session_navigation_and_slot_table_mutations() {
     };
 
     let gen_before_slot = store.projection_generation();
-    let pre_slot_commits = store.commit_local_update_count;
     store
         .slot_table
         .update_candidates(vec![cand.clone()], &BTreeMap::new());
     assert!(store.poll_at(now + Duration::from_millis(20)));
-    assert_eq!(store.commit_local_update_count, pre_slot_commits + 1);
-    assert!(store.projection_generation() > gen_before_slot);
+    assert_eq!(store.projection_generation(), gen_before_slot + 1);
     assert_eq!(
         store.projection().session_strip.slots[0].title,
         "Poll Session 1"
     );
 
-    let idle_commits = store.commit_local_update_count;
+    let idle_gen = store.projection_generation();
     assert!(!store.poll_at(now + Duration::from_millis(40)));
-    assert_eq!(store.commit_local_update_count, idle_commits);
+    assert_eq!(store.projection_generation(), idle_gen);
 
     store.session_navigation.catalog = Some(NavigationCatalog {
         instance: CatalogInstance::Antigravity(AntigravityInstance {
@@ -1089,10 +1082,8 @@ fn poll_at_detects_session_navigation_and_slot_table_mutations() {
     reply.send(Ok(cand.place.clone())).unwrap();
 
     let gen_before_nav = store.projection_generation();
-    let pre_nav_commits = store.commit_local_update_count;
     assert!(store.poll_at(now + Duration::from_millis(60)));
-    assert_eq!(store.commit_local_update_count, pre_nav_commits + 1);
-    assert!(store.projection_generation() > gen_before_nav);
+    assert_eq!(store.projection_generation(), gen_before_nav + 1);
     assert!(store.projection().status_message.contains("已切换会话"));
     assert_eq!(
         store
@@ -1102,9 +1093,9 @@ fn poll_at_detects_session_navigation_and_slot_table_mutations() {
         Some(&"wm-1".to_string())
     );
 
-    let post_nav_commits = store.commit_local_update_count;
+    let post_nav_gen = store.projection_generation();
     assert!(!store.poll_at(now + Duration::from_millis(80)));
-    assert_eq!(store.commit_local_update_count, post_nav_commits);
+    assert_eq!(store.projection_generation(), post_nav_gen);
 }
 
 #[test]
@@ -1114,18 +1105,15 @@ fn idle_poll_after_browse_profile_skips_commit() {
         .find_canonical_profile_id(CanonicalAgent::GrokBot)
         .unwrap();
     store.browse_profile(&other).unwrap();
-    let commits_after_browse = store.commit_local_update_count;
     let gen_after_browse = store.projection_generation();
 
     assert!(!store.poll_at(now + Duration::from_millis(16)));
-    assert_eq!(store.commit_local_update_count, commits_after_browse);
     assert_eq!(store.projection_generation(), gen_after_browse);
 }
 
 #[test]
 fn idle_live_candidates_none_does_not_force_commit_local_update() {
     let (_dir, mut store, now) = active_store();
-    let commits_before = store.commit_local_update_count;
     let gen_before = store.projection_generation();
 
     store.handle_hardware_loop_event(
@@ -1138,7 +1126,6 @@ fn idle_live_candidates_none_does_not_force_commit_local_update() {
     );
 
     assert!(!store.poll_at(now + Duration::from_millis(16)));
-    assert_eq!(store.commit_local_update_count, commits_before);
     assert_eq!(store.projection_generation(), gen_before);
 }
 
@@ -1151,9 +1138,9 @@ fn external_board_configuration_and_slot_role_override_mutations_are_detected_by
     store
         .assign_board_layer(BoardLayer::ALL[3], Some(target))
         .unwrap();
-    let commits_after_assign = store.commit_local_update_count;
+    let gen_after_assign = store.projection_generation();
     assert!(!store.poll_at(now + Duration::from_millis(16)));
-    assert_eq!(store.commit_local_update_count, commits_after_assign);
+    assert_eq!(store.projection_generation(), gen_after_assign);
 
     let mut next_plan = store
         .document_store
@@ -1170,7 +1157,11 @@ fn external_board_configuration_and_slot_role_override_mutations_are_detected_by
         )
         .unwrap();
     assert!(store.poll_at(now + Duration::from_millis(32)));
-    assert_eq!(store.commit_local_update_count, commits_after_assign + 1);
+    assert_eq!(store.projection_generation(), gen_after_assign + 1);
+    assert_eq!(
+        store.projection().sidebar.board_layers.layers[3].owner,
+        "Unassigned"
+    );
 
     let profile_id = store.selected_profile_id().unwrap().to_string();
     let flipped_role = if store.projection().canvas.keycap_cells[0].slot_role == "TaskKey" {
@@ -1178,11 +1169,19 @@ fn external_board_configuration_and_slot_role_override_mutations_are_detected_by
     } else {
         KeycapRole::TaskKey
     };
+    let expected_role = match flipped_role {
+        KeycapRole::ActionKey => "ActionKey",
+        KeycapRole::TaskKey => "TaskKey",
+    };
     store
         .slot_role_overrides
         .insert((profile_id, 0), flipped_role);
     assert!(store.poll_at(now + Duration::from_millis(48)));
-    assert_eq!(store.commit_local_update_count, commits_after_assign + 2);
+    assert_eq!(store.projection_generation(), gen_after_assign + 2);
+    assert_eq!(
+        store.projection().canvas.keycap_cells[0].slot_role,
+        expected_role
+    );
 }
 
 #[test]

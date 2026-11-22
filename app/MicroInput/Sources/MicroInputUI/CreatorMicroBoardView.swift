@@ -9,7 +9,6 @@ struct CreatorMicroStageView: View {
     var onPromptRenameLayer: () -> Void
 
     var body: some View {
-        let _ = ViewRenderTelemetry.record("CreatorMicroStageView")
         let s = store.sidebar
         let h = store.header
         let locale = store.locale
@@ -175,7 +174,6 @@ struct CreatorMicroBoardView: View, @MainActor Equatable {
     private let gridSpacing: CGFloat = 8
 
     var body: some View {
-        let _ = ViewRenderTelemetry.record("CreatorMicroBoardView")
         let c = store.canvas
         let ss = store.sessionStrip
         VStack(spacing: 14) {

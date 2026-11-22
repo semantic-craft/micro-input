@@ -600,8 +600,6 @@ pub struct WorkbenchStore {
     six_layer_view: Option<SixLayerView>,
     captured_app_cache_stamp: (usize, u64),
     last_committed_stamp: Option<RuntimeCommitStamp>,
-    #[cfg(test)]
-    pub(crate) commit_local_update_count: u64,
     update_now: Instant,
     input_lost_session: Option<u64>,
     projection_generation: u64,
@@ -771,8 +769,6 @@ impl WorkbenchStore {
             six_layer_view: None,
             captured_app_cache_stamp: (0, 0),
             last_committed_stamp: None,
-            #[cfg(test)]
-            commit_local_update_count: 0,
             update_now: now,
             input_lost_session: None,
             projection_generation: 0,
@@ -1685,10 +1681,6 @@ impl WorkbenchStore {
     }
 
     fn commit_local_update(&mut self) {
-        #[cfg(test)]
-        {
-            self.commit_local_update_count = self.commit_local_update_count.wrapping_add(1);
-        }
         self.normalize_view_state();
         let current_locale = self.effective_locale();
         let mut reused_keycaps = false;

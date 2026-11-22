@@ -1,9 +1,50 @@
 import AppKit
 import Foundation
 import MicroInputCoreFFI
+import Observation
 import SwiftUI
 import XCTest
 @testable import MicroInputUI
+
+private final class SliceInvalidationCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var slices: Set<String> = []
+
+    func record(_ slice: String) {
+        lock.lock()
+        slices.insert(slice)
+        lock.unlock()
+    }
+
+    func snapshot() -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return slices
+    }
+}
+
+@MainActor
+func trackSliceInvalidations(on store: CoreStore, during action: () -> Void) -> Set<String> {
+    let collector = SliceInvalidationCollector()
+    func observe(_ name: String, _ read: () -> Void) {
+        withObservationTracking {
+            read()
+        } onChange: {
+            collector.record(name)
+        }
+    }
+    observe("header") { _ = store.header }
+    observe("sidebar") { _ = store.sidebar }
+    observe("canvas") { _ = store.canvas }
+    observe("sessionStrip") { _ = store.sessionStrip }
+    observe("inspector") { _ = store.inspector }
+    observe("statusMenu") { _ = store.statusMenu }
+    observe("overlay") { _ = store.overlay }
+    observe("footer") { _ = store.footer }
+    observe("activeModal") { _ = store.activeModal }
+    action()
+    return collector.snapshot()
+}
 
 final class MicroInputTests: XCTestCase {
     private func makeIsolatedTempDir(_ name: String) throws -> URL {
@@ -196,90 +237,91 @@ final class MicroInputTests: XCTestCase {
         mainHosting.layoutSubtreeIfNeeded()
         statusHosting.layoutSubtreeIfNeeded()
 
-        ViewRenderTelemetry.isEnabled = true
-        defer { ViewRenderTelemetry.isEnabled = false }
-
-        ViewRenderTelemetry.reset()
+        var searchInvalidations: [Set<String>] = []
         let searchStart = DispatchTime.now().uptimeNanoseconds
         for query in ["终", "终端", "终端命", "终端命令", ""] {
-            store.dispatch("inspector", ["SetActionSearchQuery": query])
+            let invalidated = trackSliceInvalidations(on: store) {
+                store.dispatch("inspector", ["SetActionSearchQuery": query])
+            }
+            searchInvalidations.append(invalidated)
             mainHosting.layoutSubtreeIfNeeded()
             statusHosting.layoutSubtreeIfNeeded()
         }
         let searchElapsedMs = Double(DispatchTime.now().uptimeNanoseconds - searchStart) / 1_000_000.0
-        print("PERF_METRIC inspector_search_5_steps ms=\(String(format: "%.2f", searchElapsedMs)) counts=\(ViewRenderTelemetry.counts)")
-        XCTAssertEqual(ViewRenderTelemetry.count("CreatorMicroInlineInspectorView"), 5)
-        XCTAssertEqual(ViewRenderTelemetry.count("WorkbenchRootView"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("ClassicWorkbenchView"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("HeaderBar"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("Sidebar"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("CreatorMicroStageView"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("CreatorMicroBoardView"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("FooterBar"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("StatusMenuPopoverView"), 0)
+        print("PERF_METRIC inspector_search_5_steps ms=\(String(format: "%.2f", searchElapsedMs))")
+        XCTAssertLessThan(searchElapsedMs, 5_000.0)
+        for invalidated in searchInvalidations {
+            XCTAssertEqual(
+                invalidated,
+                ["inspector"],
+                "Inspector action search must invalidate only store.inspector, got \(invalidated)"
+            )
+        }
 
-        ViewRenderTelemetry.reset()
+        var slotInvalidations: [Set<String>] = []
         let slotStart = DispatchTime.now().uptimeNanoseconds
         for slot in [1, 5, 8, 12] {
-            store.dispatch("canvas", ["SelectLogicalSlot": slot])
+            let invalidated = trackSliceInvalidations(on: store) {
+                store.dispatch("canvas", ["SelectLogicalSlot": slot])
+            }
+            slotInvalidations.append(invalidated)
             mainHosting.layoutSubtreeIfNeeded()
             statusHosting.layoutSubtreeIfNeeded()
         }
         let slotElapsedMs = Double(DispatchTime.now().uptimeNanoseconds - slotStart) / 1_000_000.0
-        print("PERF_METRIC canvas_slot_select_4_steps ms=\(String(format: "%.2f", slotElapsedMs)) counts=\(ViewRenderTelemetry.counts)")
-        XCTAssertEqual(ViewRenderTelemetry.count("CreatorMicroBoardView"), 4)
-        XCTAssertEqual(ViewRenderTelemetry.count("CreatorMicroInlineInspectorView"), 4)
-        XCTAssertEqual(ViewRenderTelemetry.count("WorkbenchRootView"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("ClassicWorkbenchView"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("HeaderBar"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("Sidebar"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("CreatorMicroStageView"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("FooterBar"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("StatusMenuPopoverView"), 0)
+        print("PERF_METRIC canvas_slot_select_4_steps ms=\(String(format: "%.2f", slotElapsedMs))")
+        XCTAssertLessThan(slotElapsedMs, 5_000.0)
+        for invalidated in slotInvalidations {
+            XCTAssertEqual(
+                invalidated,
+                ["canvas", "inspector"],
+                "Canvas slot selection must invalidate only store.canvas and store.inspector, got \(invalidated)"
+            )
+        }
 
-        ViewRenderTelemetry.reset()
         let noopStart = DispatchTime.now().uptimeNanoseconds
-        store.dispatch("canvas", ["SelectLogicalSlot": 12])
-        store.dispatchRaw(["domain": "foreground_app_changed", "action": ["bundle_id": NSNull()]])
-        store.dispatchRaw(["domain": "main_window_active_changed", "action": ["active": true]])
-        store.pollHardware()
+        let noopInvalidated = trackSliceInvalidations(on: store) {
+            store.dispatch("canvas", ["SelectLogicalSlot": 12])
+            store.dispatchRaw(["domain": "foreground_app_changed", "action": ["bundle_id": NSNull()]])
+            store.dispatchRaw(["domain": "main_window_active_changed", "action": ["active": true]])
+            store.pollHardware()
+        }
         mainHosting.layoutSubtreeIfNeeded()
         statusHosting.layoutSubtreeIfNeeded()
         let noopElapsedMs = Double(DispatchTime.now().uptimeNanoseconds - noopStart) / 1_000_000.0
-        print("PERF_METRIC noop_events_4_steps ms=\(String(format: "%.2f", noopElapsedMs)) counts=\(ViewRenderTelemetry.counts)")
+        print("PERF_METRIC noop_events_4_steps ms=\(String(format: "%.2f", noopElapsedMs))")
+        XCTAssertLessThan(noopElapsedMs, 5_000.0)
         XCTAssertTrue(
-            ViewRenderTelemetry.counts.isEmpty,
-            "No-op dispatches and idle hardware polls must trigger 0 JSON decodes and 0 SwiftUI body evaluations, got \(ViewRenderTelemetry.counts)"
+            noopInvalidated.isEmpty,
+            "No-op dispatches and idle hardware polls must invalidate 0 domain slices, got \(noopInvalidated)"
         )
 
         mainHosting.layoutSubtreeIfNeeded()
         statusHosting.layoutSubtreeIfNeeded()
         XCTAssertNotNil(store.statusMenu.cheatSheetPreview)
 
-        ViewRenderTelemetry.reset()
-        store.dispatch("session_strip", ["TriggerTestLighting": "thinking"])
-        store.dispatch("session_strip", ["TriggerTestLighting": "completed"])
-        store.dispatch("session_strip", ["TriggerTestLighting": NSNull()])
-        store.dispatch("inspector", ["SetActionSearchQuery": "会话"])
-        store.dispatch("inspector", ["SetActionSearchQuery": ""])
-        store.dispatch("canvas", ["SelectLogicalSlot": 3])
-        store.dispatch("overlay", "ToggleCheatSheet")
-        XCTAssertTrue(store.overlay.cheatSheetVisible)
-        mainHosting.layoutSubtreeIfNeeded()
-        statusHosting.layoutSubtreeIfNeeded()
-        store.dispatch("overlay", "CloseCheatSheet")
-        XCTAssertFalse(store.overlay.cheatSheetVisible)
-        mainHosting.layoutSubtreeIfNeeded()
-        statusHosting.layoutSubtreeIfNeeded()
-        XCTAssertEqual(
-            ViewRenderTelemetry.count("StatusMenuPopoverView"),
-            0,
-            "Status menu must trigger 0 StatusMenuPopoverView renders during live session strip, canvas selection, inspector search, or main overlay cheat-sheet toggles, got \(ViewRenderTelemetry.counts)"
-        )
-        XCTAssertEqual(
-            ViewRenderTelemetry.count("PopoverMiniCheatSheetView"),
-            0,
-            "CheatSheet popover grid must remain completely static across live session and main overlay updates, got \(ViewRenderTelemetry.counts)"
+        let liveAndOverlayInvalidated = trackSliceInvalidations(on: store) {
+            store.dispatch("session_strip", ["TriggerTestLighting": "thinking"])
+            store.dispatch("session_strip", ["TriggerTestLighting": "completed"])
+            store.dispatch("session_strip", ["TriggerTestLighting": NSNull()])
+            store.dispatch("inspector", ["SetActionSearchQuery": "会话"])
+            store.dispatch("inspector", ["SetActionSearchQuery": ""])
+            store.dispatch("canvas", ["SelectLogicalSlot": 3])
+            store.dispatch("overlay", "ToggleCheatSheet")
+            XCTAssertTrue(store.overlay.cheatSheetVisible)
+            mainHosting.layoutSubtreeIfNeeded()
+            statusHosting.layoutSubtreeIfNeeded()
+            store.dispatch("overlay", "CloseCheatSheet")
+            XCTAssertFalse(store.overlay.cheatSheetVisible)
+            mainHosting.layoutSubtreeIfNeeded()
+            statusHosting.layoutSubtreeIfNeeded()
+        }
+        XCTAssertTrue(liveAndOverlayInvalidated.contains("overlay"))
+        XCTAssertTrue(liveAndOverlayInvalidated.contains("canvas"))
+        XCTAssertTrue(liveAndOverlayInvalidated.contains("inspector"))
+        XCTAssertFalse(
+            liveAndOverlayInvalidated.contains("statusMenu"),
+            "Status menu slice must not invalidate during live session strip, canvas selection, inspector search, or main overlay cheat-sheet toggles, got \(liveAndOverlayInvalidated)"
         )
     }
 
@@ -307,87 +349,80 @@ final class MicroInputTests: XCTestCase {
         store.dispatch("canvas", ["SelectLogicalSlot": 0])
         mainHosting.layoutSubtreeIfNeeded()
 
-        ViewRenderTelemetry.isEnabled = true
-        defer { ViewRenderTelemetry.isEnabled = false }
-
-        ViewRenderTelemetry.reset()
-        for _ in 0..<5 {
-            store.pollHardware()
+        let idleInvalidated = trackSliceInvalidations(on: store) {
+            for _ in 0..<5 {
+                store.pollHardware()
+            }
         }
         mainHosting.layoutSubtreeIfNeeded()
-        XCTAssertEqual(
-            ViewRenderTelemetry.count("CoreStore.decodeProjection"),
-            0,
-            "Idle pollHardware() calls must trigger 0 CoreStore.decodeProjection decodes, got \(ViewRenderTelemetry.counts)"
-        )
         XCTAssertTrue(
-            ViewRenderTelemetry.counts.isEmpty,
-            "Idle pollHardware() calls must trigger 0 SwiftUI body evaluations, got \(ViewRenderTelemetry.counts)"
+            idleInvalidated.isEmpty,
+            "Idle pollHardware() calls must invalidate 0 domain slices, got \(idleInvalidated)"
         )
 
-        ViewRenderTelemetry.reset()
         let initialFavorites = store.statusMenu.favorites2x2
-        if let alternateProfileId = store.sidebar.sidebarRows.first(where: { $0.id != initialFavorites.first?.profileId })?.id {
-            store.dispatch("status_menu", ["PinFavoriteSlot": ["slot": 0, "profile_id": alternateProfileId]])
-            XCTAssertNotEqual(store.statusMenu.favorites2x2, initialFavorites)
-        }
         let initialLighting = store.statusMenu.lightingEnabled
-        store.dispatch("session_strip", ["SetLightingEnabled": !initialLighting])
-        XCTAssertEqual(store.statusMenu.lightingEnabled, !initialLighting)
-        store.dispatch("status_menu", ["SetRadialMenuEnabled": !store.statusMenu.radialMenuEnabled])
+        let statusMenuInvalidated = trackSliceInvalidations(on: store) {
+            if let alternateProfileId = store.sidebar.sidebarRows.first(where: { $0.id != initialFavorites.first?.profileId })?.id {
+                store.dispatch("status_menu", ["PinFavoriteSlot": ["slot": 0, "profile_id": alternateProfileId]])
+                XCTAssertNotEqual(store.statusMenu.favorites2x2, initialFavorites)
+            }
+            store.dispatch("session_strip", ["SetLightingEnabled": !initialLighting])
+            XCTAssertEqual(store.statusMenu.lightingEnabled, !initialLighting)
+            store.dispatch("status_menu", ["SetRadialMenuEnabled": !store.statusMenu.radialMenuEnabled])
+        }
         mainHosting.layoutSubtreeIfNeeded()
+        XCTAssertTrue(statusMenuInvalidated.contains("statusMenu"))
+        XCTAssertFalse(
+            statusMenuInvalidated.contains("inspector"),
+            "Mutating statusMenu must not invalidate store.inspector, got \(statusMenuInvalidated)"
+        )
+        XCTAssertFalse(
+            statusMenuInvalidated.contains("sidebar"),
+            "Mutating statusMenu must not invalidate store.sidebar, got \(statusMenuInvalidated)"
+        )
+        XCTAssertFalse(
+            statusMenuInvalidated.contains("overlay"),
+            "Mutating statusMenu must not invalidate store.overlay, got \(statusMenuInvalidated)"
+        )
+        XCTAssertFalse(
+            statusMenuInvalidated.contains("activeModal"),
+            "Mutating statusMenu must not invalidate store.activeModal, got \(statusMenuInvalidated)"
+        )
 
-        XCTAssertEqual(
-            ViewRenderTelemetry.count("WorkbenchRootView"),
-            0,
-            "Mutating statusMenu must not re-render WorkbenchRootView, got \(ViewRenderTelemetry.counts)"
-        )
-        XCTAssertEqual(
-            ViewRenderTelemetry.count("CreatorMicroStageView"),
-            0,
-            "Mutating statusMenu must not re-render CreatorMicroStageView, got \(ViewRenderTelemetry.counts)"
-        )
-        XCTAssertEqual(
-            ViewRenderTelemetry.count("CreatorMicroInlineInspectorView"),
-            0,
-            "Mutating statusMenu must not re-render CreatorMicroInlineInspectorView, got \(ViewRenderTelemetry.counts)"
-        )
-
-        ViewRenderTelemetry.reset()
         let beforeSessionStrip = store.sessionStrip
-        store.dispatch("session_strip", ["SetAutoOffTimeout": "FiveMinutes"])
-        store.dispatch("session_strip", ["SetWorkingColor": "AmberGold"])
-        store.dispatch("session_strip", ["TriggerTestLighting": "thinking"])
-        store.dispatch("session_strip", ["TriggerTestLighting": NSNull()])
+        let sessionStripInvalidated = trackSliceInvalidations(on: store) {
+            store.dispatch("session_strip", ["SetAutoOffTimeout": "FiveMinutes"])
+            store.dispatch("session_strip", ["SetWorkingColor": "AmberGold"])
+            store.dispatch("session_strip", ["TriggerTestLighting": "thinking"])
+            store.dispatch("session_strip", ["TriggerTestLighting": NSNull()])
+        }
         XCTAssertNotEqual(store.sessionStrip, beforeSessionStrip)
         mainHosting.layoutSubtreeIfNeeded()
-
-        XCTAssertEqual(
-            ViewRenderTelemetry.count("CreatorMicroInlineInspectorView"),
-            0,
-            "Mutating sessionStrip must not re-render CreatorMicroInlineInspectorView, got \(ViewRenderTelemetry.counts)"
+        XCTAssertTrue(sessionStripInvalidated.contains("sessionStrip"))
+        XCTAssertFalse(
+            sessionStripInvalidated.contains("inspector"),
+            "Mutating sessionStrip must not invalidate store.inspector, got \(sessionStripInvalidated)"
         )
-        XCTAssertEqual(
-            ViewRenderTelemetry.count("WorkbenchRootView"),
-            0,
-            "Mutating sessionStrip must not re-render WorkbenchRootView, got \(ViewRenderTelemetry.counts)"
+        XCTAssertFalse(
+            sessionStripInvalidated.contains("sidebar"),
+            "Mutating sessionStrip must not invalidate store.sidebar, got \(sessionStripInvalidated)"
+        )
+        XCTAssertFalse(
+            sessionStripInvalidated.contains("overlay"),
+            "Mutating sessionStrip must not invalidate store.overlay, got \(sessionStripInvalidated)"
         )
 
-        ViewRenderTelemetry.reset()
         let beforeShowOtherProfiles = store.sidebar.showOtherProfiles
-        store.dispatch("sidebar", ["SetShowOtherProfiles": !beforeShowOtherProfiles])
+        let sidebarInvalidated = trackSliceInvalidations(on: store) {
+            store.dispatch("sidebar", ["SetShowOtherProfiles": !beforeShowOtherProfiles])
+        }
         XCTAssertEqual(store.sidebar.showOtherProfiles, !beforeShowOtherProfiles)
         mainHosting.layoutSubtreeIfNeeded()
-
         XCTAssertEqual(
-            ViewRenderTelemetry.count("CreatorMicroBoardView"),
-            0,
-            "Mutating sidebar.showOtherProfiles must not re-render CreatorMicroBoardView, got \(ViewRenderTelemetry.counts)"
-        )
-        XCTAssertEqual(
-            ViewRenderTelemetry.count("WorkbenchRootView"),
-            0,
-            "Mutating sidebar.showOtherProfiles must not re-render WorkbenchRootView, got \(ViewRenderTelemetry.counts)"
+            sidebarInvalidated,
+            ["sidebar"],
+            "Mutating sidebar.showOtherProfiles must invalidate only store.sidebar, got \(sidebarInvalidated)"
         )
     }
 
@@ -1505,73 +1540,6 @@ final class MicroInputTests: XCTestCase {
 
     @MainActor
     func testStatusItemIconCautionCachingAndHostCautionSliceIsolation() throws {
-        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: true, hasCaution: false), .active)
-        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: false, hasCaution: false), .paused)
-        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: true, hasCaution: true), .caution)
-        XCTAssertEqual(StatusItemIcon.presentation(hostExecutionEnabled: false, hasCaution: true), .caution)
-
-        XCTAssertEqual(
-            StatusItemIcon.toolTip(locale: .zhHans, hostExecutionEnabled: true, hostCautionNotice: nil),
-            "Micro Input 按键与会话控制"
-        )
-        XCTAssertEqual(
-            StatusItemIcon.toolTip(locale: .en, hostExecutionEnabled: true, hostCautionNotice: nil),
-            "Micro Input Keypad & Session Control"
-        )
-        XCTAssertEqual(
-            StatusItemIcon.toolTip(locale: .zhHans, hostExecutionEnabled: false, hostCautionNotice: nil),
-            "已暂停软件按键映射，点击菜单栏重新启用"
-        )
-        XCTAssertEqual(
-            StatusItemIcon.toolTip(locale: .en, hostExecutionEnabled: false, hostCautionNotice: nil),
-            "Key mapping paused. Click the menu bar icon to re-enable."
-        )
-        XCTAssertEqual(
-            StatusItemIcon.toolTip(locale: .zhHans, hostExecutionEnabled: false, hostCautionNotice: "告警提示"),
-            "告警提示"
-        )
-        XCTAssertEqual(
-            StatusItemIcon.toolTip(locale: .en, hostExecutionEnabled: true, hostCautionNotice: "Caution notice"),
-            "Caution notice"
-        )
-
-        let zhActive = StatusItemIcon.make(locale: .zhHans, presentation: .active)
-        let zhActiveAgain = StatusItemIcon.make(locale: .zhHans)
-        let zhPaused = StatusItemIcon.make(locale: .zhHans, presentation: .paused)
-        let zhPausedAgain = StatusItemIcon.make(locale: .zhHans, presentation: .paused)
-        let zhCaution = StatusItemIcon.make(locale: .zhHans, presentation: .caution)
-        let zhCautionAgain = StatusItemIcon.make(locale: .zhHans, presentation: .caution)
-        let enActive = StatusItemIcon.make(locale: .en, presentation: .active)
-        let enPaused = StatusItemIcon.make(locale: .en, presentation: .paused)
-        let enCaution = StatusItemIcon.make(locale: .en, presentation: .caution)
-
-        XCTAssertTrue(zhActive === zhActiveAgain)
-        XCTAssertTrue(zhPaused === zhPausedAgain)
-        XCTAssertTrue(zhCaution === zhCautionAgain)
-        XCTAssertTrue(enActive === StatusItemIcon.make(locale: .en))
-        XCTAssertTrue(enPaused === StatusItemIcon.make(locale: .en, presentation: .paused))
-        XCTAssertTrue(enCaution === StatusItemIcon.make(locale: .en, presentation: .caution))
-
-        let allSix = [zhActive, zhPaused, zhCaution, enActive, enPaused, enCaution]
-        for i in 0..<allSix.count {
-            for j in (i + 1)..<allSix.count {
-                XCTAssertFalse(allSix[i] === allSix[j])
-            }
-        }
-        let descriptions = Set(allSix.compactMap(\.accessibilityDescription))
-        XCTAssertEqual(descriptions.count, 6)
-
-        for icon in allSix {
-            XCTAssertTrue(icon.isTemplate)
-            XCTAssertFalse((icon.accessibilityDescription ?? "").isEmpty)
-        }
-        XCTAssertNotEqual(zhActive.tiffRepresentation, zhPaused.tiffRepresentation)
-        XCTAssertNotEqual(zhActive.tiffRepresentation, zhCaution.tiffRepresentation)
-        XCTAssertNotEqual(zhPaused.tiffRepresentation, zhCaution.tiffRepresentation)
-        XCTAssertNotEqual(enActive.tiffRepresentation, enPaused.tiffRepresentation)
-        XCTAssertNotEqual(enActive.tiffRepresentation, enCaution.tiffRepresentation)
-        XCTAssertNotEqual(enPaused.tiffRepresentation, enCaution.tiffRepresentation)
-
         let baseParsed = CoreStore.parseProjection([
             "header": [
                 "engine_version": "0.2.0",

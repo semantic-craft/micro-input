@@ -7,7 +7,6 @@ struct CreatorMicroInlineInspectorView: View {
     var onOpenMacroLibrary: () -> Void
 
     var body: some View {
-        let _ = ViewRenderTelemetry.record("CreatorMicroInlineInspectorView")
         let insp = store.inspector
         let locale = store.locale
         let slot = insp.selectedLogicalSlot
