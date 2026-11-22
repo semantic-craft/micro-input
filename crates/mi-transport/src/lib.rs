@@ -1,4 +1,5 @@
 //! R-D01/R-D02/R-D07/R-N02: discovery, USB HID access, and synthetic transport.
+pub mod budget;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
