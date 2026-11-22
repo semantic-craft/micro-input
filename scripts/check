@@ -40,3 +40,4 @@ if [[ -f "$NOTARY_CHECK" ]]; then
   python3 -B "$NOTARY_CHECK" "$PWD"
 fi
 python3 -B scripts/check_comments.py check "$PWD"
+python3 -B scripts/check_python_scripts.py "$PWD"
