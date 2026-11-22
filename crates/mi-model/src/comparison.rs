@@ -1,4 +1,3 @@
-//! D07: local three-way comparison. No transport and no device payload compilation.
 use crate::{
     document::{EditableState, LocalDocumentV2},
     DeviceConfig,
@@ -631,9 +630,24 @@ impl Comparison {
     }
 }
 
-/// #22 must invoke this after a fresh identity/file-list query, before any future write.
-/// A cached comparison cannot authorize a write by itself.
-pub fn ensure_apply_baseline(document: &LocalDocumentV2, fresh: &Value) -> Result<(), String> {
+#[derive(Debug, Clone, Copy)]
+pub struct FreshDeviceBaseline<'a>(&'a Value);
+
+impl<'a> FreshDeviceBaseline<'a> {
+    pub fn from_fresh_query(value: &'a Value) -> Self {
+        Self(value)
+    }
+
+    pub fn as_value(&self) -> &'a Value {
+        self.0
+    }
+}
+
+pub fn ensure_apply_baseline(
+    document: &LocalDocumentV2,
+    fresh: FreshDeviceBaseline<'_>,
+) -> Result<(), String> {
+    let fresh = fresh.as_value();
     let baseline = document
         .baseline
         .as_ref()

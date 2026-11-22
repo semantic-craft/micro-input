@@ -862,7 +862,7 @@ def run_boundary_checks(root: Path = ROOT) -> None:
         'AppDelegate.init() must acquire mi_core_acquire_instance_lock before setupStatusItem()'
     )
     rust_exec_src = (root / 'crates/mi-macos/src/executor.rs').read_text(encoding='utf-8')
-    rust_exec_prod = rust_exec_src.split('#[cfg(test)]', 1)[0]
+    rust_exec_prod = rust_exec_src.split('\n#[cfg(test)]\nmod tests', 1)[0]
     assert rust_exec_prod.count('AXIsProcessTrustedWithOptions') == 2, (
         'R-C05 violation in crates/mi-macos/src/executor.rs: '
         'AXIsProcessTrustedWithOptions must only appear in its extern declaration and open_accessibility_settings'

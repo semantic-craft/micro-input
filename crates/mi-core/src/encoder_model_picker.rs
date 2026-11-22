@@ -1,6 +1,3 @@
-//! Pure state machine for direct-turn, short-press, and long-press (`ENC_CLK`)
-//! target-app model-picker and search overlay navigation.
-
 use mi_model::host_router::ResolvedHostAction;
 use std::time::{Duration, Instant};
 

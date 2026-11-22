@@ -141,8 +141,7 @@ fn binding(v: &Value) -> Binding {
         _ => Binding::Unknown(v.clone()),
     }
 }
-/// Parses our documented synthetic interchange schema, NOT a verified device schema (R-N03).
-pub fn parse_config(bytes: &[u8]) -> Result<DeviceConfig, ParseError> {
+pub fn parse_synthetic_interchange_config(bytes: &[u8]) -> Result<DeviceConfig, ParseError> {
     let raw: Value = serde_json::from_slice(bytes).map_err(|e| error(&e.to_string()))?;
     let mut profiles = Vec::new();
     let mut warnings = vec!["设备 schema 与活动 Profile 语义待确认".into()];
@@ -280,7 +279,7 @@ pub fn parse_config(bytes: &[u8]) -> Result<DeviceConfig, ParseError> {
     })
 }
 pub fn demo() -> Result<DeviceConfig, ParseError> {
-    let mut c = parse_config(include_bytes!("../fixtures/demo.json"))?;
+    let mut c = parse_synthetic_interchange_config(include_bytes!("../fixtures/demo.json"))?;
     c.source = Source::Demo;
     Ok(c)
 }
@@ -458,12 +457,12 @@ mod tests {
     }
     #[test]
     fn malformed_and_numeric_types() {
-        assert!(parse_config(b"{").is_err());
+        assert!(parse_synthetic_interchange_config(b"{").is_err());
         let mut v = demo().unwrap().raw;
         v["macros"][0]["events"][0]["delay_ms"] = (-500).into();
-        assert!(parse_config(&serde_json::to_vec(&v).unwrap()).is_ok());
+        assert!(parse_synthetic_interchange_config(&serde_json::to_vec(&v).unwrap()).is_ok());
         v["macros"][0]["events"][0]["delay_ms"] = "bad".into();
-        assert!(parse_config(&serde_json::to_vec(&v).unwrap()).is_err());
+        assert!(parse_synthetic_interchange_config(&serde_json::to_vec(&v).unwrap()).is_err());
     }
 }
 
@@ -569,7 +568,6 @@ fn parse_rc_number(prerelease: &str) -> Option<u32> {
     parse_numeric_part(num)
 }
 
-/// Returns `true` when `version` is a natively supported Creator Micro 2 firmware release.
 pub fn is_supported_native_firmware(version: &str) -> bool {
     let Some(v) = parse_strict_semver(version) else {
         return false;
@@ -621,7 +619,6 @@ pub fn supports_v070_mouse_tokens(version: &str) -> bool {
     }
 }
 
-/// Returns `true` when `command` is one of the 15 host CoreGraphics cursor/click/scroll/speed commands.
 pub fn is_host_mouse_command(command: &str) -> bool {
     matches!(
         command,

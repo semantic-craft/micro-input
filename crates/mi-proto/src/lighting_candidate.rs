@@ -7,9 +7,8 @@
 use crate::ProtoError;
 use serde::{Deserialize, Serialize};
 
-/// Only the known DTO fields can enter a candidate. Unknown source fields must
-/// remain in their original model; this type is not a lossless config editor.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LightingZoneCandidate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effect: Option<String>,
@@ -555,5 +554,35 @@ mod tests {
                 "expected rejection for {off_entry:?}"
             );
         }
+    }
+
+    #[test]
+    fn lighting_zone_candidate_rejects_unknown_fields() {
+        let extra_zone = json!({
+            "effect": "solid",
+            "color": 0x12_3456,
+            "unknown_firmware_field": true
+        });
+        let err = serde_json::from_value::<LightingZoneCandidate>(extra_zone)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown field"), "{err}");
+
+        let full_device_config = json!({
+            "version": 1,
+            "profiles": [],
+            "effect": "solid"
+        });
+        assert!(serde_json::from_value::<LightingZoneCandidate>(full_device_config).is_err());
+
+        let valid_zone = json!({
+            "effect": "solid",
+            "brightness": 0.5,
+            "color": 0x12_3456
+        });
+        let parsed: LightingZoneCandidate = serde_json::from_value(valid_zone).unwrap();
+        assert_eq!(parsed.effect.as_deref(), Some("solid"));
+        assert_eq!(parsed.brightness, Some(0.5));
+        assert_eq!(parsed.color, Some(0x12_3456));
     }
 }

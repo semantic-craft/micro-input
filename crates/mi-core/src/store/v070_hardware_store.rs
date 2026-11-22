@@ -1,5 +1,3 @@
-//! WorkbenchStore orchestration and async session dispatch for `0.7.0-rc.16+` hardware capabilities.
-
 use mi_proto::v070_capabilities::SaRgbEffect;
 use mi_session::DeviceSession;
 

@@ -1401,7 +1401,7 @@ mod macos_pasteboard {
             Self { unique_pb: None }
         }
 
-        #[allow(dead_code)]
+        #[cfg(test)]
         pub fn unique_for_test() -> Option<Self> {
             let _guard = PASTEBOARD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             unsafe {
@@ -1726,7 +1726,7 @@ impl LiveMacOsClipboardBackend {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn unique_for_test() -> Option<Self> {
         macos_pasteboard::PasteboardRef::unique_for_test().map(|pasteboard| Self { pasteboard })
     }
@@ -1961,7 +1961,7 @@ impl MacOsSystemDriver {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn with_clipboard_backend(clipboard_backend: Arc<dyn ClipboardBackend>) -> Self {
         Self {
             clipboard_backend,

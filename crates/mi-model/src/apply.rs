@@ -192,7 +192,10 @@ impl Pending {
         {
             return Err("内存文档与磁盘原字节不符；请重新打开".into());
         }
-        comparison::ensure_apply_baseline(doc, current)?;
+        comparison::ensure_apply_baseline(
+            doc,
+            comparison::FreshDeviceBaseline::from_fresh_query(current),
+        )?;
         let firmware = current["firmware"]
             .as_str()
             .filter(|fw| crate::is_supported_config_firmware(fw))
@@ -431,7 +434,10 @@ impl Pending {
         {
             return Err("文档或修订已变化；请重新预览".into());
         }
-        comparison::ensure_apply_baseline(doc, current)?;
+        comparison::ensure_apply_baseline(
+            doc,
+            comparison::FreshDeviceBaseline::from_fresh_query(current),
+        )?;
         if self.baseline != *current {
             return Err("会话快照已变化；请重新读取并预览".into());
         }
