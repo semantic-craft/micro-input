@@ -7,17 +7,51 @@ use mi_model::{DeviceConfig, Source};
 use mi_proto::{
     Framer, HostNotification, Incoming, JsonCodec, Method, ProtoError, RpcCodec, RpcRequest,
 };
-use mi_transport::{HidLink, TransportError};
+use mi_transport::{
+    budget::{BudgetAcquireError, DeviceWriteBudget, WriteBudgetPolicy, WritePriority},
+    HidLink, TransportError,
+};
 use serde_json::Value;
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{broadcast, oneshot, Mutex as AsyncMutex, Notify};
 static SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RpcTrafficClass {
+    ReadOnly,
+    ConfigChunk,
+    ControlWrite,
+}
+
+pub fn classify_rpc_call(method: &str, is_write: bool) -> RpcTrafficClass {
+    match method {
+        "sys.version" | "device.status" | "fs.list" | "fs.read" | "fs.readbin" | "pm.state" => {
+            RpcTrafficClass::ReadOnly
+        }
+        "fs.writebin" | "fs.txbegin" | "fs.txcommit" => RpcTrafficClass::ConfigChunk,
+        "mouse.config" | "joystick.deadzone" | "pm.config" | "device.name" => {
+            if is_write {
+                RpcTrafficClass::ControlWrite
+            } else {
+                RpcTrafficClass::ReadOnly
+            }
+        }
+        "kb.pl.set" | "kb.sa.rgb" | "v.oai.thstatus" | "v.oai.rgbcfg" | "lights.preview"
+        | "sys.bootloader" => RpcTrafficClass::ControlWrite,
+        _ => RpcTrafficClass::ControlWrite,
+    }
+}
+
+pub fn classify_rpc_method(method: &str) -> RpcTrafficClass {
+    classify_rpc_call(method, true)
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SessionError {
     #[error(transparent)]
@@ -32,6 +66,11 @@ pub enum SessionError {
     Timeout,
     #[error("配置读取失败：{0}")]
     Config(String),
+    #[error("设备写入限流（{method}，请约 {} ms 后重试）", retry_after.as_millis())]
+    DeviceRateLimited {
+        method: &'static str,
+        retry_after: Duration,
+    },
 }
 #[derive(Clone)]
 pub struct SessionConfig {
@@ -175,6 +214,7 @@ pub struct DeviceSession {
     ingress_sequence: Arc<AtomicU64>,
     sent_requests: AtomicU64,
     firmware_bootloader_requested: AtomicBool,
+    write_budget: Arc<DeviceWriteBudget>,
 }
 impl DeviceSession {
     pub fn new(
@@ -182,6 +222,27 @@ impl DeviceSession {
         framer: Box<dyn Framer>,
         schema: Arc<dyn DeviceSchema>,
         config: SessionConfig,
+    ) -> Arc<Self> {
+        let policy = if config.interval.is_zero() {
+            WriteBudgetPolicy::unbounded()
+        } else {
+            WriteBudgetPolicy::usb()
+        };
+        Self::new_with_budget(
+            link,
+            framer,
+            schema,
+            config,
+            Arc::new(DeviceWriteBudget::new(policy)),
+        )
+    }
+
+    pub fn new_with_budget(
+        link: Arc<dyn HidLink>,
+        framer: Box<dyn Framer>,
+        schema: Arc<dyn DeviceSchema>,
+        config: SessionConfig,
+        write_budget: Arc<DeviceWriteBudget>,
     ) -> Arc<Self> {
         let (notifications, _) = broadcast::channel(256);
         let ingress_sequence = Arc::new(AtomicU64::new(0));
@@ -311,7 +372,133 @@ impl DeviceSession {
             ingress_sequence,
             sent_requests: AtomicU64::new(0),
             firmware_bootloader_requested: AtomicBool::new(false),
+            write_budget,
         })
+    }
+
+    pub fn write_budget(&self) -> &Arc<DeviceWriteBudget> {
+        &self.write_budget
+    }
+
+    fn require_native_mutation_link(&self) -> Result<(), SessionError> {
+        let synthetic = {
+            #[cfg(feature = "synthetic-backend")]
+            {
+                self.link.backend() == mi_transport::LinkBackend::SyntheticNumbered
+            }
+            #[cfg(not(feature = "synthetic-backend"))]
+            {
+                false
+            }
+        };
+        let native_exclusive = self.link.backend()
+            == mi_transport::LinkBackend::MacHidapi267Numbered
+            && self.link.is_exclusive_vendor();
+        if !synthetic && !native_exclusive {
+            return Err(ProtoError::Unverified(
+                "native mutations require exclusive 267-byte vendor link",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn acquire_write_budget(
+        &self,
+        method: &'static str,
+        priority: WritePriority,
+    ) -> Result<(), SessionError> {
+        let deadline = Instant::now() + self.config.timeout;
+        loop {
+            if self.is_disconnected() {
+                return Err(self.disconnection_error());
+            }
+            let now = Instant::now();
+            match self.write_budget.try_acquire(now, priority) {
+                Ok(_) => return Ok(()),
+                Err(BudgetAcquireError::SpacingWait { ready_at }) => {
+                    if ready_at > deadline {
+                        return Err(SessionError::DeviceRateLimited {
+                            method,
+                            retry_after: ready_at.saturating_duration_since(now),
+                        });
+                    }
+                    let changed = self.changed.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    if self.is_disconnected() {
+                        return Err(self.disconnection_error());
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = changed => return Err(self.disconnection_error()),
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(ready_at)) => {}
+                    }
+                }
+                Err(BudgetAcquireError::WindowExhausted { retry_at }) => {
+                    return Err(SessionError::DeviceRateLimited {
+                        method,
+                        retry_after: retry_at.saturating_duration_since(now),
+                    });
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn wait_for_write_capacity(
+        &self,
+        method: &'static str,
+        priority: WritePriority,
+    ) -> Result<(), SessionError> {
+        let deadline = Instant::now() + self.config.timeout;
+        loop {
+            if self.is_disconnected() {
+                return Err(self.disconnection_error());
+            }
+            let now = Instant::now();
+            match self.write_budget.check_batch_capacity(now, 1, priority) {
+                Ok(()) => return Ok(()),
+                Err(BudgetAcquireError::SpacingWait { ready_at }) => {
+                    if ready_at > deadline {
+                        return Err(SessionError::DeviceRateLimited {
+                            method,
+                            retry_after: ready_at.saturating_duration_since(now),
+                        });
+                    }
+                    let changed = self.changed.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    if self.is_disconnected() {
+                        return Err(self.disconnection_error());
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = changed => return Err(self.disconnection_error()),
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(ready_at)) => {}
+                    }
+                }
+                Err(BudgetAcquireError::WindowExhausted { retry_at }) => {
+                    return Err(SessionError::DeviceRateLimited {
+                        method,
+                        retry_after: retry_at.saturating_duration_since(now),
+                    });
+                }
+            }
+        }
+    }
+
+    pub(crate) fn charge_logical_config_write(
+        &self,
+        method: &'static str,
+    ) -> Result<(), SessionError> {
+        let now = Instant::now();
+        self.write_budget
+            .try_acquire(now, WritePriority::Normal)
+            .map(|_| ())
+            .map_err(|err| SessionError::DeviceRateLimited {
+                method,
+                retry_after: err.retry_at().saturating_duration_since(now),
+            })
     }
 
     pub fn request_count(&self) -> u64 {
@@ -456,6 +643,12 @@ impl DeviceSession {
         &self,
         lights: &mi_proto::lighting_candidate::LightingPreviewCandidate,
     ) -> Result<Value, SessionError> {
+        self.require_native_mutation_link()?;
+        mi_proto::lighting_candidate::encode_lighting_preview_candidate(lights, 0)?;
+        if classify_rpc_method("lights.preview") == RpcTrafficClass::ControlWrite {
+            self.acquire_write_budget("lights.preview", WritePriority::Normal)
+                .await?;
+        }
         let mut q = self.queue.lock().await;
         self.exchange_lighting(&mut q, lights).await
     }
@@ -463,6 +656,12 @@ impl DeviceSession {
         &self,
         entries: &[mi_proto::lighting_candidate::OaiKeyStatusEntry],
     ) -> Result<Value, SessionError> {
+        self.require_native_mutation_link()?;
+        mi_proto::lighting_candidate::encode_oai_thstatus_candidate(entries, 0)?;
+        if classify_rpc_method("v.oai.thstatus") == RpcTrafficClass::ControlWrite {
+            self.acquire_write_budget("v.oai.thstatus", WritePriority::Normal)
+                .await?;
+        }
         let mut q = self.queue.lock().await;
         let id = q.next_id;
         let encoded = mi_proto::lighting_candidate::encode_oai_thstatus_candidate(entries, id)?;
@@ -476,6 +675,12 @@ impl DeviceSession {
         &self,
         lights: &mi_proto::lighting_candidate::LightingPreviewCandidate,
     ) -> Result<Value, SessionError> {
+        self.require_native_mutation_link()?;
+        mi_proto::lighting_candidate::encode_oai_rgbcfg_candidate(lights, 0)?;
+        if classify_rpc_method("v.oai.rgbcfg") == RpcTrafficClass::ControlWrite {
+            self.acquire_write_budget("v.oai.rgbcfg", WritePriority::Normal)
+                .await?;
+        }
         let mut q = self.queue.lock().await;
         let id = q.next_id;
         let encoded = mi_proto::lighting_candidate::encode_oai_rgbcfg_candidate(lights, id)?;

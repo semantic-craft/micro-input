@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use mi_session::DeviceSession;
+use mi_session::{DeviceSession, SessionError};
+use mi_transport::budget::WritePriority;
 
 use super::{
     DesiredTarget, DispatchedSaRgbBatch, ManualSaRgbWrite, ReconcileAction, SaRgbChunkKind,
@@ -102,9 +103,18 @@ impl SaRgbRuntimeCoordinator {
             guard.reconciler.reset_for_new_session();
             guard.bound_session_id = Some(session.id);
         }
-        let action = guard
-            .reconciler
-            .reconcile(Instant::now(), target, session.request_count());
+        let now = Instant::now();
+        let priority = match &target {
+            DesiredTarget::UrgentClear(_) => WritePriority::UrgentClear,
+            DesiredTarget::Active(_) | DesiredTarget::Inactive => WritePriority::BackgroundSync,
+        };
+        let budget_ready_at = session.write_budget().next_ready_at(now, priority);
+        let action = guard.reconciler.reconcile_with_budget(
+            now,
+            target,
+            session.request_count(),
+            budget_ready_at,
+        );
         Self::apply_action_locked(&self.inner, &mut guard, action, session, runtime.handle());
     }
 
@@ -138,7 +148,12 @@ impl SaRgbRuntimeCoordinator {
                 {
                     break;
                 }
-                match tokio::time::timeout_at(deadline, session_ref.set_sa_rgb(reset)).await {
+                match tokio::time::timeout_at(
+                    deadline,
+                    session_ref.set_sa_rgb_with_priority(reset, WritePriority::UrgentClear),
+                )
+                .await
+                {
                     Ok(Ok(_)) => done += 1,
                     Ok(Err(_)) | Err(_) => break,
                 }
@@ -222,9 +237,12 @@ impl SaRgbRuntimeCoordinator {
                 return;
             }
             g.scheduled_wake = None;
-            let next_action = g
-                .reconciler
-                .flush_due(Instant::now(), session.request_count());
+            let now = Instant::now();
+            let priority = g.reconciler.pending_write_priority();
+            let budget_ready_at = session.write_budget().next_ready_at(now, priority);
+            let next_action =
+                g.reconciler
+                    .flush_due_with_budget(now, session.request_count(), budget_ready_at);
             Self::apply_action_locked(&inner_clone, &mut g, next_action, session, &handle_clone);
         });
         guard.scheduled_wake = Some((wake_at, join.abort_handle()));
@@ -240,6 +258,20 @@ impl SaRgbRuntimeCoordinator {
         loop {
             let mut completed_chunks = 0usize;
             let mut preempted = false;
+            let mut rate_limited = false;
+            let batch_priority = {
+                let guard = inner.lock().unwrap();
+                if guard.reconciler.last_target_was_urgent_clear
+                    && batch
+                        .chunks
+                        .iter()
+                        .all(|chunk| matches!(chunk.kind, SaRgbChunkKind::Reset(_)))
+                {
+                    WritePriority::UrgentClear
+                } else {
+                    WritePriority::BackgroundSync
+                }
+            };
             for chunk in &batch.chunks {
                 {
                     let guard = inner.lock().unwrap();
@@ -253,21 +285,36 @@ impl SaRgbRuntimeCoordinator {
                         break;
                     }
                 }
-                if session.is_disconnected() || session.set_sa_rgb(&chunk.update).await.is_err() {
+                if session.is_disconnected() {
                     break;
                 }
-                completed_chunks += 1;
+                match session
+                    .set_sa_rgb_with_priority(&chunk.update, batch_priority)
+                    .await
+                {
+                    Ok(()) => completed_chunks += 1,
+                    Err(SessionError::DeviceRateLimited { .. }) => {
+                        rate_limited = true;
+                        break;
+                    }
+                    Err(_) => break,
+                }
             }
             let mut guard = inner.lock().unwrap();
             if guard.epoch != epoch {
                 return;
             }
-            let follow_up = guard.reconciler.finish_batch(
-                Instant::now(),
+            let now = Instant::now();
+            let next_priority = guard.reconciler.pending_write_priority();
+            let budget_ready_at = session.write_budget().next_ready_at(now, next_priority);
+            let follow_up = guard.reconciler.finish_batch_with_budget(
+                now,
                 batch.batch_id,
                 completed_chunks,
                 session.request_count(),
                 preempted,
+                rate_limited,
+                budget_ready_at,
             );
             match follow_up {
                 ReconcileAction::Dispatch(next_batch) => {
@@ -492,6 +539,125 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+        responder.abort();
+        rt.block_on(session.shutdown());
+    }
+
+    #[test]
+    fn coordinator_defers_background_dispatch_until_write_budget_ready_and_teardown_uses_urgent_clear(
+    ) {
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let (link, mut out_rx) = GatedSaRgbLink::new();
+        let budget = Arc::new(mi_transport::budget::DeviceWriteBudget::new(
+            mi_transport::budget::WriteBudgetPolicy {
+                window: Duration::from_secs(10),
+                max_writes: 40,
+                min_spacing: Duration::from_millis(160),
+                enabled: true,
+            },
+        ));
+        let session = rt.block_on(async {
+            let session = DeviceSession::new_with_budget(
+                link.clone(),
+                Box::new(IdentityFramer),
+                Arc::new(ReadOnlySchema),
+                SessionConfig {
+                    timeout: Duration::from_secs(2),
+                    interval: Duration::ZERO,
+                },
+                Arc::clone(&budget),
+            );
+            let reply = async {
+                let req = out_rx.recv().await.expect("device.status");
+                link.reply(
+                    &req,
+                    json!({
+                        "version": "0.7.0-rc.16",
+                        "profile_index": 0,
+                        "layer_index": 1,
+                    }),
+                );
+            };
+            let (res, _) = tokio::join!(session.read_identity_info(), reply);
+            res.unwrap();
+            session
+        });
+
+        let responder = rt.spawn({
+            let link = Arc::clone(&link);
+            async move {
+                while let Some(req) = out_rx.recv().await {
+                    link.reply(&req, json!({}));
+                }
+            }
+        });
+
+        let t0 = Instant::now();
+        budget.try_acquire(t0, WritePriority::Normal).unwrap();
+
+        let style = match map_session_kind_to_sa_lighting(FourAppSessionKind::Working) {
+            DesiredSaLighting::Override(s) => s,
+            DesiredSaLighting::DefaultOnboard => unreachable!(),
+        };
+        let target: BTreeMap<_, _> = [(SaId::new(101).unwrap(), style)].into_iter().collect();
+
+        let coord = SaRgbRuntimeCoordinator::new();
+        coord.sync(
+            DesiredTarget::Active(target),
+            Some(Arc::clone(&session)),
+            &rt,
+        );
+
+        assert!(
+            !coord.is_in_flight(),
+            "coordinator must defer dispatch while DeviceWriteBudget requires spacing wait"
+        );
+        assert_eq!(
+            *link.sa_rgb_count.lock().unwrap(),
+            0,
+            "no kb.sa.rgb frame may be sent before write_budget.next_ready_at"
+        );
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            *link.sa_rgb_count.lock().unwrap(),
+            0,
+            "dispatch must remain deferred before the 160ms spacing window elapses"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while *link.sa_rgb_count.lock().unwrap() < 1 {
+            assert!(
+                Instant::now() < deadline,
+                "coordinator must wake and dispatch once DeviceWriteBudget becomes ready"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            t0.elapsed() >= Duration::from_millis(140),
+            "dispatch occurred earlier than DeviceWriteBudget spacing allowed"
+        );
+
+        let wait_confirmed = Instant::now() + Duration::from_secs(1);
+        while coord.is_in_flight() {
+            assert!(Instant::now() < wait_confirmed);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let teardown_start = Instant::now();
+        coord.teardown_blocking(&rt, Some(Arc::clone(&session)));
+        assert!(
+            teardown_start.elapsed() < Duration::from_millis(120),
+            "teardown_blocking must use WritePriority::UrgentClear to bypass soft BLE spacing"
+        );
+        assert_eq!(*link.sa_rgb_count.lock().unwrap(), 2);
+
         responder.abort();
         rt.block_on(session.shutdown());
     }

@@ -109,6 +109,7 @@ impl WorkbenchStore {
                     .firmware_update
                     .start("bootloading", "设备控制已暂停，正在请求进入引导模式…");
                 let runtime = self.tokio_runtime.clone();
+                let budget_registry = Arc::clone(&self.budget_registry);
                 std::thread::spawn(move || {
                     let boot_result = runtime.block_on(async {
                         use mi_transport::HidTransport;
@@ -117,11 +118,22 @@ impl WorkbenchStore {
                             return Err("原设备连接已变化，未发送引导命令".to_string());
                         }
                         let link = transport.open(&target.path).map_err(|e| e.to_string())?;
-                        let session = DeviceSession::new(
+                        let budget = budget_registry.budget_for(
+                            mi_transport::budget::DeviceBudgetKey::from_identity(
+                                target.serial_number.as_deref(),
+                                None,
+                                &target.path,
+                            ),
+                            mi_transport::budget::WriteBudgetPolicy::for_transport(
+                                target.transport_hint.clone(),
+                            ),
+                        );
+                        let session = DeviceSession::new_with_budget(
                             link,
                             Box::new(mi_proto::NativeFramer::default()),
                             Arc::new(mi_session::ReadOnlySchema),
                             mi_session::SessionConfig::default(),
+                            budget,
                         );
                         let result = async {
                             session

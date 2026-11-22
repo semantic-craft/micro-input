@@ -332,7 +332,7 @@ pub struct SessionSaRgbReconciler {
     next_allowed_at: Option<Instant>,
     consecutive_failures: u8,
     halted_on_error: bool,
-    last_target_was_urgent_clear: bool,
+    pub(super) last_target_was_urgent_clear: bool,
     pub(super) urgent_clear_pending: bool,
     parked: bool,
 }
@@ -433,6 +433,16 @@ impl SessionSaRgbReconciler {
         target: DesiredTarget,
         request_count: u64,
     ) -> ReconcileAction {
+        self.reconcile_with_budget(now, target, request_count, None)
+    }
+
+    pub(super) fn reconcile_with_budget(
+        &mut self,
+        now: Instant,
+        target: DesiredTarget,
+        request_count: u64,
+        budget_ready_at: Option<Instant>,
+    ) -> ReconcileAction {
         self.parked = false;
         match target {
             DesiredTarget::Active(next_desired) => {
@@ -444,7 +454,7 @@ impl SessionSaRgbReconciler {
                 self.last_target_was_urgent_clear = false;
                 self.desired = next_desired;
                 self.urgent_clear_pending = false;
-                self.try_dispatch(now, request_count, false)
+                self.try_dispatch_with_budget(now, request_count, false, budget_ready_at)
             }
             DesiredTarget::UrgentClear(_reason) => {
                 let had_manual = self.drain_manual_dirty();
@@ -455,7 +465,7 @@ impl SessionSaRgbReconciler {
                 self.last_target_was_urgent_clear = true;
                 self.desired.clear();
                 self.urgent_clear_pending = true;
-                self.try_dispatch(now, request_count, true)
+                self.try_dispatch_with_budget(now, request_count, true, budget_ready_at)
             }
             DesiredTarget::Inactive => {
                 self.desired.clear();
@@ -464,14 +474,41 @@ impl SessionSaRgbReconciler {
                     self.last_target_was_urgent_clear = false;
                     ReconcileAction::NoOp
                 } else {
-                    self.try_dispatch(now, request_count, self.urgent_clear_pending)
+                    self.try_dispatch_with_budget(
+                        now,
+                        request_count,
+                        self.urgent_clear_pending,
+                        budget_ready_at,
+                    )
                 }
             }
         }
     }
 
     pub fn flush_due(&mut self, now: Instant, request_count: u64) -> ReconcileAction {
-        self.try_dispatch(now, request_count, self.urgent_clear_pending)
+        self.flush_due_with_budget(now, request_count, None)
+    }
+
+    pub(super) fn flush_due_with_budget(
+        &mut self,
+        now: Instant,
+        request_count: u64,
+        budget_ready_at: Option<Instant>,
+    ) -> ReconcileAction {
+        self.try_dispatch_with_budget(
+            now,
+            request_count,
+            self.urgent_clear_pending,
+            budget_ready_at,
+        )
+    }
+
+    pub(super) fn pending_write_priority(&self) -> mi_transport::budget::WritePriority {
+        if self.urgent_clear_pending || self.last_target_was_urgent_clear {
+            mi_transport::budget::WritePriority::UrgentClear
+        } else {
+            mi_transport::budget::WritePriority::BackgroundSync
+        }
     }
 
     pub fn complete_batch(
@@ -481,16 +518,26 @@ impl SessionSaRgbReconciler {
         completed_chunks: usize,
         request_count: u64,
     ) -> ReconcileAction {
-        self.finish_batch(now, batch_id, completed_chunks, request_count, false)
+        self.finish_batch_with_budget(
+            now,
+            batch_id,
+            completed_chunks,
+            request_count,
+            false,
+            false,
+            None,
+        )
     }
 
-    fn finish_batch(
+    pub(super) fn finish_batch_with_budget(
         &mut self,
         now: Instant,
         batch_id: u64,
         completed_chunks: usize,
         request_count: u64,
         preempted: bool,
+        rate_limited: bool,
+        budget_ready_at: Option<Instant>,
     ) -> ReconcileAction {
         let Some(batch) = self.in_flight.take() else {
             return ReconcileAction::NoOp;
@@ -530,18 +577,29 @@ impl SessionSaRgbReconciler {
         }
         if !preempted {
             if done < batch.chunks.len() {
-                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-                let shift = self.consecutive_failures.min(MAX_CONSECUTIVE_FAILURES) - 1;
-                self.next_allowed_at = Some(now + Duration::from_millis(100 * (1u64 << shift)));
-                if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                    self.halted_on_error = true;
+                if rate_limited {
+                    if let Some(ready_at) = budget_ready_at {
+                        self.next_allowed_at = Some(ready_at);
+                    }
+                } else {
+                    self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                    let shift = self.consecutive_failures.min(MAX_CONSECUTIVE_FAILURES) - 1;
+                    self.next_allowed_at = Some(now + Duration::from_millis(100 * (1u64 << shift)));
+                    if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        self.halted_on_error = true;
+                    }
                 }
             } else {
                 self.consecutive_failures = 0;
                 self.halted_on_error = false;
             }
         }
-        self.try_dispatch(now, request_count, self.urgent_clear_pending)
+        self.try_dispatch_with_budget(
+            now,
+            request_count,
+            self.urgent_clear_pending,
+            budget_ready_at,
+        )
     }
 
     pub fn take_dirty_for_teardown(&mut self) -> Vec<SaRgbUpdate> {
@@ -581,11 +639,12 @@ impl SessionSaRgbReconciler {
         }
     }
 
-    fn try_dispatch(
+    fn try_dispatch_with_budget(
         &mut self,
         now: Instant,
         request_count: u64,
         bypass_cooldown: bool,
+        budget_ready_at: Option<Instant>,
     ) -> ReconcileAction {
         if self.parked || self.in_flight.is_some() {
             return ReconcileAction::NoOp;
@@ -598,10 +657,20 @@ impl SessionSaRgbReconciler {
             self.urgent_clear_pending = false;
             return ReconcileAction::NoOp;
         };
-        if !bypass_cooldown || self.consecutive_failures > 0 {
-            if let Some(ready_at) = self.next_allowed_at.filter(|&ready_at| now < ready_at) {
-                return ReconcileAction::ScheduleWake(ready_at);
-            }
+        let cooldown_wake = if !bypass_cooldown || self.consecutive_failures > 0 {
+            self.next_allowed_at.filter(|&ready_at| now < ready_at)
+        } else {
+            None
+        };
+        let budget_wake = budget_ready_at.filter(|&ready_at| now < ready_at);
+        let wake_at = match (cooldown_wake, budget_wake) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        if let Some(ready_at) = wake_at {
+            return ReconcileAction::ScheduleWake(ready_at);
         }
         self.next_batch_id = self.next_batch_id.saturating_add(1);
         batch.batch_id = self.next_batch_id;

@@ -25,10 +25,11 @@ use mi_proto::v070_capabilities::{
     PM_STATE_METHOD, PROFILE_LAYER_SET_METHOD, SA_RGB_METHOD,
 };
 use mi_proto::{Method, ProtoError};
+use mi_transport::budget::WritePriority;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
-use crate::{DeviceSession, SessionError};
+use crate::{classify_rpc_call, DeviceSession, RpcTrafficClass, SessionError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoystickHardwareModeReceipt {
@@ -178,15 +179,21 @@ fn persist_immutable_v070_keymap_backup(
 }
 
 impl DeviceSession {
-    async fn exchange_v070<E>(
+    async fn exchange_v070_with_class<E>(
         &self,
         method: &'static str,
+        is_write: bool,
+        priority: WritePriority,
         encode: E,
     ) -> Result<(u16, Value), SessionError>
     where
         E: FnOnce(u16) -> Result<Vec<u8>, ProtoError>,
     {
         self.guarded(async {
+            if classify_rpc_call(method, is_write) == RpcTrafficClass::ControlWrite {
+                self.require_v070_exclusive_vendor()?;
+                self.acquire_write_budget(method, priority).await?;
+            }
             let mut q = self.queue.lock().await;
             let id = q.next_id;
             let encoded = if id >= 999 { Vec::new() } else { encode(id)? };
@@ -208,7 +215,12 @@ impl DeviceSession {
 
     pub async fn read_mouse_config(&self) -> Result<MouseConfig, SessionError> {
         let (id, reply) = self
-            .exchange_v070(MOUSE_CONFIG_METHOD, encode_read_mouse_config)
+            .exchange_v070_with_class(
+                MOUSE_CONFIG_METHOD,
+                false,
+                WritePriority::Normal,
+                encode_read_mouse_config,
+            )
             .await?;
         Ok(decode_mouse_config_response(&reply, id)?)
     }
@@ -216,14 +228,21 @@ impl DeviceSession {
     pub async fn write_mouse_config(&self, cfg: &MouseConfig) -> Result<MouseConfig, SessionError> {
         cfg.validate()?;
         let (id, reply) = self
-            .exchange_v070(MOUSE_CONFIG_METHOD, |id| encode_write_mouse_config(cfg, id))
+            .exchange_v070_with_class(MOUSE_CONFIG_METHOD, true, WritePriority::Normal, |id| {
+                encode_write_mouse_config(cfg, id)
+            })
             .await?;
         Ok(decode_mouse_config_response(&reply, id)?)
     }
 
     pub async fn read_joystick_deadzone(&self) -> Result<f64, SessionError> {
         let (id, reply) = self
-            .exchange_v070(JOYSTICK_DEADZONE_METHOD, encode_read_joystick_deadzone)
+            .exchange_v070_with_class(
+                JOYSTICK_DEADZONE_METHOD,
+                false,
+                WritePriority::Normal,
+                encode_read_joystick_deadzone,
+            )
             .await?;
         Ok(decode_joystick_deadzone_response(&reply, id)?.v)
     }
@@ -231,9 +250,12 @@ impl DeviceSession {
     pub async fn write_joystick_deadzone(&self, v: f64) -> Result<f64, SessionError> {
         let dz = JoystickDeadzone::new(v)?;
         let (id, reply) = self
-            .exchange_v070(JOYSTICK_DEADZONE_METHOD, |id| {
-                encode_write_joystick_deadzone(dz, id)
-            })
+            .exchange_v070_with_class(
+                JOYSTICK_DEADZONE_METHOD,
+                true,
+                WritePriority::Normal,
+                |id| encode_write_joystick_deadzone(dz, id),
+            )
             .await?;
         Ok(decode_joystick_deadzone_response(&reply, id)?.v)
     }
@@ -246,9 +268,12 @@ impl DeviceSession {
         let target = ProfileLayerTarget { p, l };
         target.validate()?;
         let (id, reply) = self
-            .exchange_v070(PROFILE_LAYER_SET_METHOD, |id| {
-                encode_set_profile_layer(target, id)
-            })
+            .exchange_v070_with_class(
+                PROFILE_LAYER_SET_METHOD,
+                true,
+                WritePriority::Normal,
+                |id| encode_set_profile_layer(target, id),
+            )
             .await?;
         decode_set_profile_layer_response(&reply, id)?;
         let mut guard = self.profile_layer.lock().unwrap();
@@ -263,7 +288,12 @@ impl DeviceSession {
 
     pub async fn read_pm_config(&self) -> Result<PmConfig, SessionError> {
         let (id, reply) = self
-            .exchange_v070(PM_CONFIG_METHOD, encode_read_pm_config)
+            .exchange_v070_with_class(
+                PM_CONFIG_METHOD,
+                false,
+                WritePriority::Normal,
+                encode_read_pm_config,
+            )
             .await?;
         Ok(decode_pm_config_response(&reply, id)?)
     }
@@ -271,21 +301,33 @@ impl DeviceSession {
     pub async fn write_pm_config(&self, cfg: &PmConfig) -> Result<PmConfig, SessionError> {
         cfg.validate()?;
         let (id, reply) = self
-            .exchange_v070(PM_CONFIG_METHOD, |id| encode_write_pm_config(cfg, id))
+            .exchange_v070_with_class(PM_CONFIG_METHOD, true, WritePriority::Normal, |id| {
+                encode_write_pm_config(cfg, id)
+            })
             .await?;
         Ok(decode_pm_config_response(&reply, id)?)
     }
 
     pub async fn read_pm_state(&self) -> Result<PmState, SessionError> {
         let (id, reply) = self
-            .exchange_v070(PM_STATE_METHOD, encode_read_pm_state)
+            .exchange_v070_with_class(
+                PM_STATE_METHOD,
+                false,
+                WritePriority::Normal,
+                encode_read_pm_state,
+            )
             .await?;
         Ok(decode_pm_state_response(&reply, id)?)
     }
 
     pub async fn read_device_name(&self) -> Result<DeviceNameInfo, SessionError> {
         let (id, reply) = self
-            .exchange_v070(DEVICE_NAME_METHOD, encode_read_device_name)
+            .exchange_v070_with_class(
+                DEVICE_NAME_METHOD,
+                false,
+                WritePriority::Normal,
+                encode_read_device_name,
+            )
             .await?;
         let info = decode_device_name_response(&reply, id)?;
         *self.device_name_max_length.lock().unwrap() = Some(info.max_length);
@@ -299,7 +341,7 @@ impl DeviceSession {
             .unwrap()
             .unwrap_or(MAX_DEVICE_NAME_LEN);
         let (id, reply) = self
-            .exchange_v070(DEVICE_NAME_METHOD, |id| {
+            .exchange_v070_with_class(DEVICE_NAME_METHOD, true, WritePriority::Normal, |id| {
                 encode_set_device_name(name, max_length, id)
             })
             .await?;
@@ -308,12 +350,23 @@ impl DeviceSession {
         Ok(info)
     }
 
-    pub async fn set_sa_rgb(&self, update: &SaRgbUpdate) -> Result<(), SessionError> {
+    pub async fn set_sa_rgb_with_priority(
+        &self,
+        update: &SaRgbUpdate,
+        priority: WritePriority,
+    ) -> Result<(), SessionError> {
         update.validate()?;
         let (id, reply) = self
-            .exchange_v070(SA_RGB_METHOD, |id| encode_set_sa_rgb(update, id))
+            .exchange_v070_with_class(SA_RGB_METHOD, true, priority, |id| {
+                encode_set_sa_rgb(update, id)
+            })
             .await?;
         Ok(decode_set_sa_rgb_response(&reply, id)?)
+    }
+
+    pub async fn set_sa_rgb(&self, update: &SaRgbUpdate) -> Result<(), SessionError> {
+        self.set_sa_rgb_with_priority(update, WritePriority::Normal)
+            .await
     }
 
     pub async fn reset_sa_rgb(&self, sa: Vec<u32>) -> Result<(), SessionError> {
@@ -402,6 +455,8 @@ impl DeviceSession {
         };
 
         self.guarded(async {
+            self.wait_for_write_capacity("fs.txbegin", WritePriority::Normal)
+                .await?;
             let mut q = self.queue.lock().await;
             let status = self
                 .exchange(&mut q, Method::DeviceStatus, Value::Null)
@@ -502,6 +557,7 @@ impl DeviceSession {
                         "会话请求预算不足，请重新连接后再修改摇杆硬件模式".into(),
                     ));
                 }
+                self.charge_logical_config_write("fs.txbegin")?;
                 if let Some(snapshot) = self.snapshot.lock().unwrap().as_mut() {
                     snapshot.stale = true;
                 }
@@ -532,28 +588,11 @@ impl DeviceSession {
             }
 
             cache_session_keymap(self.id, patched_bytes.clone());
+            drop(q);
 
             if let Some(layer) = active_layer.filter(|&l| l >= 1) {
-                let target = ProfileLayerTarget {
-                    p: active_profile,
-                    l: Some(layer),
-                };
-                target.validate()?;
-                let id = q.next_id;
-                let encoded = if id >= 999 {
-                    Vec::new()
-                } else {
-                    encode_set_profile_layer(target, id)?
-                };
-                let reply = self
-                    .exchange_authorized(
-                        &mut q,
-                        PROFILE_LAYER_SET_METHOD,
-                        encoded,
-                        Some(PROFILE_LAYER_SET_METHOD),
-                    )
+                self.set_profile_layer_flashless(active_profile, Some(layer))
                     .await?;
-                decode_set_profile_layer_response(&reply, id)?;
             }
 
             let resolved_mode = mi_model::apply::extract_keymap_joystick_hardware_mode(

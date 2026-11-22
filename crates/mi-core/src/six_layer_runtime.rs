@@ -60,6 +60,7 @@ pub struct RunningSixLayer {
     vendor_bridge: VendorBridge,
     firmware_version: Option<String>,
     transport: Option<Arc<MacTransport>>,
+    budget_registry: Arc<mi_transport::budget::DeviceBudgetRegistry>,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
     executor: Option<JoinHandle<Result<(), String>>>,
@@ -629,6 +630,7 @@ impl RunningSixLayer {
                 target: self.installation.target.clone(),
                 preferred_serial: self.candidate.serial_number.clone(),
                 transport: self.transport.clone(),
+                budget_registry: Arc::clone(&self.budget_registry),
                 allow_reconnect: true,
             },
         );
@@ -651,6 +653,7 @@ impl RunningSixLayer {
                 target: self.installation.target.clone(),
                 preferred_serial: self.candidate.serial_number.clone(),
                 transport: None,
+                budget_registry: Arc::clone(&self.budget_registry),
                 allow_reconnect: false,
             },
         );

@@ -462,9 +462,14 @@ fn six_layer_connection_rejects_a_shared_vendor_link() {
         transport_hint: mi_transport::TransportHint::Usb,
         serial_number: None,
     }]);
-    assert!(
-        matches!(connect(&transport, &target), Err(error) if error.contains("未取得 USB 专用接口独占"))
-    );
+    assert!(matches!(
+        connect(
+            &transport,
+            &target,
+            &mi_transport::budget::DeviceBudgetRegistry::new(),
+        ),
+        Err(error) if error.contains("未取得 USB 专用接口独占")
+    ));
 }
 
 #[test]
@@ -4026,4 +4031,214 @@ fn preview_lease_invalidates_overlapping_in_flight_thstatus_and_defers_v070_comm
 
     running.shutdown(&runtime).unwrap();
     responder.abort();
+}
+
+#[test]
+fn vendor_bridge_900_request_rotation_preserves_shared_device_write_budget_across_sessions() {
+    use mi_proto::Framer;
+    use mi_transport::budget::{
+        DeviceBudgetKey, DeviceBudgetRegistry, WriteBudgetPolicy, WritePriority,
+    };
+
+    struct ExclusiveNativeMockLink(Arc<mi_transport::MockLink>);
+
+    impl mi_transport::HidLink for ExclusiveNativeMockLink {
+        fn backend(&self) -> mi_transport::LinkBackend {
+            mi_transport::LinkBackend::MacHidapi267Numbered
+        }
+        fn is_exclusive_vendor(&self) -> bool {
+            true
+        }
+        fn write<'a, 'c, 'b>(
+            &'a self,
+            report: &'c [u8],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), mi_transport::TransportError>>
+                    + Send
+                    + 'b,
+            >,
+        >
+        where
+            'a: 'b,
+            'c: 'b,
+            Self: 'b,
+        {
+            self.0.write(report)
+        }
+        fn read<'a, 'b>(
+            &'a self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Vec<u8>, mi_transport::TransportError>>
+                    + Send
+                    + 'b,
+            >,
+        >
+        where
+            'a: 'b,
+            Self: 'b,
+        {
+            self.0.read()
+        }
+        fn close(&self) {
+            self.0.close();
+        }
+    }
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let registry = Arc::new(DeviceBudgetRegistry::new());
+    let key = DeviceBudgetKey::from_identity(Some("MICRO-ROTATE-1"), Some(0x1420), "DevSrvsID:77");
+    let policy = WriteBudgetPolicy {
+        window: Duration::from_secs(10),
+        max_writes: 60,
+        min_spacing: Duration::ZERO,
+        enabled: true,
+    };
+
+    let make_session = |rt: &tokio::runtime::Runtime,
+                        reg: &Arc<DeviceBudgetRegistry>,
+                        key: DeviceBudgetKey| {
+        let (raw, mut writes) = mi_transport::MockLink::new();
+        let inject = raw.inject.clone();
+        let budget = reg.budget_for(key, policy);
+        let session = {
+            let _entered = rt.enter();
+            DeviceSession::new_with_budget(
+                Arc::new(ExclusiveNativeMockLink(Arc::clone(&raw))),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig {
+                    timeout: Duration::from_secs(2),
+                    interval: Duration::ZERO,
+                },
+                budget,
+            )
+        };
+        rt.spawn(async move {
+            let mut in_framer = mi_proto::NativeFramer::default();
+            let out_framer = mi_proto::NativeFramer::default();
+            while let Some(report) = writes.recv().await {
+                let Ok(messages) = in_framer.feed(&report) else {
+                    break;
+                };
+                for msg in messages {
+                    let Ok(req) = serde_json::from_slice::<serde_json::Value>(&msg) else {
+                        continue;
+                    };
+                    let method = req["method"].as_str().unwrap_or("");
+                    let result_val = if method == "v.oai.thstatus" {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!({"version": "0.6.3", "profile_index": 1, "layer_index": 1})
+                    };
+                    let reply = serde_json::json!({
+                        "id": req["id"],
+                        "result": result_val
+                    });
+                    let mut wire = reply.to_string();
+                    wire.push('\n');
+                    for frame in out_framer.encode(wire.as_bytes()).unwrap() {
+                        let _ = inject.send(frame);
+                    }
+                }
+            }
+        });
+        (raw, session)
+    };
+
+    let (_raw1, session1) = make_session(&runtime, &registry, key.clone());
+    let entry = mi_proto::lighting_candidate::OaiKeyStatusEntry::new("AG00", 0x0088FF);
+    runtime.block_on(async {
+        for _ in 0..5 {
+            session1
+                .send_oai_thstatus(std::slice::from_ref(&entry))
+                .await
+                .unwrap();
+        }
+        for _ in 5..900 {
+            session1
+                .request(mi_proto::Method::DeviceStatus, serde_json::Value::Null)
+                .await
+                .unwrap();
+        }
+    });
+    assert_eq!(session1.request_count(), 900);
+    assert_eq!(
+        session1
+            .write_budget()
+            .snapshot(Instant::now())
+            .used_in_window,
+        5
+    );
+
+    let (_raw2, session2) = make_session(&runtime, &registry, key.clone());
+    let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
+    receiver.arm().unwrap();
+    let routing = Arc::new(Mutex::new(RoutingContext::default()));
+    let mut bridge = VendorBridge::new(Some(Arc::clone(&session1)));
+
+    let rotated_session = Arc::clone(&session2);
+    let reopened_flag = Arc::new(AtomicBool::new(false));
+    let reopened_flag_inner = Arc::clone(&reopened_flag);
+    bridge.spawn_with_reopen(
+        &runtime,
+        Some(Arc::clone(&session1)),
+        Arc::clone(&receiver),
+        routing,
+        true,
+        move || {
+            reopened_flag_inner.store(true, Ordering::Release);
+            let next = Arc::clone(&rotated_session);
+            async move { Some(next) }
+        },
+    );
+
+    let wait = Instant::now();
+    while !reopened_flag.load(Ordering::Acquire) && wait.elapsed() < Duration::from_secs(2) {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(reopened_flag.load(Ordering::Acquire));
+
+    let active_after = {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let current = bridge.active_session.lock().unwrap().clone();
+            if current.as_ref().is_some_and(|s| s.id == session2.id) {
+                break current.unwrap();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "rotated session must become active"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    assert!(
+        Arc::ptr_eq(session1.write_budget(), active_after.write_budget()),
+        "900-request VendorBridge rotation must preserve the exact same DeviceWriteBudget Arc"
+    );
+    assert_eq!(
+        active_after
+            .write_budget()
+            .snapshot(Instant::now())
+            .used_in_window,
+        5,
+        "rolling 10s write count must survive VendorBridge 900-request rotation"
+    );
+
+    active_after
+        .write_budget()
+        .try_acquire(Instant::now(), WritePriority::Normal)
+        .unwrap();
+    assert_eq!(
+        session1
+            .write_budget()
+            .snapshot(Instant::now())
+            .used_in_window,
+        6
+    );
+
+    bridge.shutdown(&runtime);
 }

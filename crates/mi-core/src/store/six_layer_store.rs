@@ -365,15 +365,27 @@ impl WorkbenchStore {
             .map_err(WorkbenchError::Routing)?;
         self.suspend_for_six_layer_operation()?;
         let transport = self.exclusive_usb_transport();
+        let budget_registry = Arc::clone(&self.budget_registry);
         let dir = self.config.document_dir.clone();
         let saved = self.six_layer_state.clone();
         let runtime = Arc::clone(&self.tokio_runtime);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = if reconnecting {
-                runtime.block_on(six_layer_runtime::resume(&dir, saved, transport))
+                runtime.block_on(six_layer_runtime::resume(
+                    &dir,
+                    saved,
+                    transport,
+                    budget_registry,
+                ))
             } else {
-                runtime.block_on(six_layer_runtime::apply(&dir, plan, saved, transport))
+                runtime.block_on(six_layer_runtime::apply(
+                    &dir,
+                    plan,
+                    saved,
+                    transport,
+                    budget_registry,
+                ))
             };
             let _ = tx.send(result.map(Some));
         });
@@ -400,13 +412,19 @@ impl WorkbenchStore {
         }
         self.suspend_for_six_layer_operation()?;
         let transport = self.exclusive_usb_transport();
+        let budget_registry = Arc::clone(&self.budget_registry);
         let dir = self.config.document_dir.clone();
         let saved = self.six_layer_state.clone();
         let runtime = Arc::clone(&self.tokio_runtime);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = runtime
-                .block_on(six_layer_runtime::restore(&dir, saved, transport))
+                .block_on(six_layer_runtime::restore(
+                    &dir,
+                    saved,
+                    transport,
+                    budget_registry,
+                ))
                 .map(|_| None);
             let _ = tx.send(result);
         });
@@ -1027,6 +1045,7 @@ mod tests {
             directory.path(),
             reopened.six_layer_state.clone(),
             Arc::new(mi_transport::MacTransport::exclusive_vendor()),
+            Arc::clone(&reopened.budget_registry),
         ));
         assert!(matches!(result, Err(error) if error.contains("旧六层安装已暂停")));
         assert_eq!(fs::read(&path).unwrap(), original);

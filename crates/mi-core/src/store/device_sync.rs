@@ -464,13 +464,22 @@ impl WorkbenchStore {
             link.close();
             return Err(WorkbenchError::Storage("未取得 USB 专用接口独占".into()));
         }
+        let budget_key = mi_transport::budget::DeviceBudgetKey::from_identity(
+            target.serial_number.as_deref(),
+            None,
+            &target.path,
+        );
+        let budget_policy =
+            mi_transport::budget::WriteBudgetPolicy::for_transport(target.transport_hint.clone());
+        let budget = self.budget_registry.budget_for(budget_key, budget_policy);
         let session = {
             let _guard = self.tokio_runtime.enter();
-            DeviceSession::new(
+            DeviceSession::new_with_budget(
                 link,
                 Box::new(mi_proto::NativeFramer::default()),
                 Arc::new(mi_session::ReadOnlySchema),
                 mi_session::SessionConfig::default(),
+                budget,
             )
         };
         self.merge_wide_key
