@@ -30,7 +30,7 @@
 
 ## 调研入口与设计契约
 
-- **协议与架构研究**：[业务架构与证据定位](input-architecture.md)、[只读协议说明](protocol-readonly.md)、[写入与宿主通知候选协议](protocol-candidates.md)、[模块契约](module-contracts.md)。
+- **协议与架构研究**：[业务架构与证据定位](input-architecture.md)、[只读协议说明](protocol-readonly.md)、[写入与宿主通知候选协议](protocol-candidates.md)、[InputKit 基础层与单设备写入预算](input-kit-foundation.md)、[模块契约](module-contracts.md)。
 - **产品与桌面适配**：[桌面应用控制](designs/four-app-control.md)、[桌面应用接口](four-app-interfaces.md)、[原生工作台设计](designs/creator-micro-workbench.md)、[单色视觉规范](designs/DESIGN.md)、[运行时一致性](designs/runtime-consistency.md)、[Antigravity 会话与导航](../integrations/antigravity/README.md)、[DSH 零补丁适配](../integrations/dsh/README.md)。
 - **规格与台账**：[SPEC](spec/SPEC.md)、[BUILD_PROMPT](spec/BUILD_PROMPT.md)、[EVIDENCE](spec/EVIDENCE.md)、[UNKNOWNS](spec/UNKNOWNS.md)。
 
