@@ -1,5 +1,11 @@
 # 项目教训
 
+## Antigravity AX 控件标签必须单源双语注册，禁止在匹配器中散落纯英文字面量
+
+- 起因与后果：`crates/mi-macos/src/` 下 `ax_dictation.rs`、`executor.rs`、`managed_controls.rs`、`native_ax.rs` 四处散落硬编码纯英文 Antigravity AX 标签（如 `"Record Audio"`、`"Start Voice mode"`、`"Toggle Side Panel"`、`"Browser"`、`"Stop execution"` 等），当 Antigravity 切换至中文界面时，控件扫描仅剩裸 `AXTextArea`，导致语音听写、实时语音、模型选择、侧边面板、内置浏览器、旁路提问、新建对话及侧栏会话三态成片失效。
+- 修复：新增单源双语注册表 `crates/mi-macos/src/antigravity_ax_labels.rs`，以 `BilingualLabelSet { key, en, zh }` 与 `ALL_BILINGUAL_LABEL_SETS` 统一承载全部 Antigravity AX 控件标签及匹配谓词，并将四个源码文件中的全部生产匹配器收敛至该模块；在 `scripts/check-boundaries.py` 新增 `R-C16` 静态门禁，禁止在 `crates/mi-macos/src/` 除注册表外的生产代码中再次散落原始 Antigravity AX 标签字面量。
+- 验证点：`antigravity_ax_labels.rs` 单测强制校验全部注册项同时具备非空 `en`/`zh` 与唯一键；`crates/mi-macos/tests/managed_controls.rs`、`native_ax.rs`、`executor.rs` 补齐中文听写、实时语音、模型选择器、侧边面板、内置浏览器、旁路提问、新建对话及侧栏三态回归；`scripts/tests/test_boundaries_launcher.py` 覆盖 `R-C16` 正负用例，并通过 `scripts/check-boundaries.py` 与 `cargo test --locked -p mi-macos`。Seen 1x（2026-11-22）。
+
 ## 全局按键映射开关禁止进入键盘焦点链，且菜单栏图标须同步暂停三态
 
 - 起因与后果：`NeutralSwitchToggleStyle` 内部以 `Button` 叠加 `.focusEffectDisabled()` 实现，仅隐藏蓝色焦点框却仍让 AppKit 将主工作台与菜单栏弹层中的全局「按键映射」开关选为窗口 `initialFirstResponder`，窗口位于前台时按下空格会静默关闭整盘 `host_execution_enabled`；同时 `StatusItemIcon` 仅区分 `hasCaution: Bool` 且 `MicroInputApp.swift` 未观察 `store.statusMenu.hostExecutionEnabled`，导致按键映射被暂停后菜单栏图标与悬浮提示仍呈正常状态，用户难以及时察觉。

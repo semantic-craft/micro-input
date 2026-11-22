@@ -47,13 +47,8 @@ pub enum AntigravityNewConversationTarget {
 
 pub fn is_antigravity_new_conversation_control(node: &AntigravitySidebarAxNode) -> bool {
     matches!(node.role.as_str(), "AXLink" | "AXButton")
-        && (matches!(
-            node.description.trim(),
-            "New Conversation in Project" | "New Conversation in Workspace"
-        ) || matches!(
-            node.title.trim(),
-            "New Conversation in Project" | "New Conversation in Workspace"
-        ))
+        && (crate::antigravity_ax_labels::is_new_conversation_in_project(&node.description)
+            || crate::antigravity_ax_labels::is_new_conversation_in_project(&node.title))
 }
 
 pub fn select_antigravity_new_conversation_target(
@@ -70,10 +65,8 @@ pub fn select_antigravity_new_conversation_target(
         } else if node.role == "AXButton" {
             let trimmed = node.title.trim();
             if !trimmed.is_empty()
-                && !matches!(
-                    trimmed,
-                    "Projects" | "Pinned Conversations" | "Automations" | "Project options"
-                )
+                && !crate::antigravity_ax_labels::is_sidebar_section_header(trimmed)
+                && !crate::antigravity_ax_labels::is_project_options(trimmed)
             {
                 current_project = Some((trimmed, pos));
             }
@@ -109,14 +102,11 @@ pub fn select_antigravity_new_conversation_target(
 }
 
 pub(crate) fn is_antigravity_live_voice_start_label(label: &str) -> bool {
-    let trimmed = label.trim();
-    trimmed.eq_ignore_ascii_case("Start Voice mode")
-        || trimmed.eq_ignore_ascii_case("Start Live Chat")
+    crate::antigravity_ax_labels::is_live_voice_start(label)
 }
 
 pub(crate) fn is_antigravity_live_voice_end_label(label: &str) -> bool {
-    let trimmed = label.trim();
-    trimmed.eq_ignore_ascii_case("End Voice mode") || trimmed.eq_ignore_ascii_case("End Live chat")
+    crate::antigravity_ax_labels::is_live_voice_end(label)
 }
 
 pub fn parse_pid_from_lsappinfo_output(text: &str) -> Option<i32> {
@@ -579,13 +569,8 @@ unsafe fn collect_antigravity_ax_nodes(
         title: title.clone(),
         description: description.clone(),
     });
-    let skip_children = matches!(
-        title.trim(),
-        "Conversation turns" | "Agent response" | "User message"
-    ) || matches!(
-        description.trim(),
-        "Conversation turns" | "Agent response" | "User message"
-    );
+    let skip_children = crate::antigravity_ax_labels::is_chat_transcript_region(&title)
+        || crate::antigravity_ax_labels::is_chat_transcript_region(&description);
     if !skip_children {
         let children = ax_copy_children(elem);
         for child in children {
@@ -5452,5 +5437,62 @@ mod serialized_effect_tests {
             200.0,
         );
         assert_eq!(c_slow.count, 1);
+    }
+
+    #[test]
+    fn antigravity_chinese_new_conversation_target_resolves_active_project() {
+        let nodes = vec![
+            AntigravitySidebarAxNode {
+                index: 1,
+                role: "AXButton".into(),
+                title: "项目管理".into(),
+                description: String::new(),
+            },
+            AntigravitySidebarAxNode {
+                index: 2,
+                role: "AXButton".into(),
+                title: "alpha".into(),
+                description: String::new(),
+            },
+            AntigravitySidebarAxNode {
+                index: 3,
+                role: "AXButton".into(),
+                title: "项目选项".into(),
+                description: String::new(),
+            },
+            AntigravitySidebarAxNode {
+                index: 4,
+                role: "AXButton".into(),
+                title: String::new(),
+                description: "在项目中新建对话".into(),
+            },
+            AntigravitySidebarAxNode {
+                index: 5,
+                role: "AXButton".into(),
+                title: "micro-input".into(),
+                description: String::new(),
+            },
+            AntigravitySidebarAxNode {
+                index: 6,
+                role: "AXLink".into(),
+                title: "在项目中新建对话".into(),
+                description: String::new(),
+            },
+        ];
+
+        assert_eq!(
+            select_antigravity_new_conversation_target("micro-input - Antigravity", &nodes),
+            AntigravityNewConversationTarget::ActiveProject {
+                project_label: "micro-input".into(),
+                node_index: 6,
+            }
+        );
+        assert_eq!(
+            select_antigravity_new_conversation_target("Other - Antigravity", &nodes),
+            AntigravityNewConversationTarget::FirstVisibleProject {
+                project_label: Some("alpha".into()),
+                node_index: 4,
+            }
+        );
     }
 }

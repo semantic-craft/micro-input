@@ -965,12 +965,7 @@ mod macos {
                 let desc = lenient_text_attribute(attrs.next().flatten())?;
                 let title = lenient_text_attribute(attrs.next().flatten())?;
                 let is_chat_transcript_region = |text: Option<&str>| {
-                    text.is_some_and(|s| {
-                        matches!(
-                            s.trim(),
-                            "Conversation turns" | "Agent response" | "User message"
-                        )
-                    })
+                    text.is_some_and(crate::antigravity_ax_labels::is_chat_transcript_region)
                 };
                 if is_chat_transcript_region(desc.as_deref())
                     || is_chat_transcript_region(title.as_deref())
@@ -1333,38 +1328,15 @@ mod macos {
     }
 
     fn is_sidebar_boundary_label(trimmed: &str) -> bool {
-        trimmed.starts_with("See all (")
-            || trimmed == "Show less"
-            || trimmed.contains("New Conversation")
-            || matches!(
-                trimmed,
-                "Toggle sidebar"
-                    | "Search Conversations"
-                    | "Projects"
-                    | "Pinned Conversations"
-                    | "Automations"
-                    | "Project options"
-            )
+        crate::antigravity_ax_labels::is_sidebar_boundary(trimmed)
     }
 
     fn is_row_action_label(trimmed: &str) -> bool {
-        matches!(
-            trimmed,
-            "Stop execution"
-                | "Archive conversation"
-                | "Pin conversation"
-                | "Unpin conversation"
-                | "More options"
-                | "Conversation options"
-        )
+        crate::antigravity_ax_labels::is_row_action(trimmed)
     }
 
     fn is_utility_sidebar_button_label(label: &str) -> bool {
-        let trimmed = label.trim();
-        trimmed.is_empty()
-            || is_sidebar_boundary_label(trimmed)
-            || is_row_action_label(trimmed)
-            || matches!(trimmed, "Delete conversation" | "Rename conversation")
+        crate::antigravity_ax_labels::is_utility_sidebar_button(label)
     }
 
     fn is_row_boundary_button(node: &ObservedNode) -> bool {
@@ -1416,9 +1388,9 @@ mod macos {
                     break;
                 }
                 let trimmed = node.data.label.trim();
-                if trimmed == "Stop execution" {
+                if crate::antigravity_ax_labels::is_stop_execution(trimmed) {
                     has_stop = true;
-                } else if trimmed == "Archive conversation" {
+                } else if crate::antigravity_ax_labels::is_archive_conversation(trimmed) {
                     has_archive = true;
                 }
                 if is_row_action_label(trimmed) {
@@ -2036,9 +2008,11 @@ mod macos {
             .enumerate()
             .filter_map(|(idx, node)| {
                 let trimmed = node.data.label.trim();
-                let is_collapsed_toggle = (trimmed == "Toggle sidebar"
-                    && node.data.expanded == Some(false))
-                    || (trimmed == "Open sidebar" && node.data.expanded != Some(true));
+                let is_collapsed_toggle =
+                    (crate::antigravity_ax_labels::is_toggle_sidebar(trimmed)
+                        && node.data.expanded == Some(false))
+                        || (crate::antigravity_ax_labels::is_open_sidebar(trimmed)
+                            && node.data.expanded != Some(true));
                 (node.data.role == "AXButton"
                     && node.data.enabled
                     && node.data.pressable
@@ -2173,11 +2147,12 @@ mod macos {
                     .any(|next| {
                         next.parent == Some(parent)
                             && next.data.role == "AXLink"
-                            && (next.data.label.contains("New Conversation")
-                                || next.data.url.as_deref().is_some_and(|u| {
-                                    crate::session_navigation::app_document_path(u, port)
-                                        .is_some_and(|p| p.contains("project="))
-                                }))
+                            && (crate::antigravity_ax_labels::contains_new_conversation(
+                                &next.data.label,
+                            ) || next.data.url.as_deref().is_some_and(|u| {
+                                crate::session_navigation::app_document_path(u, port)
+                                    .is_some_and(|p| p.contains("project="))
+                            }))
                     })
             })
             .collect();
@@ -2194,7 +2169,7 @@ mod macos {
             return false;
         }
         let trimmed = node.data.label.trim();
-        if matches!(trimmed, "Projects" | "Pinned Conversations" | "Automations") {
+        if crate::antigravity_ax_labels::is_sidebar_section_header(trimmed) {
             return true;
         }
         if is_utility_sidebar_button_label(trimmed) {
@@ -2206,7 +2181,7 @@ mod macos {
         let upper = (idx + 5).min(observation.nodes.len());
         observation.nodes[(idx + 1)..upper].iter().any(|next| {
             matches!(next.data.role.as_str(), "AXLink" | "AXButton")
-                && (next.data.label.contains("New Conversation")
+                && (crate::antigravity_ax_labels::contains_new_conversation(&next.data.label)
                     || next.data.url.as_deref().is_some_and(|u| {
                         crate::session_navigation::app_document_path(u, port)
                             .is_some_and(|p| p.contains("project="))
@@ -2234,7 +2209,7 @@ mod macos {
                 if node.data.role == "AXButton"
                     && node.data.enabled
                     && node.data.pressable
-                    && node.data.label.trim().starts_with("See all (")
+                    && crate::antigravity_ax_labels::is_see_all(&node.data.label)
                 {
                     return Some(idx);
                 }
@@ -2243,7 +2218,7 @@ mod macos {
         }
         let any_project_headers = (0..observation.nodes.len()).any(|idx| {
             let trimmed = observation.nodes[idx].data.label.trim();
-            !matches!(trimmed, "Projects" | "Pinned Conversations" | "Automations")
+            !crate::antigravity_ax_labels::is_sidebar_section_header(trimmed)
                 && is_section_or_project_header_button(observation, port, idx)
         });
         if any_project_headers {
@@ -2257,7 +2232,7 @@ mod macos {
                 (node.data.role == "AXButton"
                     && node.data.enabled
                     && node.data.pressable
-                    && node.data.label.trim().starts_with("See all ("))
+                    && crate::antigravity_ax_labels::is_see_all(&node.data.label))
                 .then_some(idx)
             })
             .collect();
@@ -2833,23 +2808,13 @@ mod macos {
 
             let is_antigravity_side_panel_btn = is_antigravity
                 && data.role == "AXButton"
-                && matches!(
-                    data.label.trim(),
-                    "Toggle Side Panel"
-                        | "New tab"
-                        | "Side Question"
-                        | "New Side Question"
-                        | "Browser"
-                        | "Preview"
-                        | "Open in external browser"
-                        | "Clear search"
-                );
+                && crate::antigravity_ax_labels::is_side_panel_button(&data.label);
             let is_antigravity_browser_address_bar = is_antigravity
                 && matches!(data.role.as_str(), "AXComboBox" | "AXTextField")
-                && data.label.trim() == "Address bar";
+                && crate::antigravity_ax_labels::is_address_bar(&data.label);
             let is_antigravity_new_tab_search = is_antigravity
                 && data.role == "AXTextField"
-                && data.label.trim() == "Search for content to open";
+                && crate::antigravity_ax_labels::is_search_for_content_to_open(&data.label);
 
             let relevant_button = data.pressable
                 && ([
@@ -2864,21 +2829,10 @@ mod macos {
                 }) || crate::executor::is_antigravity_live_voice_start_label(&data.label)
                     || crate::executor::is_antigravity_live_voice_end_label(&data.label)
                     || is_antigravity_side_panel_btn
-                    || matches!(
-                        data.label.trim(),
-                        "Jump to bottom"
-                            | "Scroll to bottom"
-                            | "跳到底部"
-                            | "滚动到底部"
-                            | "Send"
-                            | "Send message"
-                            | "Submit"
-                            | "发送"
-                            | "发送消息"
-                            | "提交"
-                    ));
-            let chat_heading =
-                data.role == "AXHeading" && data.label == "Conversation Log" && is_antigravity;
+                    || crate::antigravity_ax_labels::is_scroll_or_send_button(&data.label));
+            let chat_heading = data.role == "AXHeading"
+                && crate::antigravity_ax_labels::is_conversation_log_heading(&data.label)
+                && is_antigravity;
             let codex = crate::ax_dictation::DictationAdapter::Codex;
             let codex_dictation = codex.matches_start_label(&data.label)
                 || codex.matches_stop_label(&data.label)
@@ -2999,7 +2953,9 @@ mod macos {
                 data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
                 if data.role == "AXPopUpButton" {
                     data.expanded = bool_attribute(attrs.next().flatten())?;
-                } else if data.role == "AXButton" && data.label.trim() == "Toggle Side Panel" {
+                } else if data.role == "AXButton"
+                    && crate::antigravity_ax_labels::is_toggle_side_panel(&data.label)
+                {
                     if let Ok(vals) = element.attributes(&["AXExpanded"], deadline) {
                         if let Some(val) = vals.into_iter().next().flatten() {
                             data.expanded = bool_attribute(Some(val)).ok().flatten();
@@ -3058,22 +3014,18 @@ mod macos {
             matched
         }
         fn is_excluded_browser_container(role: &str, label: &str) -> bool {
-            (matches!(role, "AXGroup" | "AXSheet" | "AXDialog") && label == "Settings")
-                || (role == "AXGroup" && label == "Markdown view mode")
+            (matches!(role, "AXGroup" | "AXSheet" | "AXDialog")
+                && crate::antigravity_ax_labels::is_settings_container(label))
+                || (role == "AXGroup"
+                    && crate::antigravity_ax_labels::is_markdown_view_mode_container(label))
                 || (matches!(role, "AXGroup" | "AXScrollArea" | "AXList")
-                    && matches!(
-                        label,
-                        "Conversation turns" | "Agent response" | "User message"
-                    ))
+                    && crate::antigravity_ax_labels::is_chat_transcript_region(label))
         }
         fn is_browser_filter_candidate(control: &ManagedControl) -> bool {
             (control.role == "AXButton"
-                && matches!(
-                    control.label.trim(),
-                    "Browser" | "Preview" | "Open in external browser" | "Clear search"
-                ))
+                && crate::antigravity_ax_labels::is_browser_filter_button(&control.label))
                 || (matches!(control.role.as_str(), "AXComboBox" | "AXTextField")
-                    && control.label.trim() == "Address bar")
+                    && crate::antigravity_ax_labels::is_address_bar(&control.label))
         }
         fn filter_controls_from_observation(
             observation: &WindowObservation,
@@ -3114,7 +3066,7 @@ mod macos {
                     > 1;
                 let toggle_expanded = if let Some(toggle_idx) = controls
                     .iter()
-                    .position(|c| c.label.trim() == "Toggle Side Panel")
+                    .position(|c| crate::antigravity_ax_labels::is_toggle_side_panel(&c.label))
                 {
                     let id = controls[toggle_idx].id;
                     let expanded = node_by_id.get(&id).and_then(|&idx| {
@@ -3154,9 +3106,11 @@ mod macos {
                                         &mut side_question_ancestors,
                                         ancestor_id,
                                         &["AXGroup"],
-                                        |_, label| label == "Side Question",
+                                        |_, label| {
+                                            crate::antigravity_ax_labels::is_side_question(label)
+                                        },
                                     ) {
-                                        control.label = "Side Question Input".to_string();
+                                        control.label = crate::antigravity_ax_labels::SIDE_QUESTION_INPUT_SYNTHETIC_LABEL.to_string();
                                         break;
                                     }
                                 }
@@ -3170,7 +3124,9 @@ mod macos {
                         .iter()
                         .find(|c| {
                             c.role == "AXTextField"
-                                && c.label.trim() == "Search for content to open"
+                                && crate::antigravity_ax_labels::is_search_for_content_to_open(
+                                    &c.label,
+                                )
                         })
                         .and_then(|c| {
                             let search_idx = *node_by_id.get(&c.id)?;
@@ -3185,12 +3141,8 @@ mod macos {
                         .iter()
                         .filter_map(|node| {
                             if node.data.role == "AXHeading"
-                                && matches!(
-                                    node.data.label.trim(),
-                                    "Conversation Log"
-                                        | "Agent said"
-                                        | "Agent working"
-                                        | "You said"
+                                && crate::antigravity_ax_labels::is_chat_transcript_heading(
+                                    &node.data.label,
                                 )
                             {
                                 node.parent.filter(|&parent_idx| {
@@ -3237,16 +3189,18 @@ mod macos {
                             if in_excluded_container {
                                 false
                             } else if c.role == "AXButton" {
-                                match c.label.trim() {
-                                    "Browser" | "Open in external browser" => true,
-                                    "Preview" => {
-                                        new_tab_search_info.is_some_and(|(search_idx, _)| {
-                                            node_by_id
-                                                .get(&c.id)
-                                                .is_some_and(|&idx| idx > search_idx)
-                                        })
-                                    }
-                                    "Clear search" => new_tab_search_info.is_some_and(
+                                if crate::antigravity_ax_labels::is_browser(&c.label)
+                                    || crate::antigravity_ax_labels::is_open_in_external_browser(
+                                        &c.label,
+                                    )
+                                {
+                                    true
+                                } else if crate::antigravity_ax_labels::is_preview(&c.label) {
+                                    new_tab_search_info.is_some_and(|(search_idx, _)| {
+                                        node_by_id.get(&c.id).is_some_and(|&idx| idx > search_idx)
+                                    })
+                                } else if crate::antigravity_ax_labels::is_clear_search(&c.label) {
+                                    new_tab_search_info.is_some_and(
                                         |(search_idx, search_parent)| {
                                             let Some(&idx) = node_by_id.get(&c.id) else {
                                                 return false;
@@ -3269,8 +3223,9 @@ mod macos {
                                                             == "AXGroup"
                                                     })
                                         },
-                                    ),
-                                    _ => true,
+                                    )
+                                } else {
+                                    true
                                 }
                             } else {
                                 true
@@ -3644,7 +3599,8 @@ mod macos {
             let headings: Vec<_> = controls
                 .iter()
                 .filter(|control| {
-                    control.role == "AXHeading" && control.label == "Conversation Log"
+                    control.role == "AXHeading"
+                        && crate::antigravity_ax_labels::is_conversation_log_heading(&control.label)
                 })
                 .collect();
             let preferred = if let [heading] = headings.as_slice() {
@@ -4908,11 +4864,10 @@ mod macos {
                         .any(|c| c.label.to_lowercase().contains("stop subagent")),
                     "filtered Antigravity controls must never include Stop subagent"
                 );
-                if let Some(toggle) = ag_win
-                    .controls
-                    .iter()
-                    .find(|c| c.role == "AXButton" && c.label.trim() == "Toggle Side Panel")
-                {
+                if let Some(toggle) = ag_win.controls.iter().find(|c| {
+                    c.role == "AXButton"
+                        && crate::antigravity_ax_labels::is_toggle_side_panel(&c.label)
+                }) {
                     let reread = provider
                         .read_control(&ag_win.identity, toggle.id)
                         .expect("read_control on Toggle Side Panel");
@@ -7756,6 +7711,401 @@ mod macos {
             );
             assert_eq!(codex_controls.len(), 1);
             assert_eq!(codex_controls[0].label, "Finishing dictation");
+        }
+
+        #[test]
+        fn antigravity_chinese_controls_filter_retains_controls_and_excludes_transcript_and_settings(
+        ) {
+            let observation = WindowObservation {
+                nodes: vec![
+                    ObservedNode {
+                        element: Owned::text("win").unwrap(),
+                        parent: None,
+                        data: NodeData {
+                            role: "AXWindow".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("chat-group").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("chat-heading").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXHeading".into(),
+                            label: "会话日志".into(),
+                            enabled: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("chat-browser-false-pos").unwrap(),
+                        parent: Some(1),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "内置浏览器".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("agent-reply-group").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: "智能体回复".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("reply-preview-false-pos").unwrap(),
+                        parent: Some(4),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "预览".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("settings-group").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: "系统设置".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("settings-browser-false-pos").unwrap(),
+                        parent: Some(6),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "内置浏览器".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("voice-start").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "录制语音输入".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("live-voice").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "开启语音模式".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("model-picker").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "模型，当前：Gemini 4 Neon High".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("toggle-panel").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "切换侧边面板".into(),
+                            enabled: true,
+                            pressable: true,
+                            expanded: Some(true),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("side-browser").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "内置浏览器".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("address-bar").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXComboBox".into(),
+                            label: "地址栏".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("search-group").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("new-tab-search").unwrap(),
+                        parent: Some(14),
+                        data: NodeData {
+                            role: "AXTextField".into(),
+                            label: "搜索要打开的内容".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("clear-search").unwrap(),
+                        parent: Some(14),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "清除搜索".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("new-tab-preview").unwrap(),
+                        parent: Some(14),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "预览".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("side-question-btn").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "旁路提问".into(),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("side-question-group").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: "旁路提问".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("side-question-input").unwrap(),
+                        parent: Some(19),
+                        data: NodeData {
+                            role: "AXTextArea".into(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            };
+
+            let controls = NativeAxProvider::controls_from_observation_for_bundle(
+                &observation,
+                "com.google.antigravity",
+            );
+            let labels: Vec<(&str, &str)> = controls
+                .iter()
+                .map(|c| (c.role.as_str(), c.label.as_str()))
+                .collect();
+            assert_eq!(
+                labels,
+                vec![
+                    ("AXHeading", "会话日志"),
+                    ("AXButton", "录制语音输入"),
+                    ("AXButton", "开启语音模式"),
+                    ("AXButton", "模型，当前：Gemini 4 Neon High"),
+                    ("AXButton", "切换侧边面板"),
+                    ("AXButton", "内置浏览器"),
+                    ("AXComboBox", "地址栏"),
+                    ("AXTextField", "搜索要打开的内容"),
+                    ("AXButton", "清除搜索"),
+                    ("AXButton", "预览"),
+                    ("AXButton", "旁路提问"),
+                    ("AXTextArea", "Side Question Input"),
+                ]
+            );
+        }
+
+        #[test]
+        fn antigravity_chinese_sidebar_observation_classifies_states_and_finds_controls() {
+            let sidebar = WindowObservation {
+                nodes: vec![
+                    node("win", "AXWindow", "", None, None, None, false),
+                    node(
+                        "toggle-sb",
+                        "AXButton",
+                        "切换侧边栏",
+                        Some(0),
+                        None,
+                        Some(false),
+                        true,
+                    ),
+                    node(
+                        "sec-proj",
+                        "AXButton",
+                        "项目管理",
+                        Some(0),
+                        None,
+                        None,
+                        true,
+                    ),
+                    node(
+                        "proj-hdr",
+                        "AXButton",
+                        "micro-input",
+                        Some(0),
+                        None,
+                        Some(true),
+                        true,
+                    ),
+                    node(
+                        "proj-opt",
+                        "AXButton",
+                        "项目选项",
+                        Some(0),
+                        None,
+                        None,
+                        true,
+                    ),
+                    node("list", "AXList", "", Some(0), None, None, false),
+                    node("row-run", "AXGroup", "", Some(5), None, None, false),
+                    node(
+                        "link-run",
+                        "AXLink",
+                        "运行中会话",
+                        Some(6),
+                        Some("https://127.0.0.1:4321/c/uuid-zh-run"),
+                        None,
+                        true,
+                    ),
+                    node(
+                        "btn-stop",
+                        "AXButton",
+                        "停止执行",
+                        Some(6),
+                        None,
+                        None,
+                        true,
+                    ),
+                    node("row-unread", "AXGroup", "", Some(5), None, None, false),
+                    node(
+                        "link-unread",
+                        "AXLink",
+                        "未读会话",
+                        Some(9),
+                        Some("https://127.0.0.1:4321/c/uuid-zh-unread"),
+                        None,
+                        true,
+                    ),
+                    node(
+                        "btn-arch-u",
+                        "AXButton",
+                        "归档会话",
+                        Some(9),
+                        None,
+                        None,
+                        true,
+                    ),
+                    node("row-read", "AXGroup", "", Some(5), None, None, false),
+                    node(
+                        "link-read",
+                        "AXLink",
+                        "已读会话",
+                        Some(12),
+                        Some("https://127.0.0.1:4321/c/uuid-zh-read"),
+                        None,
+                        true,
+                    ),
+                    node(
+                        "btn-arch-r",
+                        "AXButton",
+                        "归档会话",
+                        Some(12),
+                        None,
+                        None,
+                        true,
+                    ),
+                    node(
+                        "ts-read",
+                        "AXStaticText",
+                        "2 分钟前",
+                        Some(12),
+                        None,
+                        None,
+                        false,
+                    ),
+                    node(
+                        "see-all",
+                        "AXButton",
+                        "查看全部 (8)",
+                        Some(0),
+                        None,
+                        None,
+                        true,
+                    ),
+                ],
+            };
+
+            let rows = observe_sidebar_conversations(&sidebar, 4321);
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[0].conversation_id, "uuid-zh-run");
+            assert_eq!(
+                rows[0].state,
+                crate::session_navigation::SidebarRowVisualState::InProgress
+            );
+            assert_eq!(rows[1].conversation_id, "uuid-zh-unread");
+            assert_eq!(
+                rows[1].state,
+                crate::session_navigation::SidebarRowVisualState::UnreadIdle
+            );
+            assert_eq!(rows[2].conversation_id, "uuid-zh-read");
+            assert_eq!(
+                rows[2].state,
+                crate::session_navigation::SidebarRowVisualState::ReadIdle
+            );
+
+            assert_eq!(find_collapsed_toggle_sidebar_button(&sidebar), Some(1));
+            assert_eq!(
+                find_project_see_all_button(&sidebar, 4321, "/tmp/micro-input", None),
+                Some(16)
+            );
         }
     }
 }

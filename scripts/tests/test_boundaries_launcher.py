@@ -416,3 +416,59 @@ pub unsafe extern "C" fn guarded_ok<'a>(_x: &'a u8) -> i32 {
         self.assertTrue(any("store.statusMenu.hostExecutionEnabled" in v for v in app_violations))
         self.assertTrue(any("StatusItemIcon.presentation(" in v for v in app_violations))
         self.assertTrue(any("StatusItemIcon.toolTip(" in v for v in app_violations))
+
+    def test_rc16_scattered_antigravity_ax_label_guard(self):
+        scattered_prod = """
+fn is_toggle(label: &str) -> bool {
+    label == "Toggle Side Panel" || label == "Record voice memo"
+}
+"""
+        violations = module.find_scattered_antigravity_ax_label_violations(
+            "crates/mi-macos/src/managed_controls.rs",
+            scattered_prod,
+        )
+        self.assertEqual(len(violations), 2)
+        self.assertTrue(any("Toggle Side Panel" in v for v in violations))
+        self.assertTrue(any("Record voice memo" in v for v in violations))
+
+        self.assertEqual(
+            module.find_scattered_antigravity_ax_label_violations(
+                "crates/mi-macos/src/antigravity_ax_labels.rs",
+                scattered_prod,
+            ),
+            [],
+        )
+
+        test_only = """
+fn is_toggle(label: &str) -> bool {
+    crate::antigravity_ax_labels::is_toggle_side_panel(label)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sample() {
+        assert_eq!("Toggle Side Panel", "Toggle Side Panel");
+        assert_eq!("Conversation Log", "Conversation Log");
+    }
+}
+"""
+        self.assertEqual(
+            module.find_scattered_antigravity_ax_label_violations(
+                "crates/mi-macos/src/native_ax.rs",
+                test_only,
+            ),
+            [],
+        )
+
+        raw_literal_prod = """
+fn leaked() -> &'static str {
+    r#"Archive conversation"#
+}
+"""
+        raw_violations = module.find_scattered_antigravity_ax_label_violations(
+            "crates/mi-macos/src/executor.rs",
+            raw_literal_prod,
+        )
+        self.assertEqual(len(raw_violations), 1)
+        self.assertTrue(any("Archive conversation" in v for v in raw_violations))
