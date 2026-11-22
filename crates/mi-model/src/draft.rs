@@ -597,12 +597,41 @@ pub const DEVICE_KEY_TOKENS: [&str; 281] = [
     "MS_WHLU",
 ];
 
-/// Firmware 0.7.0-rc.16+ QMK mouse key tokens (19 entries, sorted ASCII order).
 pub const FIRMWARE_V070_MOUSE_TOKENS: [&str; 19] = [
     "MS_ACL0", "MS_ACL1", "MS_ACL2", "MS_BTN1", "MS_BTN2", "MS_BTN3", "MS_BTN4", "MS_BTN5",
     "MS_BTN6", "MS_BTN7", "MS_BTN8", "MS_DOWN", "MS_LEFT", "MS_RGHT", "MS_UP", "MS_WHLD",
     "MS_WHLL", "MS_WHLR", "MS_WHLU",
 ];
+
+const fn str_lt_ascii(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut i = 0;
+    while i < a.len() && i < b.len() {
+        if a[i] != b[i] {
+            return a[i] < b[i];
+        }
+        i += 1;
+    }
+    a.len() < b.len()
+}
+
+const fn is_strictly_sorted_ascii(tokens: &[&str]) -> bool {
+    let mut i = 1;
+    while i < tokens.len() {
+        if !str_lt_ascii(tokens[i - 1], tokens[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const _: () = {
+    assert!(is_strictly_sorted_ascii(&FIRMWARE_V063_TOKENS));
+    assert!(is_strictly_sorted_ascii(&FIRMWARE_V070_MOUSE_TOKENS));
+    assert!(is_strictly_sorted_ascii(&DEVICE_KEY_TOKENS));
+};
 
 pub fn canonical_firmware_token(token: &str) -> &str {
     match token {
@@ -1421,7 +1450,6 @@ impl Draft {
             Ok(())
         })
     }
-    /// Bind an existing local action using stable ownership IDs; no action is executed.
     pub fn bind_existing_action(
         &mut self,
         profile_id: &str,

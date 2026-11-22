@@ -1,5 +1,3 @@
-//! Per-device rolling-window write budget and connection request pacer.
-
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},

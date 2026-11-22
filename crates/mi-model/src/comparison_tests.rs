@@ -214,12 +214,16 @@ fn freshly_changed_identity_or_file_digest_rejects_future_application() {
     current["keymap"] = json!({"state":"present","sha1":"base","size":128});
     current["smart_actions"] = json!({"state":"missing"});
     local.baseline = Some(current.clone());
-    assert!(ensure_apply_baseline(&local, &current).is_ok());
+    assert!(ensure_apply_baseline(&local, FreshDeviceBaseline::from_fresh_query(&current)).is_ok());
     current["keymap"]["sha1"] = json!("changed");
-    assert!(ensure_apply_baseline(&local, &current).is_err());
+    assert!(
+        ensure_apply_baseline(&local, FreshDeviceBaseline::from_fresh_query(&current)).is_err()
+    );
     current["keymap"]["sha1"] = json!("base");
     current["device_identity"]["serial"] = json!("other");
-    assert!(ensure_apply_baseline(&local, &current).is_err());
+    assert!(
+        ensure_apply_baseline(&local, FreshDeviceBaseline::from_fresh_query(&current)).is_err()
+    );
 }
 
 #[test]

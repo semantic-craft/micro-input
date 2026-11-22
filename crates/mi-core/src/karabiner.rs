@@ -1,4 +1,3 @@
-//! Persistent device-scoped swallowing rules and observable Karabiner readiness.
 use mi_model::{
     direct_controls::{CONTROL_BINDINGS, DIRECT_CONTROLS},
     host_router::BottomRowLayout,

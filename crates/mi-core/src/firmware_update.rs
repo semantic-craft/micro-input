@@ -151,13 +151,16 @@ impl FirmwareUpdater {
         if !port.matches_expected_serial(self.expected_serial.as_deref()) {
             return Err("所选串口序列号与已准备设备不匹配，请重新选择".into());
         }
+        let authorization =
+            firmware_flash::ConfirmedFlashAuthorization::new(port, true, self.reserved())?;
         let backup_root = root.join("firmware-backups");
         self.projection.backup_path = None;
         let tx = self.start("connecting", "正在连接所选设备；完整备份后才会写入…");
         std::thread::spawn(move || {
-            let result = firmware_flash::flash(&port, &firmware, &backup_root, |progress| {
-                let _ = tx.send(UpdateEvent::Progress(progress));
-            });
+            let result =
+                firmware_flash::flash(&authorization, &firmware, &backup_root, |progress| {
+                    let _ = tx.send(UpdateEvent::Progress(progress));
+                });
             let _ = tx.send(UpdateEvent::Flashed(result));
         });
         Ok(())

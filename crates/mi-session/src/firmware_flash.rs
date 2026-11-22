@@ -330,14 +330,39 @@ impl<F: FnMut(FlashProgress)> ProgressCallbacks for Progress<'_, F> {
     }
 }
 
-/// The caller must obtain an explicit model/port confirmation and suspend its HID sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedFlashAuthorization {
+    port: BootloaderPort,
+}
+
+impl ConfirmedFlashAuthorization {
+    pub fn new(
+        port: BootloaderPort,
+        model_and_port_confirmed: bool,
+        hid_sessions_suspended: bool,
+    ) -> Result<Self, String> {
+        if !hid_sessions_suspended {
+            return Err("请先暂停设备控制并准备更新".into());
+        }
+        if !model_and_port_confirmed {
+            return Err("请明确确认目标型号与引导模式串口".into());
+        }
+        Ok(Self { port })
+    }
+
+    pub fn port(&self) -> &BootloaderPort {
+        &self.port
+    }
+}
+
 /// Success verifies flash bytes, not the restarted firmware or preserved device configuration.
 pub fn flash(
-    port: &BootloaderPort,
+    authorization: &ConfirmedFlashAuthorization,
     firmware: &DownloadedFirmware,
     backup_root: &Path,
     mut report: impl FnMut(FlashProgress),
 ) -> Result<FlashReceipt, String> {
+    let port = authorization.port();
     let bytes = image_bytes(firmware)?;
     if !enumerate_bootloaders()?.contains(port) {
         return Err("所选引导端口已经断开或身份变化，请重新选择".into());
@@ -734,5 +759,22 @@ mod tests {
         assert_eq!(value["receipt"]["status"], "verified");
         assert!(value["error"].is_null());
         assert!(!stale.exists());
+    }
+
+    #[test]
+    fn unconfirmed_or_unsuspended_flash_authorization_is_rejected_before_opening_port() {
+        let port = BootloaderPort {
+            path: "/dev/cu.usbmodem-nonexistent".into(),
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: Some("AABBCC112233".into()),
+            manufacturer: Some("Espressif".into()),
+            product: None,
+        };
+        assert!(ConfirmedFlashAuthorization::new(port.clone(), false, true).is_err());
+        assert!(ConfirmedFlashAuthorization::new(port.clone(), true, false).is_err());
+        assert!(ConfirmedFlashAuthorization::new(port.clone(), false, false).is_err());
+        let authorized = ConfirmedFlashAuthorization::new(port.clone(), true, true).unwrap();
+        assert_eq!(authorized.port(), &port);
     }
 }

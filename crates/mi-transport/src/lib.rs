@@ -1,4 +1,3 @@
-//! R-D01/R-D02/R-D07/R-N02: discovery, USB HID access, and synthetic transport.
 pub mod budget;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -154,7 +153,6 @@ pub trait HidLink: Send + Sync {
     fn backend(&self) -> LinkBackend {
         LinkBackend::Unverified
     }
-    /// Whether this link was opened exclusively on the verified USB vendor interface.
     fn is_exclusive_vendor(&self) -> bool {
         false
     }
@@ -830,7 +828,6 @@ impl HidLink for MacLink {
         }
     }
 }
-/// R-N04: programmable mock, never an alternate physical wire implementation.
 pub struct MockLink {
     incoming: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     pub inject: mpsc::UnboundedSender<Vec<u8>>,
