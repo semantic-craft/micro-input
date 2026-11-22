@@ -50,6 +50,14 @@ impl DeviceSession {
     /// the bootloader separately; timeout/disconnect must never trigger replay.
     pub async fn enter_firmware_bootloader(&self) -> Result<(), SessionError> {
         self.guarded(async {
+            self.require_firmware_bootloader_device()?;
+            if self.firmware_bootloader_requested.load(Ordering::SeqCst) {
+                return Err(SessionError::Config(
+                    "本次连接已经请求进入固件更新模式；不会重发".into(),
+                ));
+            }
+            self.acquire_write_budget("sys.bootloader", WritePriority::Normal)
+                .await?;
             let mut queue = self.queue.lock().await;
             self.require_firmware_bootloader_device()?;
             if self

@@ -1426,3 +1426,356 @@ async fn native_mutation_requires_exclusive_vendor_link() {
     );
     session.shutdown().await;
 }
+
+#[test]
+fn rpc_traffic_classification_separates_readonly_config_chunks_and_control_writes() {
+    for method in [
+        "sys.version",
+        "device.status",
+        "fs.list",
+        "fs.read",
+        "fs.readbin",
+        "pm.state",
+    ] {
+        assert_eq!(classify_rpc_method(method), RpcTrafficClass::ReadOnly);
+        assert_eq!(classify_rpc_call(method, false), RpcTrafficClass::ReadOnly);
+    }
+    for method in ["fs.writebin", "fs.txbegin", "fs.txcommit"] {
+        assert_eq!(classify_rpc_method(method), RpcTrafficClass::ConfigChunk);
+    }
+    for method in [
+        "kb.pl.set",
+        "kb.sa.rgb",
+        "v.oai.thstatus",
+        "v.oai.rgbcfg",
+        "lights.preview",
+        "mouse.config",
+        "joystick.deadzone",
+        "pm.config",
+        "device.name",
+        "sys.bootloader",
+    ] {
+        assert_eq!(classify_rpc_method(method), RpcTrafficClass::ControlWrite);
+    }
+    for method in [
+        "mouse.config",
+        "joystick.deadzone",
+        "pm.config",
+        "device.name",
+    ] {
+        assert_eq!(classify_rpc_call(method, false), RpcTrafficClass::ReadOnly);
+        assert_eq!(
+            classify_rpc_call(method, true),
+            RpcTrafficClass::ControlWrite
+        );
+    }
+}
+
+#[tokio::test]
+async fn control_write_exhaustion_returns_device_rate_limited_without_disconnecting_or_blocking_reads(
+) {
+    struct ExclusiveNativeLink(Arc<MockLink>);
+    #[async_trait::async_trait]
+    impl HidLink for ExclusiveNativeLink {
+        fn backend(&self) -> mi_transport::LinkBackend {
+            mi_transport::LinkBackend::MacHidapi267Numbered
+        }
+        fn is_exclusive_vendor(&self) -> bool {
+            true
+        }
+        async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
+            self.0.write(report).await
+        }
+        async fn read(&self) -> Result<Vec<u8>, TransportError> {
+            self.0.read().await
+        }
+        fn close(&self) {
+            self.0.close();
+        }
+    }
+
+    let (raw, mut rx) = MockLink::new();
+    let budget = Arc::new(mi_transport::budget::DeviceWriteBudget::new(
+        mi_transport::budget::WriteBudgetPolicy {
+            window: Duration::from_secs(10),
+            max_writes: 2,
+            min_spacing: Duration::ZERO,
+            enabled: true,
+        },
+    ));
+    let session = DeviceSession::new_with_budget(
+        Arc::new(ExclusiveNativeLink(raw.clone())),
+        Box::new(TestFramer),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_millis(200),
+            interval: Duration::ZERO,
+        },
+        Arc::clone(&budget),
+    );
+
+    let responder_link = Arc::clone(&raw);
+    let responder = tokio::spawn(async move {
+        while let Some(raw_req) = rx.recv().await {
+            let req: Value = serde_json::from_slice(&raw_req).unwrap();
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap();
+            let result = match method {
+                "device.status" => json!({
+                    "version": "0.7.0-rc.16",
+                    "profile_index": 0,
+                    "layer_index": 1
+                }),
+                _ => json!({}),
+            };
+            responder_link
+                .inject
+                .send(
+                    serde_json::to_vec(&json!({
+                        "id": id,
+                        "method": method,
+                        "result": result
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+    });
+
+    session.read_identity_info().await.unwrap();
+    assert_eq!(
+        budget.snapshot(Instant::now()).used_in_window,
+        0,
+        "read-only device.status must not consume write budget"
+    );
+
+    let update = mi_proto::v070_capabilities::SaRgbUpdate::reset(vec![7057]);
+    session.set_sa_rgb(&update).await.unwrap();
+    session
+        .send_oai_thstatus(&[mi_proto::lighting_candidate::OaiKeyStatusEntry::new(
+            "AG00", 0x0088FF,
+        )])
+        .await
+        .unwrap();
+    assert_eq!(budget.snapshot(Instant::now()).used_in_window, 2);
+
+    let third = session.set_sa_rgb(&update).await;
+    assert!(
+        matches!(
+            third,
+            Err(SessionError::DeviceRateLimited {
+                method: "kb.sa.rgb",
+                retry_after
+            }) if retry_after > Duration::ZERO
+        ),
+        "expected DeviceRateLimited once rolling window is exhausted, got {third:?}"
+    );
+    assert!(
+        !session.is_disconnected(),
+        "rate limiting must keep the DeviceSession alive"
+    );
+
+    let status = session.read_identity_info().await;
+    assert!(
+        status.is_ok(),
+        "read-only RPC must succeed immediately even when write budget is exhausted"
+    );
+    assert_eq!(budget.snapshot(Instant::now()).used_in_window, 2);
+
+    responder.abort();
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn ble_spacing_wait_does_not_block_reads_and_urgent_clear_bypasses_soft_spacing() {
+    struct ExclusiveNativeLink(Arc<MockLink>);
+    #[async_trait::async_trait]
+    impl HidLink for ExclusiveNativeLink {
+        fn backend(&self) -> mi_transport::LinkBackend {
+            mi_transport::LinkBackend::MacHidapi267Numbered
+        }
+        fn is_exclusive_vendor(&self) -> bool {
+            true
+        }
+        async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
+            self.0.write(report).await
+        }
+        async fn read(&self) -> Result<Vec<u8>, TransportError> {
+            self.0.read().await
+        }
+        fn close(&self) {
+            self.0.close();
+        }
+    }
+
+    let (raw, mut rx) = MockLink::new();
+    let budget = Arc::new(mi_transport::budget::DeviceWriteBudget::new(
+        mi_transport::budget::WriteBudgetPolicy {
+            window: Duration::from_secs(10),
+            max_writes: 40,
+            min_spacing: Duration::from_millis(250),
+            enabled: true,
+        },
+    ));
+    let session = DeviceSession::new_with_budget(
+        Arc::new(ExclusiveNativeLink(raw.clone())),
+        Box::new(TestFramer),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_millis(600),
+            interval: Duration::ZERO,
+        },
+        Arc::clone(&budget),
+    );
+
+    let responder_link = Arc::clone(&raw);
+    let responder = tokio::spawn(async move {
+        while let Some(raw_req) = rx.recv().await {
+            let req: Value = serde_json::from_slice(&raw_req).unwrap();
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap();
+            let result = match method {
+                "device.status" => json!({
+                    "version": "0.7.0-rc.16",
+                    "profile_index": 0,
+                    "layer_index": 1
+                }),
+                _ => json!({}),
+            };
+            responder_link
+                .inject
+                .send(
+                    serde_json::to_vec(&json!({
+                        "id": id,
+                        "method": method,
+                        "result": result
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+    });
+
+    session.read_identity_info().await.unwrap();
+    let update = mi_proto::v070_capabilities::SaRgbUpdate::reset(vec![7057]);
+    session.set_sa_rgb(&update).await.unwrap();
+
+    let urgent_start = Instant::now();
+    session
+        .set_sa_rgb_with_priority(&update, mi_transport::budget::WritePriority::UrgentClear)
+        .await
+        .unwrap();
+    assert!(
+        urgent_start.elapsed() < Duration::from_millis(120),
+        "UrgentClear must bypass soft 250ms BLE spacing"
+    );
+
+    let slow_session = Arc::clone(&session);
+    let slow_update = update.clone();
+    let slow_write = tokio::spawn(async move { slow_session.set_sa_rgb(&slow_update).await });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let read_start = Instant::now();
+    session.read_identity_info().await.unwrap();
+    assert!(
+        read_start.elapsed() < Duration::from_millis(100),
+        "read-only query must not be head-of-line blocked by a write sleeping on BLE spacing"
+    );
+
+    slow_write.await.unwrap().unwrap();
+    responder.abort();
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn multi_chunk_config_write_is_not_charged_per_chunk() {
+    struct ExclusiveNativeLink(Arc<MockLink>);
+    #[async_trait::async_trait]
+    impl HidLink for ExclusiveNativeLink {
+        fn backend(&self) -> mi_transport::LinkBackend {
+            mi_transport::LinkBackend::MacHidapi267Numbered
+        }
+        fn is_exclusive_vendor(&self) -> bool {
+            true
+        }
+        async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
+            self.0.write(report).await
+        }
+        async fn read(&self) -> Result<Vec<u8>, TransportError> {
+            self.0.read().await
+        }
+        fn close(&self) {
+            self.0.close();
+        }
+    }
+
+    let (raw, mut rx) = MockLink::new();
+    let budget = Arc::new(mi_transport::budget::DeviceWriteBudget::new(
+        mi_transport::budget::WriteBudgetPolicy {
+            window: Duration::from_secs(10),
+            max_writes: 1,
+            min_spacing: Duration::from_millis(250),
+            enabled: true,
+        },
+    ));
+    let session = DeviceSession::new_with_budget(
+        Arc::new(ExclusiveNativeLink(raw.clone())),
+        Box::new(TestFramer),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_millis(500),
+            interval: Duration::ZERO,
+        },
+        Arc::clone(&budget),
+    );
+
+    let responder_link = Arc::clone(&raw);
+    let responder = tokio::spawn(async move {
+        while let Some(raw_req) = rx.recv().await {
+            let req: Value = serde_json::from_slice(&raw_req).unwrap();
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap();
+            let result = match method {
+                "fs.txbegin" => json!({"tx": 7}),
+                _ => json!({"ok": true}),
+            };
+            responder_link
+                .inject
+                .send(
+                    serde_json::to_vec(&json!({
+                        "id": id,
+                        "method": method,
+                        "result": result
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+    });
+
+    let payload = vec![b'a'; 3072 * 3 + 128];
+    session
+        .wait_for_write_capacity("fs.txbegin", WritePriority::Normal)
+        .await
+        .unwrap();
+    {
+        let mut q = session.queue.lock().await;
+        session.charge_logical_config_write("fs.txbegin").unwrap();
+        let tx = session.exchange_tx_begin(&mut q).await.unwrap();
+        for offset in (0..payload.len()).step_by(3072) {
+            session
+                .exchange_keymap_with_tx(&mut q, &payload, offset, Some(tx))
+                .await
+                .unwrap();
+        }
+        session.exchange_tx_commit(&mut q, tx).await.unwrap();
+    }
+    assert_eq!(
+        budget.snapshot(Instant::now()).used_in_window,
+        1,
+        "multi-chunk txbegin + 4x fs.writebin + txcommit must only charge 1 logical write"
+    );
+
+    responder.abort();
+    session.shutdown().await;
+}

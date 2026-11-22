@@ -170,6 +170,10 @@ impl ConfigWriter {
                         return Err(SessionError::Config("active indices changed".into()));
                     }
                 }
+                failure = Failure::RequestBudget;
+                self.session
+                    .wait_for_write_capacity("fs.writebin", WritePriority::Normal)
+                    .await?;
                 let mut q = self.session.queue.lock().await;
                 failure = Failure::Transport;
                 let current = self.session.read_files_locked(&mut q).await?;
@@ -193,6 +197,7 @@ impl ConfigWriter {
                 if chunks == 0 || usize::from(q.next_id) + chunks + reads > 999 {
                     return Err(SessionError::Config("request budget insufficient".into()));
                 }
+                self.session.charge_logical_config_write("fs.writebin")?;
                 if let Some(snapshot) = self.session.snapshot.lock().unwrap().as_mut() {
                     snapshot.stale = true;
                 }
@@ -507,6 +512,8 @@ impl DeviceSession {
         let mut sent = false;
         let result = self
             .guarded(async {
+                self.wait_for_write_capacity("fs.txbegin", WritePriority::Normal)
+                    .await?;
                 let mut queue = self.queue.lock().await;
                 let smart = smart_bytes(&prepared.original);
                 let current = self.read_files_locked(&mut queue).await?;
@@ -525,6 +532,7 @@ impl DeviceSession {
                 )?;
                 let path = prepared.backup.clone();
                 if prepared.candidate != prepared.original.keymap.bytes.as_ref() {
+                    self.charge_logical_config_write("fs.txbegin")?;
                     sent = true;
                     self.stage_three_layer_keymap(&mut queue, &prepared.candidate, smart)
                         .await?;
@@ -710,6 +718,8 @@ impl DeviceSession {
                 .ok_or_else(|| SessionError::Config("写前恢复副本不是六层方案".into()))?;
         }
         self.guarded(async {
+            self.wait_for_write_capacity("fs.txbegin", WritePriority::Normal)
+                .await?;
             let mut queue = self.queue.lock().await;
             self.three_layer_position(&mut queue).await?;
             let current = self.read_files_locked(&mut queue).await?;
@@ -728,6 +738,7 @@ impl DeviceSession {
                     "设备与本次候选不符，拒绝覆盖恢复".into(),
                 ));
             }
+            self.charge_logical_config_write("fs.txbegin")?;
             self.stage_three_layer_keymap(&mut queue, &original, smart.as_deref())
                 .await
         })
@@ -763,6 +774,8 @@ impl DeviceSession {
             .map_err(SessionError::Config)?
             .ok_or_else(|| SessionError::Config("恢复副本不是三层方案".into()))?;
         self.guarded(async {
+            self.wait_for_write_capacity("fs.txbegin", WritePriority::Normal)
+                .await?;
             let mut queue = self.queue.lock().await;
             self.three_layer_position(&mut queue).await?;
             let current = self.read_files_locked(&mut queue).await?;
@@ -774,6 +787,7 @@ impl DeviceSession {
                     "设备与本次三层候选不符，拒绝覆盖恢复".into(),
                 ));
             }
+            self.charge_logical_config_write("fs.txbegin")?;
             self.stage_three_layer_keymap(&mut queue, &original, smart.as_deref())
                 .await
         })

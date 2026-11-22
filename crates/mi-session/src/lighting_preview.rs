@@ -161,6 +161,26 @@ impl Preview {
             let mut ready = Some(ready_tx);
             let mut failed = false;
             'preview: loop {
+                let budget_result = loop {
+                    tokio::select! { biased;
+                        _ = session.wait_disconnected() => { failed = true; break 'preview; }
+                        _ = tokio::time::sleep_until(deadline) => break 'preview,
+                        _ = async { if let Some(tx) = ready.as_mut() { tx.closed().await; } else { std::future::pending::<()>().await; } } => break 'preview,
+                        changed = rx.changed() => {
+                            if changed.is_err() || rx.borrow().is_none() { break 'preview; }
+                        }
+                        res = session.acquire_write_budget("lights.preview", WritePriority::Normal) => break res,
+                    }
+                };
+                if let Err(error) = budget_result {
+                    if let Some(tx) = ready.take() {
+                        let _ = tx.send(Err(error.to_string()));
+                    }
+                    if !matches!(error, SessionError::DeviceRateLimited { .. }) {
+                        failed = true;
+                    }
+                    break;
+                }
                 let mut q = loop {
                     tokio::select! { biased;
                         _ = session.wait_disconnected() => { failed = true; break 'preview; }

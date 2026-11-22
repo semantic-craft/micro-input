@@ -3,7 +3,9 @@ use super::RoutingContext;
 use mi_model::direct_controls::{CONTROL_BINDINGS, DIRECT_CONTROLS};
 use mi_proto::lighting_candidate::OaiKeyStatusEntry;
 use mi_session::DeviceSession;
-use mi_transport::{MacTransport, TargetKeyboard, UserCommandReceiver};
+use mi_transport::{
+    budget::DeviceBudgetRegistry, MacTransport, TargetKeyboard, UserCommandReceiver,
+};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
@@ -24,12 +26,13 @@ async fn open_vendor_session(
     transport: Arc<MacTransport>,
     target: TargetKeyboard,
     preferred_serial: Option<String>,
+    budget_registry: Arc<DeviceBudgetRegistry>,
 ) -> Option<Arc<DeviceSession>> {
     let session = tokio::task::spawn_blocking(move || {
         mi_transport::discover_target_keyboard_preferred(preferred_serial.as_deref())
             .ok()
             .filter(|d| d.location_id == target.location_id)
-            .and_then(|d| connect(transport.as_ref(), &d).ok())
+            .and_then(|d| connect(transport.as_ref(), &d, budget_registry.as_ref()).ok())
             .map(|(session, _)| session)
     })
     .await
@@ -344,6 +347,7 @@ pub(super) struct VendorBridgeSpawnConfig {
     pub(super) target: TargetKeyboard,
     pub(super) preferred_serial: Option<String>,
     pub(super) transport: Option<Arc<MacTransport>>,
+    pub(super) budget_registry: Arc<DeviceBudgetRegistry>,
     pub(super) allow_reconnect: bool,
 }
 
@@ -490,6 +494,7 @@ impl VendorBridge {
             target,
             preferred_serial,
             transport,
+            budget_registry,
             allow_reconnect,
         } = cfg;
         self.spawn_with_reopen(
@@ -502,7 +507,10 @@ impl VendorBridge {
                 let transport = transport.clone();
                 let target = target.clone();
                 let preferred_serial = preferred_serial.clone();
-                async move { open_vendor_session(transport?, target, preferred_serial).await }
+                let budget_registry = Arc::clone(&budget_registry);
+                async move {
+                    open_vendor_session(transport?, target, preferred_serial, budget_registry).await
+                }
             },
         );
     }

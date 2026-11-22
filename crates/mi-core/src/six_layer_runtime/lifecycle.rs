@@ -4,7 +4,10 @@ use super::{RoutingContext, RunningSixLayer};
 use crate::karabiner::{self, ConfigPatch, Readiness, ReloadBaseline};
 use mi_model::apply::AppliedSixLayerPlan;
 use mi_session::DeviceSession;
-use mi_transport::{HidCandidate, HidTransport, MacTransport, TargetKeyboard, UserCommandReceiver};
+use mi_transport::{
+    budget::{DeviceBudgetKey, DeviceBudgetRegistry, WriteBudgetPolicy},
+    HidCandidate, HidTransport, MacTransport, TargetKeyboard, UserCommandReceiver,
+};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -21,6 +24,7 @@ use std::{
 pub(super) fn connect(
     transport: &dyn HidTransport,
     target: &TargetKeyboard,
+    budget_registry: &DeviceBudgetRegistry,
 ) -> Result<(Arc<DeviceSession>, HidCandidate), String> {
     let candidates = transport.enumerate().map_err(|e| e.to_string())?;
     let candidate = candidates
@@ -35,11 +39,19 @@ pub(super) fn connect(
         link.close();
         return Err("未取得 USB 专用接口独占".into());
     }
-    let session = DeviceSession::new(
+    let key = DeviceBudgetKey::from_identity(
+        candidate.serial_number.as_deref(),
+        Some(target.location_id),
+        &candidate.path,
+    );
+    let policy = WriteBudgetPolicy::for_transport(candidate.transport_hint.clone());
+    let budget = budget_registry.budget_for(key, policy);
+    let session = DeviceSession::new_with_budget(
         link,
         Box::new(mi_proto::NativeFramer::default()),
         Arc::new(mi_session::ReadOnlySchema),
         mi_session::SessionConfig::default(),
+        budget,
     );
     Ok((session, candidate))
 }
@@ -88,6 +100,7 @@ pub async fn apply(
     plan: AppliedSixLayerPlan,
     mut saved: SavedSixLayerState,
     transport: Arc<MacTransport>,
+    budget_registry: Arc<DeviceBudgetRegistry>,
 ) -> Result<RunningSixLayer, String> {
     let state_path = document_dir.join("six-layer-runtime.json");
     plan.validate_current()?;
@@ -96,7 +109,7 @@ pub async fn apply(
         .map_err(|e| e.to_string())?;
     let receiver = Arc::new(UserCommandReceiver::bind_default().map_err(|e| e.to_string())?);
     let patch = prepare_apply_karabiner_patch(&saved, &target, &receiver, plan.bottom_row_layout)?;
-    let (session, candidate) = connect(transport.as_ref(), &target)?;
+    let (session, candidate) = connect(transport.as_ref(), &target, budget_registry.as_ref())?;
     let layer_modes: [Option<String>; 6] = plan
         .board_layer_joystick_modes()
         .map(|mode| mode.map(str::to_owned));
@@ -223,6 +236,7 @@ pub async fn apply(
             layer as u8,
         );
         running.transport = Some(transport);
+        running.budget_registry = budget_registry;
         Ok(running)
     }
     .await;
@@ -341,6 +355,7 @@ pub(super) fn new_running(
         vendor_bridge,
         firmware_version,
         transport: None,
+        budget_registry: Arc::new(DeviceBudgetRegistry::new()),
         stop: Arc::new(AtomicBool::new(false)),
         monitor: None,
         executor: None,
@@ -394,6 +409,7 @@ pub async fn resume(
     document_dir: &Path,
     mut saved: SavedSixLayerState,
     transport: Arc<MacTransport>,
+    budget_registry: Arc<DeviceBudgetRegistry>,
 ) -> Result<RunningSixLayer, String> {
     let mut installation = saved
         .installation
@@ -411,7 +427,7 @@ pub async fn resume(
     let preferred_serial = read_preferred_serial(document_dir);
     let target = mi_transport::discover_target_keyboard_preferred(preferred_serial.as_deref())
         .map_err(|e| e.to_string())?;
-    let (session, candidate) = connect(transport.as_ref(), &target)?;
+    let (session, candidate) = connect(transport.as_ref(), &target, budget_registry.as_ref())?;
     let layer = match inspect_resume_snapshot(
         &session,
         &expected,
@@ -466,6 +482,7 @@ pub async fn resume(
             layer,
         );
         running.transport = Some(transport);
+        running.budget_registry = budget_registry;
         Ok(running)
     }
     .await;
@@ -518,6 +535,7 @@ pub async fn restore(
     document_dir: &Path,
     mut saved: SavedSixLayerState,
     transport: Arc<MacTransport>,
+    budget_registry: Arc<DeviceBudgetRegistry>,
 ) -> Result<(), String> {
     let installation = saved.installation.clone().ok_or("没有可恢复的六层记录")?;
     let verified_backup = validate_backup_within_document_dir(document_dir, &installation.backup)?;
@@ -527,7 +545,7 @@ pub async fn restore(
     if target.location_id != installation.target.location_id {
         return Err("键盘 USB 位置已变化，未自动恢复".into());
     }
-    let (session, _) = connect(transport.as_ref(), &target)?;
+    let (session, _) = connect(transport.as_ref(), &target, budget_registry.as_ref())?;
     with_verification_session(&session, async {
         session
             .restore_six_layer_backup(&verified_backup)
