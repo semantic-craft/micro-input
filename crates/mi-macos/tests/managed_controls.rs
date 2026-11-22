@@ -1246,7 +1246,10 @@ fn manual_managed_ax_control() {
     use mi_macos::MacOsSystemDriver;
     assert_eq!(std::env::var("MI_LIVE_AX_VERIFY").as_deref(), Ok("1"));
     let adapter = std::env::var("MI_LIVE_AX_ADAPTER").expect("MI_LIVE_AX_ADAPTER is required");
-    assert!(matches!(adapter.as_str(), "antigravity" | "dsh-desktop"));
+    assert!(matches!(
+        adapter.as_str(),
+        "antigravity" | "dsh-desktop" | "grokbot"
+    ));
     let action = std::env::var("MI_LIVE_AX_ACTION").unwrap_or_else(|_| "inspect".into());
     let driver = MacOsSystemDriver::default();
     match action.as_str() {
@@ -5618,4 +5621,736 @@ fn antigravity_chinese_model_picker_and_side_panel_and_browser_and_side_question
     assert!(sq_events.contains(&"press:旁路提问".to_string()));
     assert!(sq_events.contains(&"press:新建支线提问".to_string()));
     assert!(sq_events.contains(&"focus:30".to_string()));
+}
+
+#[derive(Clone, Default)]
+struct GrokBotTestProvider(Arc<Mutex<GrokBotTestState>>);
+
+struct GrokBotTestState {
+    window: ManagedWindow,
+    events: Vec<String>,
+    retained_targets: Vec<ManagedWindowIdentity>,
+    reads_until_idle: usize,
+    idle_label: String,
+    stop_label: String,
+    finishing_label: String,
+    send_label: String,
+    voice_start_label: String,
+    voice_end_label: String,
+    reappear_voice_start_on_hangup: bool,
+    freeze_on_send: bool,
+    on_send_transitions_to_finishing: bool,
+}
+
+impl Default for GrokBotTestState {
+    fn default() -> Self {
+        Self {
+            window: ManagedWindow {
+                identity: ManagedWindowIdentity {
+                    bundle_id: "com.anysphere.sand".into(),
+                    pid: 9205,
+                    window_id: 77,
+                    scope_id: 0,
+                    title: "Grok Bot".into(),
+                },
+                controls: Vec::new(),
+            },
+            events: Vec::new(),
+            retained_targets: Vec::new(),
+            reads_until_idle: 0,
+            idle_label: "Start voice input".into(),
+            stop_label: "Stop dictation".into(),
+            finishing_label: "Transcribing voice input…".into(),
+            send_label: "Send message".into(),
+            voice_start_label: "Start voice chat".into(),
+            voice_end_label: "Hang up".into(),
+            reappear_voice_start_on_hangup: true,
+            freeze_on_send: false,
+            on_send_transitions_to_finishing: true,
+        }
+    }
+}
+
+impl GrokBotTestProvider {
+    fn new(
+        idle: &str,
+        stop: &str,
+        finishing: &str,
+        send: &str,
+        voice_start: &str,
+        voice_end: &str,
+    ) -> Self {
+        let mut st = GrokBotTestState {
+            idle_label: idle.into(),
+            stop_label: stop.into(),
+            finishing_label: finishing.into(),
+            send_label: send.into(),
+            voice_start_label: voice_start.into(),
+            voice_end_label: voice_end.into(),
+            ..Default::default()
+        };
+        st.window.controls = vec![
+            ManagedControl {
+                id: 1,
+                role: "AXTextArea".into(),
+                label: "Prompt".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: false,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 2,
+                role: "AXButton".into(),
+                label: idle.into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 3,
+                role: "AXButton".into(),
+                label: voice_start.into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        Self(Arc::new(Mutex::new(st)))
+    }
+
+    fn controls(&self) -> ManagedAxControls<Self> {
+        ManagedAxControls::with_readback_timeout(self.clone(), Duration::from_millis(160))
+    }
+
+    fn events(&self) -> Vec<String> {
+        self.0.lock().unwrap().events.clone()
+    }
+}
+
+impl ManagedAxProvider for GrokBotTestProvider {
+    fn retain_target(&mut self, target: &ManagedWindowIdentity) -> Result<(), String> {
+        let mut st = self.0.lock().unwrap();
+        st.retained_targets.push(target.clone());
+        Ok(())
+    }
+
+    fn release_target(&mut self, target: &ManagedWindowIdentity) {
+        let mut st = self.0.lock().unwrap();
+        st.retained_targets.retain(|t| t != target);
+    }
+
+    fn capture(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
+        let mut st = self.0.lock().unwrap();
+        st.events.push(format!("capture:{bundle_id}"));
+        Ok(st.window.clone())
+    }
+
+    fn capture_full_window(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
+        let mut st = self.0.lock().unwrap();
+        st.events.push(format!("capture_full_window:{bundle_id}"));
+        Ok(st.window.clone())
+    }
+
+    fn read(&mut self, _target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
+        let mut st = self.0.lock().unwrap();
+        if st.reads_until_idle > 0 {
+            st.reads_until_idle -= 1;
+            if st.reads_until_idle == 0 {
+                let idle_label = st.idle_label.clone();
+                let send_label = st.send_label.clone();
+                st.window.controls.retain(|c| c.id != 2 && c.id != 4);
+                st.window.controls.push(ManagedControl {
+                    id: 2,
+                    role: "AXButton".into(),
+                    label: idle_label,
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+                st.window.controls.push(ManagedControl {
+                    id: 4,
+                    role: "AXButton".into(),
+                    label: send_label,
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        }
+        Ok(st.window.clone())
+    }
+
+    fn press(&mut self, _target: &ManagedWindowIdentity, control: u64) -> Result<(), String> {
+        let mut st = self.0.lock().unwrap();
+        let label = st
+            .window
+            .controls
+            .iter()
+            .find(|c| c.id == control)
+            .map(|c| c.label.clone())
+            .ok_or_else(|| "blocked:ax_control_removed".to_string())?;
+        st.events.push(format!("press:{label}"));
+        if label == st.idle_label {
+            let stop_label = st.stop_label.clone();
+            let send_label = st.send_label.clone();
+            st.window
+                .controls
+                .retain(|c| c.id != 2 && c.id != 3 && c.id != 4);
+            st.window.controls.push(ManagedControl {
+                id: 2,
+                role: "AXButton".into(),
+                label: stop_label,
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            });
+            st.window.controls.push(ManagedControl {
+                id: 4,
+                role: "AXButton".into(),
+                label: send_label,
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            });
+        } else if label == st.stop_label {
+            let idle_label = st.idle_label.clone();
+            st.window.controls.retain(|c| c.id != 2 && c.id != 4);
+            st.window.controls.push(ManagedControl {
+                id: 2,
+                role: "AXButton".into(),
+                label: idle_label,
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            });
+        } else if label == st.send_label {
+            if !st.freeze_on_send {
+                let was_recording = st.window.controls.iter().any(|c| c.label == st.stop_label);
+                if was_recording && st.on_send_transitions_to_finishing {
+                    let finishing_label = st.finishing_label.clone();
+                    st.window.controls.retain(|c| c.id != 2 && c.id != 4);
+                    st.window.controls.push(ManagedControl {
+                        id: 2,
+                        role: "AXGroup".into(),
+                        label: finishing_label,
+                        enabled: true,
+                        pressable: false,
+                        editable: false,
+                        focused: false,
+                        expanded: None,
+                    });
+                } else {
+                    let idle_label = st.idle_label.clone();
+                    st.window.controls.retain(|c| c.id != 2 && c.id != 4);
+                    st.window.controls.push(ManagedControl {
+                        id: 2,
+                        role: "AXButton".into(),
+                        label: idle_label,
+                        enabled: true,
+                        pressable: true,
+                        editable: false,
+                        focused: false,
+                        expanded: None,
+                    });
+                }
+            }
+        } else if label == st.voice_start_label {
+            let end_label = st.voice_end_label.clone();
+            st.window.controls.retain(|c| c.id != 3);
+            st.window.controls.push(ManagedControl {
+                id: 5,
+                role: "AXButton".into(),
+                label: end_label,
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            });
+        } else if label == st.voice_end_label {
+            let start_label = st.voice_start_label.clone();
+            let reappear = st.reappear_voice_start_on_hangup;
+            st.window.controls.retain(|c| c.id != 5);
+            if reappear {
+                st.window.controls.push(ManagedControl {
+                    id: 3,
+                    role: "AXButton".into(),
+                    label: start_label,
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn focus(&mut self, _target: &ManagedWindowIdentity, control: u64) -> Result<(), String> {
+        let mut st = self.0.lock().unwrap();
+        st.events.push(format!("focus:{control}"));
+        if let Some(c) = st.window.controls.iter_mut().find(|c| c.id == control) {
+            c.focused = true;
+        }
+        Ok(())
+    }
+
+    fn scroll(
+        &mut self,
+        _target: &ManagedWindowIdentity,
+        _request: &DialScrollRequest,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn shortcut(
+        &mut self,
+        _target: &ManagedWindowIdentity,
+        _control: u64,
+        _key: u16,
+        _modifiers: &[String],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn insert_text(
+        &mut self,
+        _target: &ManagedWindowIdentity,
+        _control: u64,
+        text: &str,
+    ) -> Result<(), String> {
+        self.0.lock().unwrap().events.push(format!("insert:{text}"));
+        Ok(())
+    }
+
+    fn submit(&mut self, _target: &ManagedWindowIdentity, _control: u64) -> Result<(), String> {
+        self.0.lock().unwrap().events.push("submit".into());
+        Ok(())
+    }
+}
+
+#[test]
+fn grokbot_toggle_dictation_supports_trilingual_labels_finishing_guard_and_owned_cleanup() {
+    for (idle, stop, finishing, send, vstart, vend) in [
+        (
+            "Start voice input",
+            "Stop dictation",
+            "Transcribing voice input…",
+            "Send message",
+            "Start voice chat",
+            "Hang up",
+        ),
+        (
+            "开始语音输入",
+            "停止听写",
+            "正在转写语音输入…",
+            "发送消息",
+            "发起语音聊天",
+            "挂断",
+        ),
+        (
+            "開始語音輸入",
+            "停止聽寫",
+            "正在轉錄語音輸入…",
+            "傳送訊息",
+            "發起語音聊天",
+            "掛斷",
+        ),
+    ] {
+        let provider = GrokBotTestProvider::new(idle, stop, finishing, send, vstart, vend);
+        let controls = provider.controls();
+        assert_eq!(
+            controls.toggle_dictation("grokbot").unwrap(),
+            ObservedDictationState::Recording
+        );
+        assert_eq!(provider.0.lock().unwrap().retained_targets.len(), 1);
+        assert_eq!(
+            controls.toggle_dictation("grok-bot").unwrap(),
+            ObservedDictationState::Idle
+        );
+        assert!(provider.0.lock().unwrap().retained_targets.is_empty());
+
+        controls.start_dictation("grok_bot").unwrap();
+        controls.stop_owned_dictations().unwrap();
+        assert!(provider.0.lock().unwrap().retained_targets.is_empty());
+
+        provider.0.lock().unwrap().window.controls = vec![ManagedControl {
+            id: 2,
+            role: "AXGroup".into(),
+            label: finishing.into(),
+            enabled: true,
+            pressable: false,
+            editable: false,
+            focused: false,
+            expanded: None,
+        }];
+        assert_eq!(
+            controls.toggle_dictation("grokbot").unwrap_err(),
+            "blocked:dictation_finishing"
+        );
+    }
+}
+
+#[test]
+fn grokbot_submit_handles_recording_finishing_idle_and_timeout_lease_retention() {
+    let provider = GrokBotTestProvider::new(
+        "开始语音输入",
+        "停止听写",
+        "正在转写语音输入…",
+        "发送消息",
+        "发起语音聊天",
+        "挂断",
+    );
+    let controls = provider.controls();
+    controls.start_dictation("grokbot").unwrap();
+    assert_eq!(provider.0.lock().unwrap().retained_targets.len(), 1);
+
+    controls.submit("grokbot", None).unwrap();
+    assert!(
+        provider.0.lock().unwrap().retained_targets.is_empty(),
+        "direct voice-send confirmation must release dictation lease"
+    );
+    let events = provider.events();
+    assert_eq!(
+        events.iter().filter(|e| *e == "press:发送消息").count(),
+        1,
+        "submit while recording must press Send directly once"
+    );
+    assert!(
+        !events.iter().any(|e| e == "press:停止听写"),
+        "submit while recording must not press Stop dictation separately"
+    );
+
+    let finishing_provider = GrokBotTestProvider::new(
+        "Start voice input",
+        "Stop dictation",
+        "Transcribing voice input…",
+        "Send message",
+        "Start voice chat",
+        "Hang up",
+    );
+    {
+        let mut st = finishing_provider.0.lock().unwrap();
+        st.reads_until_idle = 2;
+        st.window.controls = vec![
+            ManagedControl {
+                id: 1,
+                role: "AXTextArea".into(),
+                label: "Prompt".into(),
+                enabled: true,
+                pressable: false,
+                editable: true,
+                focused: false,
+                expanded: None,
+            },
+            ManagedControl {
+                id: 2,
+                role: "AXGroup".into(),
+                label: "Transcribing voice input…".into(),
+                enabled: true,
+                pressable: false,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+    }
+    let finishing_controls = finishing_provider.controls();
+    finishing_controls.submit("grokbot", None).unwrap();
+    assert_eq!(
+        finishing_provider
+            .events()
+            .iter()
+            .filter(|e| *e == "press:Send message")
+            .count(),
+        1
+    );
+
+    let idle_provider = GrokBotTestProvider::new(
+        "開始語音輸入",
+        "停止聽寫",
+        "正在轉錄語音輸入…",
+        "傳送訊息",
+        "發起語音聊天",
+        "掛斷",
+    );
+    idle_provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 4,
+            role: "AXButton".into(),
+            label: "傳送訊息".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: None,
+        });
+    let idle_controls = idle_provider.controls();
+    idle_controls.submit("grokbot", None).unwrap();
+    assert_eq!(
+        idle_provider
+            .events()
+            .iter()
+            .filter(|e| *e == "press:傳送訊息")
+            .count(),
+        1
+    );
+
+    let stuck_provider = GrokBotTestProvider::new(
+        "Start voice input",
+        "Stop dictation",
+        "Transcribing voice input…",
+        "Send message",
+        "Start voice chat",
+        "Hang up",
+    );
+    let stuck_controls = stuck_provider.controls();
+    stuck_controls.start_dictation("grokbot").unwrap();
+    stuck_provider.0.lock().unwrap().freeze_on_send = true;
+    assert_eq!(
+        stuck_controls.submit("grokbot", None).unwrap_err(),
+        "unconfirmed:dictation_submit_readback"
+    );
+    assert!(
+        !stuck_provider.0.lock().unwrap().retained_targets.is_empty(),
+        "unconfirmed recording submit must retain dictation lease"
+    );
+}
+
+#[test]
+fn grokbot_toggle_live_voice_uses_full_window_handles_draft_hangup_and_ending_guard() {
+    let provider = GrokBotTestProvider::new(
+        "Start voice input",
+        "Stop dictation",
+        "Transcribing voice input…",
+        "Send message",
+        "Start voice chat",
+        "Hang up",
+    );
+    provider.0.lock().unwrap().reappear_voice_start_on_hangup = false;
+    let controls = provider.controls();
+
+    controls.toggle_live_voice("grokbot").unwrap();
+    assert!(provider
+        .events()
+        .contains(&"capture_full_window:com.anysphere.sand".to_string()));
+    assert!(provider
+        .events()
+        .contains(&"press:Start voice chat".to_string()));
+
+    controls.toggle_live_voice("grokbot").unwrap();
+    assert!(provider.events().contains(&"press:Hang up".to_string()));
+    assert!(
+        !provider
+            .0
+            .lock()
+            .unwrap()
+            .window
+            .controls
+            .iter()
+            .any(|c| c.label == "Start voice chat" || c.label == "Hang up"),
+        "hang-up must confirm even when Start voice chat stays hidden due to draft text"
+    );
+
+    provider.0.lock().unwrap().window.controls = vec![
+        ManagedControl {
+            id: 3,
+            role: "AXButton".into(),
+            label: "发起语音聊天".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: None,
+        },
+        ManagedControl {
+            id: 5,
+            role: "AXButton".into(),
+            label: "挂断".into(),
+            enabled: false,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: None,
+        },
+    ];
+    assert_eq!(
+        controls.toggle_live_voice("grokbot").unwrap_err(),
+        "blocked:live_voice_control_unavailable"
+    );
+
+    struct GrokBotDriver {
+        controls: ManagedAxControls<GrokBotTestProvider>,
+    }
+    impl HostOsDriver for GrokBotDriver {
+        fn is_accessibility_trusted(&self) -> bool {
+            true
+        }
+        fn open_accessibility_settings(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn open_application(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn open_url(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn post_key_shortcut(&self, _: u16, _: &[String], _: bool) -> Result<(), String> {
+            Ok(())
+        }
+        fn post_apple_fn_flags(&self, _: bool) -> Result<(), String> {
+            unreachable!()
+        }
+        fn snapshot_clipboard(&self, _: usize) -> ClipboardSnapshot {
+            unreachable!()
+        }
+        fn write_clipboard_plain_text(&self, _: &str) -> u64 {
+            unreachable!()
+        }
+        fn restore_clipboard(&self, _: &ClipboardSnapshot, _: u64) -> bool {
+            unreachable!()
+        }
+        fn start_owned_dictation(&self, adapter: &str) -> Result<(), String> {
+            self.controls.start_dictation(adapter)
+        }
+        fn stop_owned_dictations(&self) -> Result<(), String> {
+            self.controls.stop_owned_dictations()
+        }
+        fn stop_active_dictation(&self, adapter: &str) -> Result<bool, String> {
+            self.controls.stop_dictation(adapter)
+        }
+        fn toggle_dictation(&self, adapter: &str) -> Result<ObservedDictationState, String> {
+            self.controls.toggle_dictation(adapter)
+        }
+        fn toggle_live_voice(&self, adapter: &str) -> Result<(), String> {
+            self.controls.toggle_live_voice(adapter)
+        }
+        fn submit_agent_input(&self, adapter: &str, prompt: Option<&str>) -> Result<(), String> {
+            self.controls.submit(adapter, prompt)
+        }
+        fn scroll_window(&self, request: &DialScrollRequest) -> Result<(), String> {
+            self.controls.scroll(request)
+        }
+        fn agent_shortcut(
+            &self,
+            adapter: &str,
+            key: u16,
+            modifiers: &[String],
+        ) -> Result<(), String> {
+            self.controls.shortcut(adapter, key, modifiers)
+        }
+        fn insert_agent_prompt(&self, adapter: &str, prompt: &str) -> Result<(), String> {
+            self.controls.insert_prompt(adapter, prompt)
+        }
+        fn focus_agent_input(&self, adapter: &str) -> Result<(), String> {
+            self.controls.focus_input(adapter)
+        }
+        fn move_cursor_by(&self, _: f64, _: f64) -> Result<(), String> {
+            unreachable!()
+        }
+        fn click_mouse_button(&self, _: MouseButtonKind) -> Result<(), String> {
+            unreachable!()
+        }
+        fn scroll_cursor_wheel(&self, _: i32, _: i32) -> Result<(), String> {
+            unreachable!()
+        }
+        fn new_conversation_in_project(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+    }
+
+    let exec_provider = GrokBotTestProvider::new(
+        "Start voice input",
+        "Stop dictation",
+        "Transcribing voice input…",
+        "Send message",
+        "Start voice chat",
+        "Hang up",
+    );
+    let executor = LiveHostActionExecutor::new(GrokBotDriver {
+        controls: exec_provider.controls(),
+    });
+    let start_receipt = executor.execute(
+        "Grok Bot",
+        "AG06",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "grokbot".into(),
+            command: "live-voice".into(),
+        },
+    );
+    assert_eq!(start_receipt.outcome, "executed");
+
+    exec_provider.0.lock().unwrap().window.controls.clear();
+    let blocked_receipt = executor.execute(
+        "Grok Bot",
+        "AG06",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "grokbot".into(),
+            command: "live-voice".into(),
+        },
+    );
+    assert_eq!(blocked_receipt.outcome, "blocked");
+    assert_eq!(
+        blocked_receipt.detail,
+        "blocked:ambiguous_or_missing_live_voice_control"
+    );
+}
+
+#[test]
+#[ignore = "explicit opt-in only: read-only live AX check against running Grok Bot"]
+fn manual_grokbot_readonly_ax_verify() {
+    assert_eq!(std::env::var("MI_LIVE_AX_VERIFY").as_deref(), Ok("1"));
+    let controls = ManagedAxControls::new(mi_macos::native_ax::NativeAxProvider::default());
+    let readiness = controls.inspect("grokbot").expect("inspect Grok Bot");
+    assert_eq!(readiness.editable_inputs, 1);
+    assert_eq!(readiness.dictation, Ok(ObservedDictationState::Idle));
+
+    let mut provider = mi_macos::native_ax::NativeAxProvider::default();
+    let window = provider
+        .capture_full_window("com.anysphere.sand")
+        .expect("capture full Grok Bot window");
+    let voice_start_matches: Vec<&ManagedControl> = window
+        .controls
+        .iter()
+        .filter(|c| {
+            c.enabled
+                && c.pressable
+                && matches!(
+                    c.label.trim(),
+                    "Start voice chat" | "发起语音聊天" | "發起語音聊天"
+                )
+        })
+        .collect();
+    assert_eq!(
+        voice_start_matches.len(),
+        1,
+        "expected unique Start voice chat button, found: {:?}",
+        voice_start_matches
+    );
+    println!(
+        "grokbot_readonly_ax_verify PASS editable_inputs={} dictation={:?} voice_chat={:?}",
+        readiness.editable_inputs, readiness.dictation, voice_start_matches[0].label
+    );
 }

@@ -623,7 +623,7 @@ pub fn bundle_id_for_adapter(adapter: &str) -> Option<&'static str> {
         "codex" => Some("com.openai.codex"),
         "chatgpt" => Some("com.openai.atlas"),
         "dsh-desktop" | "dsh" | "deepseek" => Some("com.deepseek.dsh"),
-        "herdr" => Some("dev.herdr.app"),
+        "grokbot" | "grok-bot" | "grok_bot" => Some("com.anysphere.sand"),
         _ => None,
     }
 }
@@ -4144,7 +4144,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     }
                     match self.driver.toggle_live_voice(adapter) {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(err) => make_receipt(managed_error_outcome(&err), err),
                     }
                 } else if adapter == "codex"
                     && matches!(
@@ -4332,6 +4332,7 @@ fn managed_adapter_for_bundle(bundle: &str) -> Option<&'static str> {
         "com.google.antigravity" => Some("antigravity"),
         "com.deepseek.dsh" => Some("dsh-desktop"),
         "com.openai.codex" => Some("codex"),
+        "com.anysphere.sand" => Some("grokbot"),
         _ => None,
     }
 }

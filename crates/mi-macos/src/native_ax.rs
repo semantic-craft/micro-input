@@ -826,6 +826,7 @@ mod macos {
                     .transpose()?
                     .unwrap_or_default()
             };
+        let status_group = role == "AXGroup" && subrole.as_deref() == Some("AXApplicationStatus");
         let session_container = purpose == ObservationPurpose::Sessions
             && !children.is_empty()
             && matches!(role.as_str(), "AXGroup" | "AXScrollArea" | "AXList");
@@ -844,7 +845,7 @@ mod macos {
                 &["AXDescription", "AXTitle", "AXEnabled", "AXExpanded"]
             }
             ObservationPurpose::Controls | ObservationPurpose::AntigravityControls
-                if button || role == "AXHeading" =>
+                if button || role == "AXHeading" || status_group =>
             {
                 &["AXDescription", "AXTitle", "AXEnabled"]
             }
@@ -899,7 +900,7 @@ mod macos {
                     && settable("AXValue")?;
             }
             ObservationPurpose::Controls | ObservationPurpose::AntigravityControls
-                if button || data.role == "AXHeading" =>
+                if button || data.role == "AXHeading" || status_group =>
             {
                 let desc = text_attribute(attrs.next().flatten())?;
                 let title = text_attribute(attrs.next().flatten())?;
@@ -2764,6 +2765,7 @@ mod macos {
             let is_antigravity = bundle_id == Some("com.google.antigravity");
             let is_codex = bundle_id == Some("com.openai.codex");
             let is_dsh = bundle_id == Some("com.deepseek.dsh");
+            let is_grokbot = bundle_id == Some("com.anysphere.sand");
             let antigravity_model_trigger = is_antigravity
                 && matches!(data.role.as_str(), "AXPopUpButton" | "AXButton")
                 && data.pressable
@@ -2821,6 +2823,7 @@ mod macos {
                     crate::ax_dictation::DictationAdapter::Antigravity,
                     crate::ax_dictation::DictationAdapter::Dsh,
                     crate::ax_dictation::DictationAdapter::Codex,
+                    crate::ax_dictation::DictationAdapter::GrokBot,
                 ]
                 .iter()
                 .any(|adapter| {
@@ -2828,6 +2831,9 @@ mod macos {
                         || adapter.matches_stop_label(&data.label)
                 }) || crate::executor::is_antigravity_live_voice_start_label(&data.label)
                     || crate::executor::is_antigravity_live_voice_end_label(&data.label)
+                    || crate::grokbot_ax_labels::is_voice_chat_start(&data.label)
+                    || crate::grokbot_ax_labels::is_voice_chat_end(&data.label)
+                    || crate::grokbot_ax_labels::is_send_message(&data.label)
                     || is_antigravity_side_panel_btn
                     || crate::antigravity_ax_labels::is_scroll_or_send_button(&data.label));
             let chat_heading = data.role == "AXHeading"
@@ -2837,10 +2843,20 @@ mod macos {
             let codex_dictation = codex.matches_start_label(&data.label)
                 || codex.matches_stop_label(&data.label)
                 || codex.matches_finishing_label(&data.label);
+            let grokbot = crate::ax_dictation::DictationAdapter::GrokBot;
+            let grokbot_dictation = grokbot.matches_start_label(&data.label)
+                || grokbot.matches_stop_label(&data.label)
+                || grokbot.matches_finishing_label(&data.label);
+            let grokbot_voice_chat = is_grokbot
+                && data.role == "AXButton"
+                && (crate::grokbot_ax_labels::is_voice_chat_start(&data.label)
+                    || crate::grokbot_ax_labels::is_voice_chat_end(&data.label));
             let editable_text_input = data.editable && data.role != "AXComboBox";
             if !editable_text_input
                 && !relevant_button
                 && !codex_dictation
+                && !grokbot_dictation
+                && !grokbot_voice_chat
                 && !is_antigravity_side_panel_btn
                 && !is_antigravity_browser_address_bar
                 && !is_antigravity_new_tab_search
@@ -2855,7 +2871,7 @@ mod macos {
             {
                 return None;
             }
-            let pressable = if codex_popover_item {
+            let pressable = if codex_popover_item || grokbot_voice_chat {
                 data.pressable
             } else if antigravity_model_trigger
                 || codex_reasoning_trigger
@@ -2964,6 +2980,15 @@ mod macos {
                 }
                 data.pressable =
                     button && element.actions()?.iter().any(|action| action == "AXPress");
+            } else if data.role == "AXGroup" && subrole.as_deref() == Some("AXApplicationStatus") {
+                let mut attrs = element
+                    .attributes(&["AXDescription", "AXTitle", "AXEnabled"], deadline)?
+                    .into_iter();
+                data.label = text_attribute(attrs.next().flatten())?
+                    .filter(|s| !s.trim().is_empty())
+                    .or(text_attribute(attrs.next().flatten())?)
+                    .unwrap_or_default();
+                data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
             }
             Ok(Some(data))
         }
@@ -4057,7 +4082,13 @@ mod macos {
                             && control.pressable
                             && matches!(
                                 control.label.trim(),
-                                "Send" | "Send message" | "Submit" | "发送" | "发送消息" | "提交"
+                                "Send"
+                                    | "Send message"
+                                    | "Submit"
+                                    | "发送"
+                                    | "发送消息"
+                                    | "傳送訊息"
+                                    | "提交"
                             )
                     })
                     .collect();
@@ -4185,6 +4216,116 @@ mod macos {
                 ..window.controls[0].clone()
             });
             assert!(crate::managed_controls::validate_codex_submit(&window).is_err());
+        }
+
+        #[test]
+        fn grokbot_status_node_and_trilingual_controls_are_captured_and_guarded() {
+            let status_data = read_observed_node(
+                ObservationPurpose::Controls,
+                |names| {
+                    Ok(names
+                        .iter()
+                        .map(|name| match *name {
+                            "AXRole" => Owned::text("AXGroup"),
+                            "AXSubrole" => Owned::text("AXApplicationStatus"),
+                            "AXHidden" => Some(unsafe { Owned(CFRetain(kCFBooleanFalse)) }),
+                            "AXChildren" => None,
+                            "AXDescription" => Owned::text("正在转写语音输入…"),
+                            "AXTitle" => None,
+                            "AXEnabled" => Some(unsafe { Owned(CFRetain(kCFBooleanTrue)) }),
+                            _ => None,
+                        })
+                        .collect())
+                },
+                |_| Ok(false),
+                || Ok(Vec::new()),
+            )
+            .unwrap()
+            .expect("AXApplicationStatus node observed");
+            assert_eq!(status_data.role, "AXGroup");
+            assert_eq!(status_data.label, "正在转写语音输入…");
+            assert!(!status_data.pressable);
+
+            let status_control = NativeAxProvider::control_from_node_data_for_bundle(
+                Some("com.anysphere.sand"),
+                41,
+                status_data,
+            )
+            .expect("Grok Bot transcribing status node retained");
+            assert_eq!(status_control.label, "正在转写语音输入…");
+            assert!(!status_control.pressable);
+
+            for (label, pressable, enabled) in [
+                ("Start voice input", true, true),
+                ("开始语音输入", true, true),
+                ("開始語音輸入", true, true),
+                ("Stop dictation", true, true),
+                ("停止听写", true, true),
+                ("停止聽寫", true, true),
+                ("Start voice chat", true, true),
+                ("发起语音聊天", true, true),
+                ("發起語音聊天", true, true),
+                ("Hang up", true, true),
+                ("挂断", false, false),
+                ("掛斷", true, false),
+                ("Send message", true, true),
+                ("发送消息", true, true),
+                ("傳送訊息", true, true),
+            ] {
+                let retained = NativeAxProvider::control_from_node_data_for_bundle(
+                    Some("com.anysphere.sand"),
+                    50,
+                    NodeData {
+                        role: "AXButton".into(),
+                        label: label.into(),
+                        enabled,
+                        pressable,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_or_else(|| panic!("Grok Bot control must be retained: {label}"));
+                assert_eq!(retained.label, label);
+                assert_eq!(retained.enabled, enabled);
+            }
+
+            let mut window = ManagedWindow {
+                identity: ManagedWindowIdentity {
+                    bundle_id: "com.anysphere.sand".into(),
+                    pid: 200,
+                    window_id: 2,
+                    scope_id: 0,
+                    title: "Grok Bot".into(),
+                },
+                controls: vec![],
+            };
+            assert!(crate::managed_controls::validate_codex_submit(&window).is_ok());
+            for (role, label, enabled, pressable, allowed) in [
+                ("AXButton", "Start voice input", true, true, true),
+                ("AXButton", "开始语音输入", true, true, true),
+                ("AXButton", "開始語音輸入", true, true, true),
+                ("AXButton", "Stop dictation", true, true, false),
+                ("AXButton", "停止听写", true, true, false),
+                ("AXButton", "停止聽寫", true, true, false),
+                ("AXGroup", "Transcribing voice input…", true, false, false),
+                ("AXGroup", "正在转写语音输入…", true, false, false),
+                ("AXGroup", "正在轉錄語音輸入…", true, false, false),
+            ] {
+                window.controls = vec![ManagedControl {
+                    id: 7,
+                    role: role.into(),
+                    label: label.into(),
+                    enabled,
+                    pressable,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                }];
+                assert_eq!(
+                    crate::managed_controls::validate_codex_submit(&window).is_ok(),
+                    allowed,
+                    "{label}"
+                );
+            }
         }
 
         fn node(

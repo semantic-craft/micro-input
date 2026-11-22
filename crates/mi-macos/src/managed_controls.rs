@@ -487,6 +487,7 @@ fn observe_model_picker_popup_state(
             }
             Ok(ObservedModelPickerPopupState::Unknown)
         }
+        DictationAdapter::GrokBot => Ok(ObservedModelPickerPopupState::Unknown),
     }
 }
 
@@ -589,6 +590,7 @@ fn observe_subagent_picker_popup_state(
             is_codex_subagent_picker_trigger,
             Some(is_codex_subagent_picker_trigger),
         ),
+        DictationAdapter::GrokBot => None,
     };
     match trigger.and_then(|c| c.expanded) {
         Some(true) => ObservedModelPickerPopupState::Open,
@@ -861,27 +863,60 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
     }
 
     pub fn toggle_live_voice(&self, adapter: &str) -> Result<(), String> {
-        if managed_adapter(adapter)? != DictationAdapter::Antigravity {
+        let adapter = managed_adapter(adapter)?;
+        if !matches!(
+            adapter,
+            DictationAdapter::Antigravity | DictationAdapter::GrokBot
+        ) {
             return Err(blocked("unsupported_live_voice_adapter"));
         }
         let mut provider = self
             .provider
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
-        let window = capture(&mut *provider, DictationAdapter::Antigravity)?;
-        let (active, control) = live_voice_control(&window)?;
-        provider.press(&window.identity, control)?;
-        let deadline = Instant::now() + self.readback_timeout;
-        loop {
-            let current = read(&mut *provider, &window.identity)
-                .map_err(|error| format!("unconfirmed:{error}"))?;
-            if live_voice_control(&current).is_ok_and(|(now_active, _)| now_active != active) {
-                return Ok(());
+        match adapter {
+            DictationAdapter::Antigravity => {
+                let window = capture(&mut *provider, DictationAdapter::Antigravity)?;
+                let (active, control) = live_voice_control(&window)?;
+                provider.press(&window.identity, control)?;
+                let deadline = Instant::now() + self.readback_timeout;
+                loop {
+                    let current = read(&mut *provider, &window.identity)
+                        .map_err(|error| format!("unconfirmed:{error}"))?;
+                    if live_voice_control(&current)
+                        .is_ok_and(|(now_active, _)| now_active != active)
+                    {
+                        return Ok(());
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("unconfirmed:live_voice_readback".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
             }
-            if Instant::now() >= deadline {
-                return Err("unconfirmed:live_voice_readback".into());
+            DictationAdapter::GrokBot => {
+                let window =
+                    self.capture_full_window_for_key(&mut *provider, DictationAdapter::GrokBot)?;
+                let (active, control) = grokbot_live_voice_control(&window)?;
+                provider.press(&window.identity, control)?;
+                let deadline = Instant::now() + self.readback_timeout;
+                loop {
+                    let current = read(&mut *provider, &window.identity)
+                        .map_err(|error| format!("unconfirmed:{error}"))?;
+                    let has_hangup = current
+                        .controls
+                        .iter()
+                        .any(|c| crate::grokbot_ax_labels::is_voice_chat_end(&c.label));
+                    if (!active && has_hangup) || (active && !has_hangup) {
+                        return Ok(());
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("unconfirmed:live_voice_readback".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
             }
-            std::thread::sleep(Duration::from_millis(25));
+            _ => unreachable!(),
         }
     }
 
@@ -1459,6 +1494,82 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
         let window = capture(&mut *provider, adapter)?;
+        if adapter == DictationAdapter::GrokBot && prompt.is_none() {
+            {
+                let mut leases = self
+                    .dictation_leases
+                    .lock()
+                    .map_err(|_| blocked("ax_lock_poisoned"))?;
+                leases.reconcile_for_captured_window(&mut *provider, &window, adapter)?;
+            }
+            let current = read(&mut *provider, &window.identity)?;
+            let is_recording = current
+                .controls
+                .iter()
+                .any(|c| adapter.matches_stop_label(&c.label));
+            let is_finishing = current
+                .controls
+                .iter()
+                .any(|c| adapter.matches_finishing_label(&c.label));
+            if is_recording {
+                if let Some(send_id) = unique_grokbot_send_button(&current) {
+                    provider.press(&window.identity, send_id)?;
+                    let deadline = Instant::now() + self.readback_timeout;
+                    let mut leases = self
+                        .dictation_leases
+                        .lock()
+                        .map_err(|_| blocked("ax_lock_poisoned"))?;
+                    loop {
+                        let polled = match read(&mut *provider, &window.identity) {
+                            Ok(snapshot) => snapshot,
+                            Err(error) => {
+                                leases.retain_claim(&mut *provider, &window.identity)?;
+                                return Err(format!("unconfirmed:{error}"));
+                            }
+                        };
+                        if !polled
+                            .controls
+                            .iter()
+                            .any(|c| adapter.matches_stop_label(&c.label))
+                        {
+                            leases.release_claim(&mut *provider, &window.identity.bundle_id);
+                            return Ok(());
+                        }
+                        if Instant::now() >= deadline {
+                            leases.retain_claim(&mut *provider, &window.identity)?;
+                            return Err("unconfirmed:dictation_submit_readback".into());
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                }
+            } else if is_finishing {
+                self.stop_in_window(&mut *provider, &window, adapter)?;
+                let deadline = Instant::now() + self.readback_timeout;
+                loop {
+                    let polled = read(&mut *provider, &window.identity)?;
+                    if let Some(send_id) = unique_grokbot_send_button(&polled) {
+                        return provider.press(&window.identity, send_id);
+                    }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                let control =
+                    focus_in_window(&mut *provider, &window.identity, self.readback_timeout)?;
+                self.stop_in_window(&mut *provider, &window, adapter)?;
+                return provider.submit(&window.identity, control);
+            } else if let Some(send_id) = unique_grokbot_send_button(&current) {
+                {
+                    let mut leases = self
+                        .dictation_leases
+                        .lock()
+                        .map_err(|_| blocked("ax_lock_poisoned"))?;
+                    leases.release_claim(&mut *provider, &window.identity.bundle_id);
+                }
+                return provider.press(&window.identity, send_id);
+            }
+        }
         self.stop_in_window(&mut *provider, &window, adapter)?;
         let control = focus_in_window(&mut *provider, &window.identity, self.readback_timeout)?;
         if let Some(prompt) = prompt {
@@ -1707,6 +1818,7 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                 }
                 Err(blocked("subagent_picker_unavailable"))
             }
+            DictationAdapter::GrokBot => Err(blocked("subagent_picker_unavailable")),
         }
     }
 
@@ -1844,6 +1956,7 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                 }
                 Ok((window.identity, false))
             }
+            DictationAdapter::GrokBot => Err(blocked("model_picker_control_unavailable")),
         }
     }
 
@@ -2253,6 +2366,7 @@ pub fn adapter_bundle(adapter: DictationAdapter) -> &'static str {
         DictationAdapter::Antigravity => "com.google.antigravity",
         DictationAdapter::Dsh => "com.deepseek.dsh",
         DictationAdapter::Codex => "com.openai.codex",
+        DictationAdapter::GrokBot => "com.anysphere.sand",
     }
 }
 
@@ -2348,6 +2462,51 @@ fn live_voice_control(window: &ManagedWindow) -> Result<(bool, u64), String> {
     Ok((*active, control.id))
 }
 
+fn grokbot_live_voice_control(window: &ManagedWindow) -> Result<(bool, u64), String> {
+    let end_controls: Vec<_> = window
+        .controls
+        .iter()
+        .filter(|control| crate::grokbot_ax_labels::is_voice_chat_end(&control.label))
+        .collect();
+    if !end_controls.is_empty() {
+        let [control] = end_controls.as_slice() else {
+            return Err(blocked("ambiguous_or_missing_live_voice_control"));
+        };
+        if !control.enabled || !control.pressable {
+            return Err(blocked("live_voice_control_unavailable"));
+        }
+        return Ok((true, control.id));
+    }
+    let start_controls: Vec<_> = window
+        .controls
+        .iter()
+        .filter(|control| crate::grokbot_ax_labels::is_voice_chat_start(&control.label))
+        .collect();
+    let [control] = start_controls.as_slice() else {
+        return Err(blocked("ambiguous_or_missing_live_voice_control"));
+    };
+    if !control.enabled || !control.pressable {
+        return Err(blocked("live_voice_control_unavailable"));
+    }
+    Ok((false, control.id))
+}
+
+fn unique_grokbot_send_button(window: &ManagedWindow) -> Option<u64> {
+    let buttons: Vec<_> = window
+        .controls
+        .iter()
+        .filter(|control| {
+            control.enabled
+                && control.pressable
+                && crate::grokbot_ax_labels::is_send_message(&control.label)
+        })
+        .collect();
+    match buttons.as_slice() {
+        [button] => Some(button.id),
+        _ => None,
+    }
+}
+
 fn dictation_control(
     window: &ManagedWindow,
     adapter: DictationAdapter,
@@ -2383,10 +2542,13 @@ fn dictation_control(
 }
 
 pub(crate) fn validate_codex_submit(window: &ManagedWindow) -> Result<(), String> {
-    if window.identity.bundle_id != adapter_bundle(DictationAdapter::Codex) {
+    let adapter = if window.identity.bundle_id == adapter_bundle(DictationAdapter::Codex) {
+        DictationAdapter::Codex
+    } else if window.identity.bundle_id == adapter_bundle(DictationAdapter::GrokBot) {
+        DictationAdapter::GrokBot
+    } else {
         return Ok(());
-    }
-    let adapter = DictationAdapter::Codex;
+    };
     if !window.controls.iter().any(|control| {
         adapter.matches_start_label(&control.label)
             || adapter.matches_stop_label(&control.label)
@@ -2452,7 +2614,10 @@ fn stop_in_window<P: ManagedAxProvider>(
             || adapter.matches_stop_label(&control.label)
             || adapter.matches_finishing_label(&control.label)
     });
-    if adapter == DictationAdapter::Codex && !has_dictation && !allow_absent {
+    if matches!(adapter, DictationAdapter::Codex | DictationAdapter::GrokBot)
+        && !has_dictation
+        && !allow_absent
+    {
         return Err("unconfirmed:dictation_readback".into());
     }
     if current
@@ -2667,6 +2832,7 @@ impl DictationLeaseRegistry {
                 DictationAdapter::Antigravity,
                 DictationAdapter::Dsh,
                 DictationAdapter::Codex,
+                DictationAdapter::GrokBot,
             ]
             .into_iter()
             .find(|adapter| adapter_bundle(*adapter) == owned.bundle_id) else {
