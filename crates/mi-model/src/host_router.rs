@@ -36,7 +36,7 @@ pub const CANONICAL_DESKTOP_AGENT_PROFILES: [&str; 5] = [
     "Antigravity",
     "Codex",
     "DeepSeek Coder (DSH)",
-    "Herdr",
+    "Grok Bot",
     "其他软件",
 ];
 
@@ -45,7 +45,7 @@ pub fn canonical_desktop_agent_rank(name: &str) -> Option<usize> {
         "Antigravity" => Some(0),
         "Codex" => Some(1),
         "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => Some(2),
-        "Herdr" => Some(3),
+        "Grok Bot" | "GrokBot" | "grokbot" => Some(3),
         "其他软件" => Some(4),
         _ => None,
     }
@@ -58,6 +58,7 @@ pub fn desktop_agent_for_profile_name(name: &str) -> Option<(&'static str, &'sta
         "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => {
             Some(("dsh-desktop", "com.deepseek.dsh"))
         }
+        "Grok Bot" | "GrokBot" | "grokbot" => Some(("grokbot", "com.anysphere.sand")),
         _ => None,
     }
 }

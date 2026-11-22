@@ -117,8 +117,7 @@ impl DocumentStore {
                     if let Some(a) = bound_action.filter(|a| {
                         matches!(
                             a.id.as_str(),
-                            "herdr-desktop"
-                                | "apple-fn-key"
+                            "apple-fn-key"
                                 | "desktop-search"
                                 | "desktop-new"
                                 | "desktop-model"
@@ -156,12 +155,13 @@ impl DocumentStore {
                     crate::ResolvedLocale::En => format!("Command · {working_directory}"),
                 },
                 Some(OpenUrl{..}) => crate::i18n::tr("打开网址", locale).into(),
-                Some(AgentCommand{command,..}) => {
+                Some(AgentCommand{adapter, command}) => {
                     let zh = match command.as_str() {
                         "focus-input" => "聚焦输入框", "search" => "搜索会话", "new-chat" => "新建会话",
                         "new-conversation-in-project" => "在项目中新建会话",
                         "model" => "选择模型", "effort" => "思考力度", "dictation" => "听写 / 语音输入",
                         "push-to-talk" => "按住说话",
+                        "live-voice" if adapter == "grokbot" => "语音聊天",
                         "live-voice" => "Gemini Live 实时语音",
                         "project" => "选项目 / 新建项目",
                         "split-right" => "快速向右分栏",
@@ -451,20 +451,29 @@ mod tests {
                 continue;
             }
 
-            assert_eq!(by_id("AG00")["available"], true);
-
-            if profile_name == "Herdr" {
-                assert!(by_id("AG00")["label"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("打开 "));
-                assert_eq!(by_id("AG01")["label"], "选择 Space / Tab (command p)");
-                assert_eq!(by_id("ENC_CLK")["label"], "显示 / 隐藏侧栏 (command b)");
+            if profile_name == "Grok Bot" {
+                for slot in [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 13, 14] {
+                    let binding = format!("AG{slot:02}");
+                    assert_eq!(by_id(&binding)["available"], false);
+                    assert_eq!(by_id(&binding)["label"], "不可用 / 未配置");
+                }
+                assert_eq!(by_id("AG06")["available"], true);
+                assert_eq!(by_id("AG06")["label"], "语音聊天");
+                assert_eq!(by_id("AG11")["available"], true);
+                assert_eq!(by_id("AG11")["label"], "点击听写");
+                assert_eq!(by_id("AG12")["available"], true);
+                assert_eq!(by_id("AG12")["label"], "停止听写并提交");
+                assert_eq!(by_id("ENC_CLK")["available"], false);
                 assert_eq!(by_id("AG15")["label"], "不可用 / 未配置");
                 assert_eq!(by_id("AG16")["label"], "不可用 / 未配置");
                 assert_eq!(by_id("AG17")["label"], "不可用 / 未配置");
                 assert_eq!(by_id("AG18")["label"], "不可用 / 未配置");
-            } else if profile_name == "Antigravity" {
+                continue;
+            }
+
+            assert_eq!(by_id("AG00")["available"], true);
+
+            if profile_name == "Antigravity" {
                 for slot in 0..6 {
                     let binding = format!("AG{slot:02}");
                     assert_eq!(by_id(&binding)["available"], true);
@@ -745,9 +754,9 @@ mod tests {
             .find(|id| store.draft.document.editable.graph.profiles[*id].name == "Antigravity")
             .unwrap()
             .clone();
-        let herdr_id = ids
+        let grokbot_id = ids
             .iter()
-            .find(|id| store.draft.document.editable.graph.profiles[*id].name == "Herdr")
+            .find(|id| store.draft.document.editable.graph.profiles[*id].name == "Grok Bot")
             .unwrap()
             .clone();
 
@@ -771,11 +780,11 @@ mod tests {
         store
             .update_routing(request(
                 &store,
-                json!({"kind":"select","profile_id":herdr_id}),
+                json!({"kind":"select","profile_id":grokbot_id}),
             ))
             .unwrap();
-        assert_eq!(store.locked_profile_id(), Some(herdr_id.clone()));
-        assert_eq!(store.host_active_profile_id(), Some(herdr_id.clone()));
+        assert_eq!(store.locked_profile_id(), Some(grokbot_id.clone()));
+        assert_eq!(store.host_active_profile_id(), Some(grokbot_id.clone()));
 
         store
             .update_routing(request(
@@ -784,17 +793,17 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(store.locked_profile_id(), None);
-        assert_eq!(store.host_active_profile_id(), Some(herdr_id.clone()));
+        assert_eq!(store.host_active_profile_id(), Some(grokbot_id.clone()));
 
         store
             .update_routing(request(
                 &store,
-                json!({"kind":"lock_profile","profile_id":herdr_id}),
+                json!({"kind":"lock_profile","profile_id":grokbot_id}),
             ))
             .unwrap();
-        assert_eq!(store.locked_profile_id(), Some(herdr_id.clone()));
+        assert_eq!(store.locked_profile_id(), Some(grokbot_id.clone()));
         store
-            .update(|draft| draft.delete_profile(&herdr_id))
+            .update(|draft| draft.delete_profile(&grokbot_id))
             .unwrap();
         assert_eq!(store.locked_profile_id(), None);
         assert_eq!(store.routing_state()["locked_profile_id"], Value::Null);

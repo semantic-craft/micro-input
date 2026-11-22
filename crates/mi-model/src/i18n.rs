@@ -172,7 +172,7 @@ pub fn localize_profile_name(name: &str, locale: ResolvedLocale) -> String {
                 "Coding 起步" => "Coding Starter".to_string(),
                 "Codex · 原生" => "Codex · Native".to_string(),
                 "通用 Coding · 演示" => "General Coding · Demo".to_string(),
-                "Herdr · 示例" => "Herdr · Sample".to_string(),
+                "Grok Bot · 示例" => "Grok Bot · Sample".to_string(),
                 "新建方案" => "New Profile".to_string(),
                 "自定义方案" => "Custom Profile".to_string(),
                 "预设方案" => "Preset Profile".to_string(),
@@ -358,6 +358,7 @@ fn compact_zh_cheat(raw: &str) -> String {
         "聚焦当前输入框" => "聚焦输入框".into(),
         "按住说话" | "按住说话 · 松开停止" => "按住说话".into(),
         "停止听写并提交" => "停止提交".into(),
+        "发送消息（听写后发送）" | "发送消息（先停听写）" => "发送消息".into(),
         "向上滚动对话" | "在项目中向上滚动" => "向上滚动".into(),
         "向下滚动对话" | "在项目中向下滚动" => "向下滚动".into(),
         "跳到底部并聚焦输入" => "跳到底部".into(),
@@ -488,6 +489,18 @@ const ACTION_NAME_EN_TABLE: &[(&str, &str, &str, &str)] = &[
         "Send Message",
         "Send Msg",
     ),
+    (
+        "发送消息（听写后发送）",
+        "Send Message (Stop & Send Dictation)",
+        "Send Message",
+        "Send Msg",
+    ),
+    (
+        "Grok Bot · 发送消息（听写后发送）",
+        "Grok Bot · Send Message (Stop & Send Dictation)",
+        "Send Message",
+        "Send Msg",
+    ),
     ("提交当前输入", "Submit Current Input", "Submit", "Submit"),
     ("同意继续", "Approve & Continue", "Approve", "Approve"),
     (
@@ -559,7 +572,6 @@ const ACTION_NAME_EN_TABLE: &[(&str, &str, &str, &str)] = &[
         "Focus App",
     ),
     ("打开应用", "Open Application", "Open App", "Open App"),
-    ("打开 Herdr", "Open Herdr", "Open Herdr", "Open Herdr"),
     (
         "打开 / 聚焦 Antigravity",
         "Open / Focus Antigravity",
@@ -678,6 +690,19 @@ const ACTION_NAME_EN_TABLE: &[(&str, &str, &str, &str)] = &[
         "Live Voice",
     ),
     ("实时语音", "Live Voice", "Live Voice", "Live Voice"),
+    ("语音聊天", "Voice Chat", "Voice Chat", "Voice Chat"),
+    (
+        "Grok Bot · 语音聊天",
+        "Grok Bot · Voice Chat",
+        "Voice Chat",
+        "Voice Chat",
+    ),
+    (
+        "Grok Bot · 点击听写",
+        "Grok Bot · Toggle Dictation",
+        "Dictation",
+        "Dictate",
+    ),
     (
         "按住说话 · 松开停止",
         "Hold to Talk · Release to Stop",
@@ -1455,6 +1480,18 @@ const ACTION_DETAIL_EN_TABLE: &[(&str, &str)] = &[
         "Press once to start dictation, press again to stop",
     ),
     (
+        "按一次开始语音输入，再按一次停止听写",
+        "Press once to start voice input, press again to stop dictation",
+    ),
+    (
+        "发起或挂断 Grok Bot 语音聊天（原生控件）",
+        "Starts or hangs up Grok Bot voice chat (native control)",
+    ),
+    (
+        "听写激活时直触发送（自动停录并转写后提交），空闲时提交当前输入",
+        "Presses Send directly while dictating (stops, transcribes, and submits), or submits current input when idle",
+    ),
+    (
         "启动或结束 Antigravity Live 实时语音对话并确认状态",
         "Starts or stops Antigravity Gemini Live voice and verifies state",
     ),
@@ -2058,7 +2095,6 @@ const MODEL_EN_TABLE: &[(&str, &str)] = &[
     ("Mac 宿主适配器（CLI / 辅助功能）", "macOS Host Adapter (CLI / Accessibility)"),
     ("工具适配器未验证、未接入；引用仅为本地意图", "Adapter unverified and not wired; stored as local draft intent only"),
     ("缺失具体会话引用；请先填写本地意图", "Session reference missing; fill in target session first"),
-    ("Mac 宿主 CLI 适配器（herdr）", "macOS Host CLI Adapter (herdr)"),
     ("工具适配器未验证或缺失具体会话引用；无法确认目标会话", "Adapter unverified or session reference missing; cannot resolve target session"),
     ("缺失具体 Skill 引用；请先填写本地意图", "Skill reference missing; fill in skill name first"),
     ("工具适配器未验证、未接入；无法解析 Skill 引用", "Adapter unverified and not wired; cannot resolve Skill reference"),
@@ -2093,6 +2129,7 @@ const MODEL_EN_TABLE: &[(&str, &str)] = &[
     ("听写 / 语音输入", "Dictation / Voice Input"),
     ("按住说话", "Hold to Talk"),
     ("Gemini Live 实时语音", "Gemini Live Voice"),
+    ("语音聊天", "Voice Chat"),
     ("选项目 / 新建项目", "Select / New Project"),
     ("快速向右分栏", "Split Right"),
     ("打开 Side Question", "Open Side Question"),

@@ -509,220 +509,6 @@ fn legacy_agent_specs() -> Vec<AgentProfileSpec> {
             ],
         ),
         (
-            "Herdr",
-            vec![
-                (
-                    0,
-                    "hd-s1",
-                    "聚焦 Session 1",
-                    "Agent",
-                    "herdr / session-1",
-                    ActionKind::FocusSession {
-                        adapter: "herdr".into(),
-                        session: "session-1".into(),
-                    },
-                ),
-                (
-                    1,
-                    "hd-s2",
-                    "聚焦 Session 2",
-                    "Agent",
-                    "herdr / session-2",
-                    ActionKind::FocusSession {
-                        adapter: "herdr".into(),
-                        session: "session-2".into(),
-                    },
-                ),
-                (
-                    2,
-                    "hd-s3",
-                    "聚焦 Session 3",
-                    "Agent",
-                    "herdr / session-3",
-                    ActionKind::FocusSession {
-                        adapter: "herdr".into(),
-                        session: "session-3".into(),
-                    },
-                ),
-                (
-                    3,
-                    "hd-s4",
-                    "聚焦 Session 4",
-                    "Agent",
-                    "herdr / session-4",
-                    ActionKind::FocusSession {
-                        adapter: "herdr".into(),
-                        session: "session-4".into(),
-                    },
-                ),
-                (
-                    4,
-                    "hd-s5",
-                    "聚焦 Session 5",
-                    "Agent",
-                    "herdr / session-5",
-                    ActionKind::FocusSession {
-                        adapter: "herdr".into(),
-                        session: "session-5".into(),
-                    },
-                ),
-                (
-                    5,
-                    "hd-s6",
-                    "聚焦 Session 6",
-                    "Agent",
-                    "herdr / session-6",
-                    ActionKind::FocusSession {
-                        adapter: "herdr".into(),
-                        session: "session-6".into(),
-                    },
-                ),
-                (
-                    6,
-                    "hd-new-ws",
-                    "新建工作区",
-                    "Agent",
-                    "herdr / new-workspace",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "new-workspace".into(),
-                    },
-                ),
-                (
-                    7,
-                    "hd-split-r",
-                    "向右分屏",
-                    "Agent",
-                    "herdr / split-right",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "split-right".into(),
-                    },
-                ),
-                (
-                    8,
-                    "hd-stack",
-                    "切换栈视图",
-                    "Agent",
-                    "herdr / toggle-stack",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "toggle-stack".into(),
-                    },
-                ),
-                (
-                    9,
-                    "hd-close-pane",
-                    "关闭当前窗格",
-                    "Agent",
-                    "herdr / close-pane",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "close-pane".into(),
-                    },
-                ),
-                (
-                    10,
-                    "hd-approve",
-                    "同意当前会话请求",
-                    "Agent",
-                    "herdr / approve-current",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "approve-current".into(),
-                    },
-                ),
-                (
-                    12,
-                    "hd-deny",
-                    "拒绝当前会话请求",
-                    "Agent",
-                    "herdr / deny-current",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "deny-current".into(),
-                    },
-                ),
-                (
-                    13,
-                    "hd-prev-session",
-                    "上一会话",
-                    "Agent",
-                    "herdr / prev-session",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "prev-session".into(),
-                    },
-                ),
-                (
-                    14,
-                    "hd-next-session",
-                    "下一会话",
-                    "Agent",
-                    "herdr / next-session",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "next-session".into(),
-                    },
-                ),
-                (
-                    15,
-                    "hd-enc-click",
-                    "切换窗格缩放",
-                    "Agent",
-                    "herdr / toggle-zoom",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "toggle-zoom".into(),
-                    },
-                ),
-                (
-                    16,
-                    "hd-pane-north",
-                    "北向分屏焦点",
-                    "Agent",
-                    "herdr / pane-north",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "pane-north".into(),
-                    },
-                ),
-                (
-                    17,
-                    "hd-pane-west",
-                    "西向分屏焦点",
-                    "Agent",
-                    "herdr / pane-west",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "pane-west".into(),
-                    },
-                ),
-                (
-                    18,
-                    "hd-pane-south",
-                    "南向分屏焦点",
-                    "Agent",
-                    "herdr / pane-south",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "pane-south".into(),
-                    },
-                ),
-                (
-                    19,
-                    "hd-pane-east",
-                    "东向分屏焦点",
-                    "Agent",
-                    "herdr / pane-east",
-                    ActionKind::AgentCommand {
-                        adapter: "herdr".into(),
-                        command: "pane-east".into(),
-                    },
-                ),
-            ],
-        ),
-        (
             "DeepSeek Coder (DSH)",
             vec![
                 (
@@ -1412,53 +1198,44 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
             _ => {}
         }
     }
-    let herdr = &mut specs
-        .iter_mut()
-        .find(|(name, _)| *name == "Herdr")
-        .unwrap()
-        .1;
-    herdr.clear();
-    herdr.push((
-        0,
-        "desktop-open",
-        "打开 Herdr",
-        "应用",
-        "dev.herdr.app",
-        ActionKind::OpenApp {
-            bundle_id: "dev.herdr.app".into(),
-        },
+    specs.push((
+        "Grok Bot",
+        vec![
+            (
+                6,
+                "desktop-live-voice",
+                "语音聊天",
+                "Agent",
+                "发起或挂断 Grok Bot 语音聊天（原生控件）",
+                ActionKind::AgentCommand {
+                    adapter: "grokbot".into(),
+                    command: "live-voice".into(),
+                },
+            ),
+            (
+                11,
+                "desktop-dictation",
+                "点击听写",
+                "Agent",
+                "按一次开始语音输入，再按一次停止听写",
+                ActionKind::AgentCommand {
+                    adapter: "grokbot".into(),
+                    command: "toggle-dictation".into(),
+                },
+            ),
+            (
+                12,
+                "desktop-submit",
+                "发送消息（听写后发送）",
+                "提交控制",
+                "听写激活时直触发送（自动停录并转写后提交），空闲时提交当前输入",
+                ActionKind::AgentCommand {
+                    adapter: "grokbot".into(),
+                    command: "submit".into(),
+                },
+            ),
+        ],
     ));
-    for (slot, label, key, modifiers) in [
-        (1, "选择 Space / Tab", "p", vec!["command"]),
-        (2, "搜索命令", "p", vec!["command", "shift"]),
-        (3, "新建 Space", "n", vec!["command"]),
-        (4, "新建 Tab / 终端", "t", vec!["command"]),
-        (5, "向右分屏", "d", vec!["command"]),
-        (6, "向下分屏", "d", vec!["command", "shift"]),
-        (7, "上一个 Space", "[", vec!["command", "option"]),
-        (8, "下一个 Space", "]", vec!["command", "option"]),
-        (9, "上一个 Tab", "Tab", vec!["control", "shift"]),
-        (10, "下一个 Tab", "Tab", vec!["control"]),
-        (12, "放大 / 还原面板", "Return", vec!["command", "shift"]),
-        (15, "显示 / 隐藏侧栏", "b", vec!["command"]),
-        (16, "聚焦上方面板", "Up", vec!["command", "option"]),
-        (17, "聚焦左方面板", "Left", vec!["command", "option"]),
-        (18, "聚焦下方面板", "Down", vec!["command", "option"]),
-        (19, "聚焦右方面板", "Right", vec!["command", "option"]),
-    ] {
-        herdr.push((
-            slot,
-            "herdr-desktop",
-            label,
-            "快捷键",
-            "dev.herdr.app",
-            ActionKind::Shortcut {
-                key: key.into(),
-                modifiers: modifiers.into_iter().map(str::to_owned).collect(),
-                target: "dev.herdr.app".into(),
-            },
-        ));
-    }
     specs.push((
         "其他软件",
         vec![(
@@ -2043,6 +1820,44 @@ pub fn canonical_encoder_hold_action() -> crate::draft::Action {
     }
 }
 
+fn retired_unmodified_starter_profile_ids(doc: &LocalDocumentV2) -> Vec<String> {
+    doc.editable
+        .graph
+        .profiles
+        .iter()
+        .filter_map(|(pid, p)| {
+            let (expected_bundle, expected_adapter) = match p.name.as_str() {
+                "Qoder CN" => ("com.qodercn.app", "qoder-cn"),
+                "千问办公" => ("cn.qwenwork.desktop.mac", "qwenwork"),
+                "Herdr" => ("dev.herdr.app", "herdr"),
+                _ => return None,
+            };
+            if p.layer_order.len() != 1 {
+                return None;
+            }
+            let layer = doc.editable.graph.layers.get(&p.layer_order[0])?;
+            let all_retired = layer
+                .controls
+                .values()
+                .filter_map(|b| b.action_id.as_ref())
+                .all(|aid| {
+                    doc.editable.graph.actions.get(aid).is_some_and(|a| {
+                        a.payload.get("bundle_id").and_then(Value::as_str) == Some(expected_bundle)
+                            || a.payload.get("target").and_then(Value::as_str)
+                                == Some(expected_bundle)
+                            || a.payload.get("adapter").and_then(Value::as_str)
+                                == Some(expected_adapter)
+                    })
+                });
+            all_retired.then(|| pid.clone())
+        })
+        .collect()
+}
+
+pub fn has_retired_unmodified_starter_profiles(doc: &LocalDocumentV2) -> bool {
+    !retired_unmodified_starter_profile_ids(doc).is_empty()
+}
+
 pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
     let (specs, legacy_specs) = agent_starter_specs();
     let mut created_ids = Vec::new();
@@ -2093,45 +1908,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             }
         }
     }
-    let retired_profile_ids: Vec<String> = work
-        .document
-        .editable
-        .graph
-        .profiles
-        .iter()
-        .filter_map(|(pid, p)| {
-            let (expected_bundle, expected_adapter) = match p.name.as_str() {
-                "Qoder CN" => ("com.qodercn.app", "qoder-cn"),
-                "千问办公" => ("cn.qwenwork.desktop.mac", "qwenwork"),
-                _ => return None,
-            };
-            if p.layer_order.len() != 1 {
-                return None;
-            }
-            let layer = work.document.editable.graph.layers.get(&p.layer_order[0])?;
-            let all_retired = layer
-                .controls
-                .values()
-                .filter_map(|b| b.action_id.as_ref())
-                .all(|aid| {
-                    work.document
-                        .editable
-                        .graph
-                        .actions
-                        .get(aid)
-                        .is_some_and(|a| {
-                            a.payload.get("bundle_id").and_then(Value::as_str)
-                                == Some(expected_bundle)
-                                || a.payload.get("target").and_then(Value::as_str)
-                                    == Some(expected_bundle)
-                                || a.payload.get("adapter").and_then(Value::as_str)
-                                    == Some(expected_adapter)
-                        })
-                });
-            all_retired.then(|| pid.clone())
-        })
-        .collect();
-    for pid in retired_profile_ids {
+    for pid in retired_unmodified_starter_profile_ids(&work.document) {
         work.delete_profile(&pid)?;
     }
     for (profile_name, assignments) in specs {
@@ -3473,7 +3250,7 @@ mod agent_migration_tests {
             let before = draft.document.editable.clone();
             let revision = draft.revision;
             let ids = install_agent_starter_profiles(&mut draft).unwrap();
-            assert_eq!(&ids[..3], &old_ids);
+            assert_eq!(&ids[..2], &old_ids);
             assert_eq!(draft.revision, revision + 1);
             let count = draft.document.editable.graph.layers[&lid]
                 .controls
@@ -3589,25 +3366,31 @@ mod agent_migration_tests {
             }
         }
 
-        let herdr_pid = draft
+        let grokbot_pid = draft
             .document
             .editable
             .graph
             .profiles
             .iter()
-            .find(|(_, p)| p.name == "Herdr")
+            .find(|(_, p)| p.name == "Grok Bot")
             .unwrap()
             .0
             .clone();
-        let herdr_lid = draft.document.editable.graph.profiles[&herdr_pid].layer_order[0].clone();
+        let grokbot_lid =
+            draft.document.editable.graph.profiles[&grokbot_pid].layer_order[0].clone();
         let prompt_continue = crate::draft::actions()
             .into_iter()
             .find(|a| a.id == "prompt-continue")
             .unwrap();
         draft
-            .assign(&json!(herdr_pid), &json!(herdr_lid), 16, prompt_continue)
+            .assign(
+                &json!(grokbot_pid),
+                &json!(grokbot_lid),
+                16,
+                prompt_continue,
+            )
             .unwrap();
-        let herdr_before = draft.document.editable.graph.layers[&herdr_lid].clone();
+        let grokbot_before = draft.document.editable.graph.layers[&grokbot_lid].clone();
 
         let upgraded_ids = install_agent_starter_profiles(&mut draft).unwrap();
         assert_eq!(
@@ -3644,8 +3427,140 @@ mod agent_migration_tests {
         }
 
         assert!(
-            draft.document.editable.graph.layers[&herdr_lid] == herdr_before,
-            "User-customized Herdr profile (with joystick prompt) must remain untouched"
+            draft.document.editable.graph.layers[&grokbot_lid] == grokbot_before,
+            "User-customized Grok Bot profile (with joystick prompt) must remain untouched"
+        );
+    }
+
+    #[test]
+    fn grokbot_starter_profile_binds_exact_three_keys_and_retires_unmodified_herdr() {
+        let mut draft = Draft::default();
+        let herdr_pid = draft.create_profile("Herdr").unwrap();
+        let herdr_lid = draft.document.editable.graph.profiles[&herdr_pid].layer_order[0].clone();
+        draft
+            .assign(
+                &json!(herdr_pid),
+                &json!(herdr_lid),
+                0,
+                crate::draft::Action {
+                    id: "desktop-open".into(),
+                    name: "打开 Herdr".into(),
+                    category: "应用".into(),
+                    detail: "dev.herdr.app".into(),
+                    payload: json!({"type":"open_app","bundle_id":"dev.herdr.app"}),
+                },
+            )
+            .unwrap();
+        draft
+            .assign(
+                &json!(herdr_pid),
+                &json!(herdr_lid),
+                1,
+                crate::draft::Action {
+                    id: "herdr-desktop".into(),
+                    name: "选择 Space / Tab".into(),
+                    category: "快捷键".into(),
+                    detail: "dev.herdr.app".into(),
+                    payload: json!({"type":"shortcut","key":"p","modifiers":["command"],"target":"dev.herdr.app"}),
+                },
+            )
+            .unwrap();
+        assert!(has_retired_unmodified_starter_profiles(&draft.document));
+
+        let ids = install_agent_starter_profiles(&mut draft).unwrap();
+        assert_eq!(ids.len(), 6);
+        assert!(!has_retired_unmodified_starter_profiles(&draft.document));
+        assert!(
+            !draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .values()
+                .any(|p| p.name == "Herdr"),
+            "unmodified Herdr profile must be retired"
+        );
+
+        let grokbot_pid = ids
+            .iter()
+            .find(|pid| draft.document.editable.graph.profiles[*pid].name == "Grok Bot")
+            .expect("Grok Bot profile installed")
+            .clone();
+        let grokbot_lid =
+            draft.document.editable.graph.profiles[&grokbot_pid].layer_order[0].clone();
+        let layer = &draft.document.editable.graph.layers[&grokbot_lid];
+        let cs = layer.control_settings.as_ref().unwrap();
+        assert_eq!(cs.joystick_mode, "mouse");
+        assert_eq!(cs.active_sectors, 0);
+        assert!(cs.encoder_hold_action_id.is_none());
+
+        let bound_slots: Vec<u32> = (0..20u32)
+            .filter(|slot| {
+                layer
+                    .controls
+                    .values()
+                    .find(|b| b.logical_control == format!("logical-{slot}"))
+                    .and_then(|b| b.action_id.as_ref())
+                    .is_some()
+            })
+            .collect();
+        assert_eq!(bound_slots, vec![6, 11, 12]);
+
+        let action_for_slot = |slot: u32| -> &crate::draft::Action {
+            let aid = layer
+                .controls
+                .values()
+                .find(|b| b.logical_control == format!("logical-{slot}"))
+                .and_then(|b| b.action_id.as_ref())
+                .unwrap();
+            &draft.document.editable.graph.actions[aid]
+        };
+        let a6 = action_for_slot(6);
+        assert_eq!(a6.id, "desktop-live-voice");
+        assert_eq!(a6.name, "语音聊天");
+        assert_eq!(a6.payload["adapter"], "grokbot");
+        assert_eq!(a6.payload["command"], "live-voice");
+
+        let a11 = action_for_slot(11);
+        assert_eq!(a11.id, "desktop-dictation");
+        assert_eq!(a11.name, "点击听写");
+        assert_eq!(a11.payload["adapter"], "grokbot");
+        assert_eq!(a11.payload["command"], "toggle-dictation");
+
+        let a12 = action_for_slot(12);
+        assert_eq!(a12.id, "desktop-submit");
+        assert_eq!(a12.name, "发送消息（听写后发送）");
+        assert_eq!(a12.category, "提交控制");
+        assert_eq!(a12.payload["adapter"], "grokbot");
+        assert_eq!(a12.payload["command"], "submit");
+
+        let custom_herdr_pid = draft.create_profile("Herdr").unwrap();
+        let custom_herdr_lid =
+            draft.document.editable.graph.profiles[&custom_herdr_pid].layer_order[0].clone();
+        draft
+            .assign(
+                &json!(custom_herdr_pid),
+                &json!(custom_herdr_lid),
+                0,
+                crate::draft::Action {
+                    id: "custom-note".into(),
+                    name: "自定义文本".into(),
+                    category: "文本".into(),
+                    detail: "保留".into(),
+                    payload: json!({"type":"text","text":"keep-customized-herdr"}),
+                },
+            )
+            .unwrap();
+        assert!(!has_retired_unmodified_starter_profiles(&draft.document));
+        install_agent_starter_profiles(&mut draft).unwrap();
+        assert!(
+            draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .contains_key(&custom_herdr_pid),
+            "customized Herdr profile must be preserved"
         );
     }
 

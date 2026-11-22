@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn moves_back_and_forward_across_cross_agent_places_without_losing_forward_stack() {
         let mut history = NavigationHistory::new();
-        let herdr = NavigationPlace::app("dev.herdr.app");
+        let grokbot = NavigationPlace::app("com.anysphere.sand");
         let antigravity = NavigationPlace::app("com.google.antigravity");
         let dsh = NavigationPlace::app("com.deepseek.dsh");
         let other_app = NavigationPlace::app("org.example.editor");
@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(history.back(|_| true), None);
         assert_eq!(history.forward(|_| true), None);
 
-        for place in [&herdr, &antigravity, &dsh, &other_app, &codex] {
+        for place in [&grokbot, &antigravity, &dsh, &other_app, &codex] {
             history.visit(place.clone());
         }
         assert_eq!(history.current(), Some(&codex));
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(history.back(|_| true), Some(other_app.clone()));
         assert_eq!(history.back(|_| true), Some(dsh.clone()));
         assert_eq!(history.back(|_| true), Some(antigravity.clone()));
-        assert_eq!(history.back(|_| true), Some(herdr.clone()));
+        assert_eq!(history.back(|_| true), Some(grokbot.clone()));
         assert_eq!(history.back(|_| true), None);
         assert!(!history.can_go_back(|_| true));
         assert!(history.can_go_forward(|_| true));
@@ -249,13 +249,13 @@ mod tests {
     #[test]
     fn deduplicates_consecutive_visits_and_preserves_forward_stack_on_current_revisit() {
         let mut history = NavigationHistory::new();
-        let herdr = NavigationPlace::app("dev.herdr.app");
+        let grokbot = NavigationPlace::app("com.anysphere.sand");
         let other_app = NavigationPlace::app("org.example.editor");
         let codex = NavigationPlace::app("com.openai.codex");
 
-        history.visit(herdr.clone());
-        history.visit(herdr.clone());
-        assert_eq!(history.entries(), std::slice::from_ref(&herdr));
+        history.visit(grokbot.clone());
+        history.visit(grokbot.clone());
+        assert_eq!(history.entries(), std::slice::from_ref(&grokbot));
 
         history.visit(other_app.clone());
         history.visit(codex.clone());
@@ -269,12 +269,12 @@ mod tests {
     #[test]
     fn truncates_forward_branch_when_visiting_a_new_place_after_stepping_back() {
         let mut history = NavigationHistory::new();
-        let herdr = NavigationPlace::app("dev.herdr.app");
+        let grokbot = NavigationPlace::app("com.anysphere.sand");
         let antigravity = NavigationPlace::app("com.google.antigravity");
         let other_app = NavigationPlace::app("org.example.editor");
         let dsh = NavigationPlace::app("com.deepseek.dsh");
 
-        history.visit(herdr.clone());
+        history.visit(grokbot.clone());
         history.visit(antigravity.clone());
         history.visit(other_app);
 
@@ -283,25 +283,25 @@ mod tests {
 
         assert!(!history.can_go_forward(|_| true));
         assert_eq!(history.forward(|_| true), None);
-        assert_eq!(history.entries(), &[herdr, antigravity.clone(), dsh]);
+        assert_eq!(history.entries(), &[grokbot, antigravity.clone(), dsh]);
         assert_eq!(history.back(|_| true), Some(antigravity));
     }
 
     #[test]
     fn skips_unavailable_places_in_both_directions_without_corrupting_cursor() {
         let mut history = NavigationHistory::new();
-        let herdr = NavigationPlace::app("dev.herdr.app");
-        let stale_thread = NavigationPlace::session("herdr", "session-stale");
+        let grokbot = NavigationPlace::app("com.anysphere.sand");
+        let stale_thread = NavigationPlace::session("grokbot", "session-stale");
         let codex = NavigationPlace::app("com.openai.codex");
 
-        history.visit(herdr.clone());
+        history.visit(grokbot.clone());
         history.visit(stale_thread.clone());
         history.visit(codex.clone());
 
         let is_available = |place: &NavigationPlace| place != &stale_thread;
-        assert_eq!(history.back(is_available), Some(herdr.clone()));
+        assert_eq!(history.back(is_available), Some(grokbot.clone()));
         assert_eq!(history.back(is_available), None);
-        assert_eq!(history.current(), Some(&herdr));
+        assert_eq!(history.current(), Some(&grokbot));
 
         assert_eq!(history.forward(is_available), Some(codex.clone()));
         assert_eq!(history.forward(is_available), None);
@@ -316,16 +316,16 @@ mod tests {
     fn caps_history_length_at_max_history_50_entries() {
         let mut history = NavigationHistory::new();
         for i in 0..60 {
-            history.visit(NavigationPlace::session("herdr", format!("session-{i}")));
+            history.visit(NavigationPlace::session("grokbot", format!("session-{i}")));
         }
         assert_eq!(history.len(), MAX_HISTORY);
         assert_eq!(
             history.entries().first(),
-            Some(&NavigationPlace::session("herdr", "session-10"))
+            Some(&NavigationPlace::session("grokbot", "session-10"))
         );
         assert_eq!(
             history.current(),
-            Some(&NavigationPlace::session("herdr", "session-59"))
+            Some(&NavigationPlace::session("grokbot", "session-59"))
         );
         assert_eq!(history.index(), Some(MAX_HISTORY - 1));
     }

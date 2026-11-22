@@ -147,7 +147,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                     "back" | "navigate-back" | "forward" | "navigate-forward"
                 ) && matches!(
                     adapter.as_str(),
-                    "navigation" | "host" | "codex" | "antigravity" | "dsh-desktop" | "herdr"
+                    "navigation" | "host" | "codex" | "antigravity" | "dsh-desktop" | "grokbot"
                 ) =>
             {
                 prerequisites.push("需要 Mac 宿主常驻及至少一条小键盘打开历史".into());
@@ -223,7 +223,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
             Ok(ActionKind::AgentCommand { adapter, command })
                 if matches!(
                     adapter.as_str(),
-                    "host" | "codex" | "antigravity" | "dsh-desktop"
+                    "host" | "codex" | "antigravity" | "dsh-desktop" | "grokbot"
                 ) && (command == "submit"
                     || command
                         .strip_prefix("prompt:")
@@ -361,17 +361,22 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                                     | "open-side-panel"
                                     | "close-side-panel"
                             ))))
+                    || (adapter == "grokbot"
+                        && matches!(
+                            command.as_str(),
+                            "toggle-dictation"
+                                | "push-to-talk"
+                                | "dictation"
+                                | "submit"
+                                | "live-voice"
+                                | "focus-input"
+                        ))
                     || (matches!(
                         adapter.as_str(),
                         "host" | "codex" | "antigravity" | "dsh-desktop"
                     ) && command == "search");
-                let verified = matches!(adapter.as_str(), "herdr") || desktop;
-                if verified {
-                    prerequisites.push(if desktop {
-                        "需要目标应用、辅助功能权限及唯一可访问控件".into()
-                    } else {
-                        format!("需要本机已安装并配置 {adapter} CLI 适配器")
-                    });
+                if desktop {
+                    prerequisites.push("需要目标应用、辅助功能权限及唯一可访问控件".into());
                     (
                         format!("{adapter} / {command}"),
                         true,
@@ -392,30 +397,17 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                 }
             }
             Ok(ActionKind::FocusSession { adapter, session }) => {
-                let verified = matches!(adapter.as_str(), "herdr") && session != "unselected";
                 if session == "unselected" {
                     prerequisites.push("缺失具体会话引用；请先填写本地意图".into());
                 }
-                if verified {
-                    prerequisites.push(format!("需要本机已安装并配置 {adapter} CLI 适配器"));
-                    (
-                        format!("{adapter} / {session}"),
-                        true,
-                        true,
-                        "",
-                        "Mac 宿主 CLI 适配器（herdr）",
-                        "宿主激活对应 Profile 时按键可实时触发此动作",
-                    )
-                } else {
-                    (
-                        format!("{adapter} / {session}"),
-                        true,
-                        false,
-                        "工具适配器未验证或缺失具体会话引用；无法确认目标会话",
-                        "Micro Input 自有离线意图；不是已验证的设备或工具能力",
-                        "保存只改变本地草稿；没有执行结果",
-                    )
-                }
+                (
+                    format!("{adapter} / {session}"),
+                    true,
+                    false,
+                    "工具适配器未验证或缺失具体会话引用；无法确认目标会话",
+                    "Micro Input 自有离线意图；不是已验证的设备或工具能力",
+                    "保存只改变本地草稿；没有执行结果",
+                )
             }
             Ok(ActionKind::SkillReference { adapter, skill }) => {
                 if skill == "unselected" {
