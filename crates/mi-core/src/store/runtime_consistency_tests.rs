@@ -100,10 +100,10 @@ fn projector_reads_only_captured_facts_and_never_presents_or_normalizes() {
     assert_eq!(panels.calls.load(Ordering::SeqCst), panel_calls);
     assert_eq!(status.calls.load(Ordering::SeqCst), status_calls);
     assert_eq!(store.projection_generation(), generation);
-    let herdr = store
-        .find_canonical_profile_id(CanonicalAgent::Herdr)
+    let grokbot = store
+        .find_canonical_profile_id(CanonicalAgent::GrokBot)
         .unwrap();
-    store.browse_profile(&herdr).unwrap();
+    store.browse_profile(&grokbot).unwrap();
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
@@ -477,7 +477,7 @@ fn native_codex_cheat_sheets_show_local_labels_and_preserve_empty_controls() {
         sheet.key_cells
     );
     let other = store
-        .find_canonical_profile_id(CanonicalAgent::Herdr)
+        .find_canonical_profile_id(CanonicalAgent::GrokBot)
         .unwrap();
     store.browse_profile(&other).unwrap();
     assert_eq!(
@@ -1111,7 +1111,7 @@ fn poll_at_detects_session_navigation_and_slot_table_mutations() {
 fn idle_poll_after_browse_profile_skips_commit() {
     let (_dir, mut store, now) = active_store();
     let other = store
-        .find_canonical_profile_id(CanonicalAgent::Herdr)
+        .find_canonical_profile_id(CanonicalAgent::GrokBot)
         .unwrap();
     store.browse_profile(&other).unwrap();
     let commits_after_browse = store.commit_local_update_count;
@@ -1146,7 +1146,7 @@ fn idle_live_candidates_none_does_not_force_commit_local_update() {
 fn external_board_configuration_and_slot_role_override_mutations_are_detected_by_poll_at() {
     let (_dir, mut store, now) = active_store();
     let target = store
-        .find_canonical_profile_id(CanonicalAgent::Herdr)
+        .find_canonical_profile_id(CanonicalAgent::GrokBot)
         .unwrap();
     store
         .assign_board_layer(BoardLayer::ALL[3], Some(target))

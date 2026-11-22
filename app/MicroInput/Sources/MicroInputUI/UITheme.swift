@@ -846,7 +846,7 @@ public struct DesktopAgent: Identifiable, Sendable {
         .init(name: "Codex", bundleID: "com.openai.codex", symbol: "terminal"),
         .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles"),
         .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal"),
-        .init(name: "Herdr", bundleID: "dev.herdr.app", symbol: "rectangle.split.2x2"),
+        .init(name: "Grok Bot", bundleID: "com.anysphere.sand", symbol: "waveform"),
         .init(name: "其他软件", bundleID: otherAppsWildcardBundleID, symbol: "keyboard"),
     ]
 
@@ -915,20 +915,21 @@ public enum AgentProfileKind: String {
     case codex = "Codex"
     case antigravity = "Antigravity"
     case dsh = "DeepSeek Coder (DSH)"
-    case herdr = "Herdr"
+    case grokBot = "Grok Bot"
     case custom = "Custom"
 
     public static func from(profileName: String?) -> AgentProfileKind {
         guard let name = profileName else { return .custom }
         if name == "Codex · Micro Input" || name == "Codex · 原生" || name == "Codex · Native" { return .codex }
         if name == "Deepseek Harness" || name == "DeepSeek Harness" || name == "DSH" { return .dsh }
+        if name == "GrokBot" || name == "grokbot" { return .grokBot }
         return AgentProfileKind(rawValue: name) ?? .custom
     }
 
     public var supportsLiveSessionSlots: Bool {
         switch self {
         case .codex, .antigravity, .dsh: return true
-        case .herdr, .custom: return false
+        case .grokBot, .custom: return false
         }
     }
 
@@ -940,8 +941,8 @@ public enum AgentProfileKind: String {
         case (.antigravity, .en): return "Supports cross-workspace sessions, approvals, and live voice"
         case (.dsh, .zhHans): return "支持实时插话、停止生成与语音回复"
         case (.dsh, .en): return "Supports live steering, stop generation, and voice replies"
-        case (.herdr, .zhHans): return "终端工作区全动作键模式，直控标签、分栏与面板焦点"
-        case (.herdr, .en): return "Terminal workspace action mode for tabs, splits, and pane focus"
+        case (.grokBot, .zhHans): return "支持语音聊天、点击听写与听写后直接发送"
+        case (.grokBot, .en): return "Supports voice chat, toggle dictation, and send during dictation"
         case (.custom, .zhHans): return "其他软件与通用快捷键映射（默认底排麦克风键触发苹果 Fn 语音输入）"
         case (.custom, .en): return "General shortcuts & media keys (bottom mic key triggers Apple Fn dictation)"
         }

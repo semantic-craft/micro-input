@@ -177,7 +177,7 @@ impl ProjectionInputs<'_> {
             CanonicalAgent::Antigravity => Some("antigravity".to_string()),
             CanonicalAgent::Codex => Some("codex".to_string()),
             CanonicalAgent::DeepseekHarness => Some("dsh-desktop".to_string()),
-            CanonicalAgent::Herdr => Some("herdr".to_string()),
+            CanonicalAgent::GrokBot => Some("grokbot".to_string()),
             CanonicalAgent::OtherApps => None,
         }
     }

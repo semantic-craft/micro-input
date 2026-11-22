@@ -53,7 +53,7 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
         "Antigravity",
         "Codex",
         "Deepseek Harness",
-        "Herdr",
+        "Grok Bot",
         "其他软件",
     ];
     let actual_display_names: Vec<&str> = store
@@ -67,7 +67,7 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
         "Antigravity",
         mi_model::preset::LOCAL_CODEX_PROFILE_NAME,
         "DeepSeek Coder (DSH)",
-        "Herdr",
+        "Grok Bot",
         "其他软件",
     ];
     let actual_raw_names: Vec<&str> = store
@@ -779,21 +779,21 @@ fn foreground_app_changes_never_switch_active_host_profile_or_write_disk() {
     let temp = TempDir::new().unwrap();
     let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
 
-    let herdr_id = store
+    let grokbot_id = store
         .sidebar_rows()
         .iter()
-        .find(|row| row.canonical_agent == Some(CanonicalAgent::Herdr))
+        .find(|row| row.canonical_agent == Some(CanonicalAgent::GrokBot))
         .unwrap()
         .profile_id
         .clone();
     store
-        .dispatch_sidebar_action(SidebarAction::SelectProfile(herdr_id.clone()))
+        .dispatch_sidebar_action(SidebarAction::SelectProfile(grokbot_id.clone()))
         .unwrap();
     assert_eq!(
         store.projection().sidebar.selected_display_name.as_deref(),
-        Some("Herdr")
+        Some("Grok Bot")
     );
-    assert_eq!(store.active_host_profile_id(), Some(herdr_id.clone()));
+    assert_eq!(store.active_host_profile_id(), Some(grokbot_id.clone()));
 
     let host_rev_before = store.projection().host_revision;
     let doc_rev_before = store.projection().document_revision;
@@ -810,9 +810,9 @@ fn foreground_app_changes_never_switch_active_host_profile_or_write_disk() {
         assert_eq!(store.projection().document_revision, doc_rev_before);
         assert_eq!(
             store.projection().sidebar.selected_display_name.as_deref(),
-            Some("Herdr")
+            Some("Grok Bot")
         );
-        assert_eq!(store.active_host_profile_id(), Some(herdr_id.clone()));
+        assert_eq!(store.active_host_profile_id(), Some(grokbot_id.clone()));
     }
 }
 
@@ -3660,5 +3660,90 @@ fn open_isolated_migrates_persisted_v2_local_codex_and_lights_six_layer_session_
         assert_eq!(entry.k, format!("AG{slot:02}"));
         assert_eq!(entry.c, 0x0088FF);
         assert!(entry.b > 0.0);
+    }
+}
+
+#[test]
+fn grokbot_replaces_unmodified_herdr_and_projects_three_key_glyphs() {
+    let temp = TempDir::new().unwrap();
+    let doc_path = temp.path().join("workbench.json");
+    let mut doc_store = mi_model::storage::DocumentStore::default();
+    doc_store.open(doc_path.clone()).unwrap();
+    doc_store
+        .update(|draft| {
+            mi_model::preset::install_agent_starter_profiles(draft)?;
+            let grok_id = draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == "Grok Bot")
+                .map(|(id, _)| id.clone())
+                .unwrap();
+            draft.delete_profile(&grok_id)?;
+            let herdr_id = draft.create_profile("Herdr")?;
+            let herdr_lid =
+                draft.document.editable.graph.profiles[&herdr_id].layer_order[0].clone();
+            draft.assign(
+                &serde_json::json!(herdr_id),
+                &serde_json::json!(herdr_lid),
+                0,
+                mi_model::draft::Action {
+                    id: "desktop-open".into(),
+                    name: "打开 Herdr".into(),
+                    category: "应用".into(),
+                    detail: "dev.herdr.app".into(),
+                    payload: serde_json::json!({"type":"open_app","bundle_id":"dev.herdr.app"}),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert!(store.has_all_desktop_agent_presets());
+    assert!(
+        store
+            .sidebar_rows()
+            .iter()
+            .all(|row| row.raw_name != "Herdr"),
+        "unmodified Herdr profile must be retired on open"
+    );
+    let grokbot_id = {
+        let grokbot_row = store
+            .sidebar_rows()
+            .iter()
+            .find(|row| row.canonical_agent == Some(CanonicalAgent::GrokBot))
+            .expect("Grok Bot canonical sidebar row");
+        assert_eq!(grokbot_row.display_name, "Grok Bot");
+        assert_eq!(grokbot_row.badge_monogram, "GB");
+        grokbot_row.profile_id.clone()
+    };
+
+    store
+        .dispatch_sidebar_action(SidebarAction::SelectProfile(grokbot_id))
+        .unwrap();
+    let canvas = &store.projection().canvas;
+    let cell = |binding: &str| {
+        canvas
+            .keycap_cells
+            .iter()
+            .find(|c| c.binding_id == binding)
+            .unwrap_or_else(|| panic!("missing {binding}"))
+    };
+    assert_eq!(cell("AG06").keycap_id, "Party");
+    assert_eq!(cell("AG11").keycap_id, "Mic");
+    assert_eq!(cell("AG12").keycap_id, "Play");
+    for bound in ["AG06", "AG11", "AG12"] {
+        assert!(cell(bound).is_available, "Grok Bot {bound} must be bound");
+    }
+    for unbound in [
+        "AG00", "AG01", "AG02", "AG05", "AG07", "AG08", "AG09", "AG10",
+    ] {
+        assert!(
+            !cell(unbound).is_available,
+            "Grok Bot {unbound} must remain unbound"
+        );
     }
 }

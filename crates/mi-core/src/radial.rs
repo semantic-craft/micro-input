@@ -281,7 +281,7 @@ impl RadialSlotConfig {
     pub fn default_app_launcher_slots() -> [Self; RADIAL_SECTOR_COUNT] {
         let agents = [
             CanonicalAgent::Codex,
-            CanonicalAgent::Herdr,
+            CanonicalAgent::GrokBot,
             CanonicalAgent::Antigravity,
             CanonicalAgent::DeepseekHarness,
         ];

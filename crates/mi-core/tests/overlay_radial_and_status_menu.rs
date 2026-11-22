@@ -568,9 +568,9 @@ fn status_menu_quick_switch_2x2_favorites_swap_and_icon_and_preset_bounds() {
     let deepseek_id = store
         .find_canonical_profile_id(CanonicalAgent::DeepseekHarness)
         .expect("Deepseek");
-    let herdr_id = store
-        .find_canonical_profile_id(CanonicalAgent::Herdr)
-        .expect("Herdr");
+    let grokbot_id = store
+        .find_canonical_profile_id(CanonicalAgent::GrokBot)
+        .expect("Grok Bot");
     let codex_id = store
         .sidebar_rows()
         .iter()
@@ -589,7 +589,7 @@ fn status_menu_quick_switch_2x2_favorites_swap_and_icon_and_preset_bounds() {
     );
     assert_eq!(
         store.favorites_grid().slot(FavoriteSlotIndex::SLOT_2),
-        Some(herdr_id.as_str())
+        Some(grokbot_id.as_str())
     );
     assert_eq!(
         store.favorites_grid().slot(FavoriteSlotIndex::SLOT_3),
@@ -781,9 +781,9 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
     let antigravity_id = store
         .find_canonical_profile_id(CanonicalAgent::Antigravity)
         .expect("Antigravity");
-    let herdr_id = store
-        .find_canonical_profile_id(CanonicalAgent::Herdr)
-        .expect("Herdr");
+    let grokbot_id = store
+        .find_canonical_profile_id(CanonicalAgent::GrokBot)
+        .expect("Grok Bot");
     store
         .select_and_activate_profile(&antigravity_id)
         .expect("activate Antigravity");
@@ -815,10 +815,10 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
 
     store
         .dispatch_command(WorkbenchCommand::Sidebar(SidebarAction::BrowseProfile(
-            herdr_id.clone(),
+            grokbot_id.clone(),
         )))
-        .expect("browse Herdr in sidebar without activating");
-    assert_eq!(store.selected_profile_id(), Some(herdr_id.as_str()));
+        .expect("browse Grok Bot in sidebar without activating");
+    assert_eq!(store.selected_profile_id(), Some(grokbot_id.as_str()));
     assert_eq!(
         store.projection().status_menu.cheat_sheet_preview.as_ref(),
         Some(&split_sheet),
@@ -849,16 +849,16 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
     assert_eq!(ag10_merged.short_label, "按住说话");
 
     store
-        .dispatch_status_menu_action(StatusMenuAction::SelectProfile(herdr_id))
-        .expect("activate Herdr from status menu");
-    let herdr_sheet = store
+        .dispatch_status_menu_action(StatusMenuAction::SelectProfile(grokbot_id))
+        .expect("activate Grok Bot from status menu");
+    let grokbot_sheet = store
         .projection()
         .status_menu
         .cheat_sheet_preview
         .as_ref()
         .unwrap();
-    assert_eq!(herdr_sheet.profile_name, "Herdr");
-    assert_ne!(herdr_sheet.key_cells, merged_sheet.key_cells);
+    assert_eq!(grokbot_sheet.profile_name, "Grok Bot");
+    assert_ne!(grokbot_sheet.key_cells, merged_sheet.key_cells);
 
     let status_before_live = store.projection().status_menu.clone();
     store.ingest_four_app_candidates(vec![

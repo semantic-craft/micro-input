@@ -319,7 +319,7 @@ pub fn agent_for_place(place: &NavigationPlace) -> CanonicalAgent {
         NavigationPlace::Session { adapter, .. } => match adapter.as_str() {
             "dsh" | "dsh-desktop" => CanonicalAgent::DeepseekHarness,
             "codex" => CanonicalAgent::Codex,
-            "herdr" => CanonicalAgent::Herdr,
+            "grokbot" | "grok-bot" | "grok_bot" => CanonicalAgent::GrokBot,
             _ => CanonicalAgent::Antigravity,
         },
     }
