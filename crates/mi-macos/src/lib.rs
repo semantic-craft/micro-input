@@ -32,7 +32,9 @@ pub use executor::{
     SimulatedHostActionExecutor,
 };
 pub use instance_lock::DocumentInstanceLock;
-pub use managed_controls::{CodexReasoningAction, ModelPickerConfirmResult, SubagentOpenResult};
+pub use managed_controls::{
+    CodexReasoningAction, ContainerIdentity, ModelPickerConfirmResult, SubagentOpenResult,
+};
 pub use native_ax::{observe_codex_live_window_signals, observe_codex_window_state};
 pub use passive_panel::{
     NoopPassivePanelHost, PassivePanelEvent, PassivePanelFrameSpec, PassivePanelHost,

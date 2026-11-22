@@ -46,6 +46,14 @@ impl DeviceBudgetKey {
         }
         Self::VendorPath(String::new())
     }
+
+    pub fn from_candidate(candidate: &crate::HidCandidate) -> Self {
+        Self::from_identity(
+            candidate.serial_number.as_deref(),
+            candidate.location_id,
+            &candidate.path,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,6 +342,13 @@ impl DeviceBudgetRegistry {
         budget
     }
 
+    pub fn budget_for_candidate(&self, candidate: &crate::HidCandidate) -> Arc<DeviceWriteBudget> {
+        self.budget_for(
+            DeviceBudgetKey::from_candidate(candidate),
+            WriteBudgetPolicy::for_transport(candidate.transport_hint.clone()),
+        )
+    }
+
     pub fn get(&self, key: &DeviceBudgetKey) -> Option<Arc<DeviceWriteBudget>> {
         self.budgets.lock().unwrap().get(key).cloned()
     }
@@ -399,6 +414,36 @@ mod tests {
             DeviceBudgetKey::from_identity(None, None, "  DevSrvsID:9  "),
             DeviceBudgetKey::VendorPath("DevSrvsID:9".into())
         );
+    }
+
+    #[test]
+    fn device_budget_key_from_candidate_uses_usb_location_when_serial_is_absent() {
+        let candidate = crate::HidCandidate {
+            vid: 0x303a,
+            pid: 0x8298,
+            usage_page: 0xff00,
+            usage: 1,
+            usage_pairs: vec![crate::UsagePair {
+                page: 0xff00,
+                usage: 1,
+            }],
+            transport_hint: TransportHint::Usb,
+            product: "Creator Micro 2".into(),
+            path: "DevSrvsID:77".into(),
+            serial_number: None,
+            location_id: Some(0x1420),
+        };
+        assert_eq!(
+            DeviceBudgetKey::from_candidate(&candidate),
+            DeviceBudgetKey::UsbLocation(0x1420)
+        );
+        let registry = DeviceBudgetRegistry::new();
+        let a = registry.budget_for_candidate(&candidate);
+        let b = registry.budget_for(
+            DeviceBudgetKey::UsbLocation(0x1420),
+            WriteBudgetPolicy::usb(),
+        );
+        assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[test]

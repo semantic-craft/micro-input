@@ -472,3 +472,22 @@ fn leaked() -> &'static str {
         )
         self.assertEqual(len(raw_violations), 1)
         self.assertTrue(any("Archive conversation" in v for v in raw_violations))
+
+        execution_side_prod = """
+fn match_exec(label: &str) -> bool {
+    matches!(label, "Scroll to bottom" | "Send message" | "跳到底部" | "傳送訊息")
+}
+"""
+        exec_violations = module.find_scattered_antigravity_ax_label_violations(
+            "crates/mi-macos/src/native_ax.rs",
+            execution_side_prod,
+        )
+        self.assertEqual(len(exec_violations), 4)
+        for expected in ("Scroll to bottom", "Send message", "跳到底部", "傳送訊息"):
+            self.assertTrue(any(expected in v for v in exec_violations))
+        self.assertTrue(
+            all(
+                "crates/mi-macos/src/antigravity_ax_labels.rs" in v
+                for v in exec_violations
+            )
+        )

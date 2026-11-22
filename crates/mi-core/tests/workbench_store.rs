@@ -1004,6 +1004,7 @@ fn usb_connect_and_verified_input_pump_dispatches_host_actions_and_handles_disco
             product: "Creator Micro 2".to_string(),
             path: "IOService:/Synthetic/CreatorMicro2".to_string(),
             serial_number: None,
+            location_id: None,
         },
         link: Mutex::new(Some(link)),
         events,
@@ -1406,6 +1407,7 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCas
             product: "Creator Micro 2".to_string(),
             path: "IOService:/Synthetic/AutoAcceptCreatorMicro2".to_string(),
             serial_number: None,
+            location_id: None,
         },
         link: Mutex::new(Some(link)),
         events,
@@ -2394,6 +2396,7 @@ fn standard_device_session_connect_forwards_kb_cs_notifications_with_dedup() {
             product: "Creator Micro 2".to_string(),
             path: "IOService:/Synthetic/CheatSheetSession".to_string(),
             serial_number: None,
+            location_id: None,
         },
         link: Mutex::new(Some(link)),
         events,
@@ -2619,6 +2622,7 @@ fn multi_device_usb_selection_persistence_fallback_and_switch_isolation() {
         product: "Creator Micro 2".to_string(),
         path: path.to_string(),
         serial_number: Some(serial.to_string()),
+        location_id: None,
     };
 
     let beta = make_candidate("IOService:/Synthetic/Beta", "SN-BETA");
@@ -3685,6 +3689,15 @@ fn grokbot_replaces_unmodified_herdr_and_projects_three_key_glyphs() {
             let herdr_id = draft.create_profile("Herdr")?;
             let herdr_lid =
                 draft.document.editable.graph.profiles[&herdr_id].layer_order[0].clone();
+            draft.set_control_settings(
+                &herdr_id,
+                &herdr_lid,
+                mi_model::control_settings::ControlSettings {
+                    joystick_mode: "logical_sectors".into(),
+                    active_sectors: 4,
+                    encoder_hold_action_id: None,
+                },
+            )?;
             draft.assign(
                 &serde_json::json!(herdr_id),
                 &serde_json::json!(herdr_lid),
@@ -3697,6 +3710,42 @@ fn grokbot_replaces_unmodified_herdr_and_projects_three_key_glyphs() {
                     payload: serde_json::json!({"type":"open_app","bundle_id":"dev.herdr.app"}),
                 },
             )?;
+            for (slot, label, key, modifiers) in [
+                (1u32, "选择 Space / Tab", "p", vec!["command"]),
+                (2, "搜索命令", "p", vec!["command", "shift"]),
+                (3, "新建 Space", "n", vec!["command"]),
+                (4, "新建 Tab / 终端", "t", vec!["command"]),
+                (5, "向右分屏", "d", vec!["command"]),
+                (6, "向下分屏", "d", vec!["command", "shift"]),
+                (7, "上一个 Space", "[", vec!["command", "option"]),
+                (8, "下一个 Space", "]", vec!["command", "option"]),
+                (9, "上一个 Tab", "Tab", vec!["control", "shift"]),
+                (10, "下一个 Tab", "Tab", vec!["control"]),
+                (12, "放大 / 还原面板", "Return", vec!["command", "shift"]),
+                (15, "显示 / 隐藏侧栏", "b", vec!["command"]),
+                (16, "聚焦上方面板", "Up", vec!["command", "option"]),
+                (17, "聚焦左方面板", "Left", vec!["command", "option"]),
+                (18, "聚焦下方面板", "Down", vec!["command", "option"]),
+                (19, "聚焦右方面板", "Right", vec!["command", "option"]),
+            ] {
+                draft.assign(
+                    &serde_json::json!(herdr_id),
+                    &serde_json::json!(herdr_lid),
+                    slot,
+                    mi_model::draft::Action {
+                        id: "herdr-desktop".into(),
+                        name: label.into(),
+                        category: "快捷键".into(),
+                        detail: "dev.herdr.app".into(),
+                        payload: serde_json::json!({
+                            "type": "shortcut",
+                            "key": key,
+                            "modifiers": modifiers,
+                            "target": "dev.herdr.app"
+                        }),
+                    },
+                )?;
+            }
             Ok(())
         })
         .unwrap();

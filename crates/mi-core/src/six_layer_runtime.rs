@@ -444,6 +444,7 @@ impl RunningSixLayer {
             usage_pairs: vec![],
             transport_hint: mi_transport::TransportHint::Usb,
             serial_number: None,
+            location_id: None,
         };
         new_running(
             Arc::new(UserCommandReceiver::bind().unwrap()),

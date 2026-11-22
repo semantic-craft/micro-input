@@ -355,17 +355,22 @@ pub const OPEN_SUBAGENT_PREFIX: BilingualLabelSet = BilingualLabelSet {
     zh: &["打开子智能体", "打开子代理"],
 };
 
-pub const SCROLL_OR_SEND_BUTTONS: BilingualLabelSet = BilingualLabelSet {
-    key: "scroll_or_send_buttons",
-    en: &[
-        "Jump to bottom",
-        "Scroll to bottom",
-        "Scroll to Bottom",
-        "Send",
-        "Send message",
-        "Submit",
-    ],
-    zh: &["跳到底部", "滚动到底部", "发送", "发送消息", "提交"],
+pub const SCROLL_TO_BOTTOM: BilingualLabelSet = BilingualLabelSet {
+    key: "scroll_to_bottom",
+    en: &["Jump to bottom", "Scroll to bottom"],
+    zh: &["跳到底部", "滚动到底部"],
+};
+
+pub const SEND_MESSAGE: BilingualLabelSet = BilingualLabelSet {
+    key: "send_message",
+    en: &["Send message"],
+    zh: &["发送消息", "傳送訊息"],
+};
+
+pub const SUBMIT_MESSAGE: BilingualLabelSet = BilingualLabelSet {
+    key: "submit_message",
+    en: &["Send", "Send message", "Submit"],
+    zh: &["发送", "发送消息", "傳送訊息", "提交"],
 };
 
 pub const ALL_BILINGUAL_LABEL_SETS: &[&BilingualLabelSet] = &[
@@ -408,7 +413,9 @@ pub const ALL_BILINGUAL_LABEL_SETS: &[&BilingualLabelSet] = &[
     &SUBAGENT_EXCLUDED,
     &SUBAGENT_KEYWORD,
     &OPEN_SUBAGENT_PREFIX,
-    &SCROLL_OR_SEND_BUTTONS,
+    &SCROLL_TO_BOTTOM,
+    &SEND_MESSAGE,
+    &SUBMIT_MESSAGE,
 ];
 
 pub fn is_dictation_start(label: &str) -> bool {
@@ -628,8 +635,20 @@ pub fn is_open_subagent_button(label: &str) -> bool {
     OPEN_SUBAGENT_PREFIX.matches_prefix(label)
 }
 
+pub fn is_scroll_to_bottom(label: &str) -> bool {
+    SCROLL_TO_BOTTOM.matches_ascii_case_insensitive(label)
+}
+
+pub fn is_send_message(label: &str) -> bool {
+    SEND_MESSAGE.matches_exact(label)
+}
+
+pub fn is_submit_message(label: &str) -> bool {
+    SUBMIT_MESSAGE.matches_ascii_case_insensitive(label)
+}
+
 pub fn is_scroll_or_send_button(label: &str) -> bool {
-    SCROLL_OR_SEND_BUTTONS.matches_exact(label)
+    is_scroll_to_bottom(label) || is_submit_message(label)
 }
 
 #[cfg(test)]
@@ -778,5 +797,36 @@ mod tests {
         assert!(is_open_subagent_button("Open subagent: Planner"));
         assert!(is_open_subagent_button("打开子智能体：Planner"));
         assert!(is_open_subagent_button("打开子代理：Planner"));
+    }
+
+    #[test]
+    fn matches_scroll_to_bottom_and_submit_message_case_insensitively_and_bilingually() {
+        for label in [
+            "Jump to bottom",
+            "Scroll to bottom",
+            "Scroll to Bottom",
+            "SCROLL TO BOTTOM",
+            "跳到底部",
+            "滚动到底部",
+        ] {
+            assert!(is_scroll_to_bottom(label), "expected scroll match: {label}");
+            assert!(is_scroll_or_send_button(label));
+            assert!(!is_submit_message(label));
+        }
+
+        for label in [
+            "Send",
+            "Send message",
+            "send message",
+            "Submit",
+            "发送",
+            "发送消息",
+            "傳送訊息",
+            "提交",
+        ] {
+            assert!(is_submit_message(label), "expected submit match: {label}");
+            assert!(is_scroll_or_send_button(label));
+            assert!(!is_scroll_to_bottom(label));
+        }
     }
 }
