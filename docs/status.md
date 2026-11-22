@@ -4,8 +4,8 @@
 
 ## 当前版本与架构基线
 
-- **最新发行标签**：[v0.12.1](releases/v0.12.1.md)（`CFBundleShortVersionString = 0.12.1`；历次发行说明归档于 [releases/](releases/v0.12.1.md)）。
-- **主线演进（v0.12.1 基线）**：合入 Antigravity 后台日志存活感知、自动重试/60 秒慢等/`429` 报错与守护进程断连异常呼吸灯效及双语悬停原因提示（PR #173），延续 v0.12.0 响应驱动双源状态灯、存量预设迁移与零普通注释门禁基线（PR #169、#170、#171）。
+- **最新发行标签**：[v0.12.2](releases/v0.12.2.md)（`CFBundleShortVersionString = 0.12.2`；历次发行说明归档于 [releases/](releases/v0.12.2.md)）。
+- **主线演进（v0.12.2 基线）**：合入 `worklouder/input-kit` v0.3.0 单设备 10 秒滚动写入预算器（USB 60/10s、BLE 40/10s + 250ms 节流）、跨 `VendorBridge` 900 次轮换共享预算注册表、非阻塞 `DeviceSession` 限流与零新依赖 `mi-proto::input_kit` 协议基础层（PR #175），延续 v0.12.1 Antigravity 后台日志存活感知（PR #173）与 v0.12.0 双源状态灯及零普通注释门禁基线（PR #169、#170、#171）。
 - **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C15`。
 
 ## 已实现与已验证能力

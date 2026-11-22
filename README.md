@@ -1,6 +1,6 @@
 # Micro Input
 
-[简体中文](#简体中文) · [English](#english) · [最新发行版 v0.12.1](docs/releases/v0.12.1.md) · [24 秒演示短片](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-landing-zh.mp4) · [开发状态与历史验收日志](docs/status.md)
+[简体中文](#简体中文) · [English](#english) · [最新发行版 v0.12.2](docs/releases/v0.12.2.md) · [24 秒演示短片](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-landing-zh.mp4) · [开发状态与历史验收日志](docs/status.md)
 
 [![Micro Input v0.12.0 演示短片](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-readme-preview.webp)](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-landing-zh.mp4)
 
@@ -139,7 +139,7 @@ scripts/run             # 启动当前 checkout 构建的 target/MicroInput.app�
 
 A standalone macOS AI coding workbench and native **Work Louder Creator Micro 2** configurator. Even without owning a Creator Micro 2 keypad, the local **Antigravity** session parser and low-latency macOS Accessibility control chain in this repository stay completely decoupled from hardware HID code, so you can reuse them to build Antigravity integrations for the QMK or VIA keyboard, Stream Deck, Loupedeck, multi-button mouse, voice foot pedal, or DIY controller already on your desk, or run the app offline to inspect and jump directly to active coding sessions. With a Creator Micro 2 connected, Micro Input replaces Electron-based `Input.app` workflows and fixed vendor plugins for daily key remapping, safe official firmware upgrades, Antigravity ergonomics, and customizable Codex controls.
 
-Micro Input uses a pure Rust core, a minimal C-ABI static boundary, and a native SwiftUI and AppKit shell weighing 18 MB in its Apple-notarized installed app bundle (8.5 MB zipped release archive) under the [MIT License](LICENSE). Latest release: [v0.12.1](docs/releases/v0.12.1.md) ([24s Demo Video](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-landing-en.mp4)). It drops Electron, refuses silent Flash writes on unverified hardware states, and tracks unverified firmware behaviors openly in repository documentation.
+Micro Input uses a pure Rust core, a minimal C-ABI static boundary, and a native SwiftUI and AppKit shell weighing 18 MB in its Apple-notarized installed app bundle (8.5 MB zipped release archive) under the [MIT License](LICENSE). Latest release: [v0.12.2](docs/releases/v0.12.2.md) ([24s Demo Video](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-landing-en.mp4)). It drops Electron, refuses silent Flash writes on unverified hardware states, and tracks unverified firmware behaviors openly in repository documentation.
 
 [![Micro Input v0.12.0 Demo Video](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-readme-preview-en.webp)](https://github.com/semantic-craft/micro-input/releases/download/v0.12.0/micro-input-landing-en.mp4)
 
