@@ -5,7 +5,7 @@
 | 应用 | 入口和证据 |
 | --- | --- |
 | Antigravity | [会话目录与原生导航](../integrations/antigravity/README.md)。工作台直接读取 hub 元数据并通过原窗口 AX 回读确认；[Rust 桥](../crates/mi-bridge/src/antigravity.rs)保留独立协议回归。 |
-| Herdr | [桌面控制验收](verification/desktop-agent-controls.md)记录本机桌面版的快捷键入口。预设只对 `dev.herdr.app` 派发。 |
+| Grok Bot | [原生辅助功能标签](../crates/mi-macos/src/grokbot_ax_labels.rs)与[宿主控件状态机](../crates/mi-macos/src/managed_controls.rs)。仅对 `com.anysphere.sand` 派发三键控制：语音聊天、点击听写（含 `AXApplicationStatus` 转写状态门禁）与录音态直触发送。 |
 | Codex | [原生执行器](../crates/mi-macos/src/executor.rs)和[受保护层测试](../crates/mi-model/tests/protected_oai_layer.rs)。设备层识别与应用快捷键分开。 |
 | DeepSeek Harness | [同 Host 桥](../integrations/dsh/README.md)和 [Rust 实现](../crates/mi-bridge/src/dsh.rs)。目录、订阅和命令受授权范围与目标身份限制。 |
 

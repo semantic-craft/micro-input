@@ -97,7 +97,7 @@ impl WorkbenchStore {
             Some(CanonicalAgent::Antigravity) => Some("antigravity"),
             Some(CanonicalAgent::Codex) => Some("codex"),
             Some(CanonicalAgent::DeepseekHarness) => Some("dsh-desktop"),
-            Some(CanonicalAgent::Herdr) => Some("herdr"),
+            Some(CanonicalAgent::GrokBot) => Some("grokbot"),
             _ => None,
         };
         let action_profile_id = self.runtime_action_profile_id(profile_id);

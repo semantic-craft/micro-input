@@ -74,7 +74,7 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
 
     let antigravity_pid = find_profile_id(&draft, "Antigravity")?;
     let dsh_pid = find_profile_id(&draft, "DeepSeek Coder (DSH)")?;
-    let herdr_pid = find_profile_id(&draft, "Herdr")?;
+    let grokbot_pid = find_profile_id(&draft, "Grok Bot")?;
     let other_apps_pid = find_profile_id(&draft, "其他软件")?;
 
     let simulator = SimulatedHostActionExecutor::new();
@@ -124,18 +124,23 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
         fire_binding(&mut receipts, &draft.document, &dsh_pid, binding)?;
     }
 
-    fire_binding(&mut receipts, &draft.document, &herdr_pid, "AG00")?;
+    fire_binding(&mut receipts, &draft.document, &grokbot_pid, "AG06")?;
     {
         let mut held_groups = BTreeSet::new();
         for raw_switch in ["AG10", "AG11"] {
             let spec = verified_physical_mapping_for_layout(raw_switch, BottomRowLayout::Merged)
                 .ok_or_else(|| format!("missing spec for {raw_switch}"))?;
             if held_groups.insert(spec.keycap_group.to_string()) {
-                fire_binding(&mut receipts, &draft.document, &herdr_pid, spec.binding_id)?;
+                fire_binding(
+                    &mut receipts,
+                    &draft.document,
+                    &grokbot_pid,
+                    spec.binding_id,
+                )?;
             }
         }
     }
-    fire_binding(&mut receipts, &draft.document, &herdr_pid, "AG01")?;
+    fire_binding(&mut receipts, &draft.document, &grokbot_pid, "AG12")?;
 
     {
         let other_lid =
@@ -149,7 +154,7 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
     for target in [
         "com.google.antigravity",
         "com.deepseek.dsh",
-        "dev.herdr.app",
+        "com.anysphere.sand",
     ] {
         nav.visit(NavigationPlace::app(target));
     }
@@ -158,7 +163,7 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
         .ok_or_else(|| "navigation back target missing".to_string())?;
     let back_receipt = simulator
         .execute_and_record(
-            &herdr_pid,
+            &grokbot_pid,
             "menu-navigate-back",
             &ResolvedHostAction::OpenApp {
                 bundle_id: back_place.target_id(),

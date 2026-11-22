@@ -907,6 +907,38 @@ final class MicroInputTests: XCTestCase {
         let custom = AgentProfileKind.from(profileName: "Custom")
         XCTAssertEqual(custom, .custom)
         XCTAssertFalse(custom.supportsLiveSessionSlots)
+
+        for name in ["Grok Bot", "GrokBot", "grokbot"] {
+            let kind = AgentProfileKind.from(profileName: name)
+            XCTAssertEqual(kind, .grokBot)
+            XCTAssertFalse(kind.supportsLiveSessionSlots)
+        }
+        let agent = DesktopAgent.named("Grok Bot")
+        XCTAssertEqual(agent?.bundleID, "com.anysphere.sand")
+        XCTAssertEqual(agent?.symbol, "waveform")
+        XCTAssertNil(DesktopAgent.named("Herdr"))
+    }
+
+    @MainActor
+    func testGrokBotProfileProjectsThreeKeyStarterLayout() throws {
+        let dir = try makeIsolatedTempDir("grokbot-starter")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        let grokRow = try XCTUnwrap(store.model.sidebarRows.first(where: { $0.displayName == "Grok Bot" }))
+        XCTAssertEqual(grokRow.badgeMonogram, "GB")
+        store.dispatch("sidebar", ["SelectProfile": grokRow.profileId])
+
+        let byBinding = Dictionary(uniqueKeysWithValues: store.canvas.keycapCells.map { ($0.bindingId, $0) })
+        XCTAssertEqual(byBinding["AG06"]?.keycapId, "Party")
+        XCTAssertEqual(byBinding["AG06"]?.isAvailable, true)
+        XCTAssertEqual(byBinding["AG11"]?.keycapId, "Mic")
+        XCTAssertEqual(byBinding["AG11"]?.isAvailable, true)
+        XCTAssertEqual(byBinding["AG12"]?.keycapId, "Play")
+        XCTAssertEqual(byBinding["AG12"]?.isAvailable, true)
+        for binding in ["AG00", "AG01", "AG02", "AG05", "AG07", "AG08", "AG09", "AG10"] {
+            XCTAssertEqual(byBinding[binding]?.isAvailable, false, "Grok Bot \(binding) should remain unbound")
+        }
     }
 
     @MainActor

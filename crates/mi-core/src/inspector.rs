@@ -208,7 +208,7 @@ const KEYCAP_DESCRIPTORS: [KeycapDescriptor; 34] = [
         chinese_hint: "切换终端面板",
         glyph_symbol: "⌘",
         search_keywords: &["term", "terminal", "shell", "console", "终端", "命令行"],
-        default_action_id: Some("pane"),
+        default_action_id: Some("shell-command"),
     },
     KeycapDescriptor {
         id: CodexKeycapId::Download,
@@ -626,6 +626,7 @@ impl CodexKeycapId {
                 || a.id.contains("live-voice")
                 || cmd == Some("live-voice")
                 || a.name.contains("实时语音")
+                || a.name.contains("语音聊天")
             {
                 return Self::Party;
             }

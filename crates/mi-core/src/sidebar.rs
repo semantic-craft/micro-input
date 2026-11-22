@@ -7,7 +7,7 @@ pub enum CanonicalAgent {
     Antigravity = 0,
     Codex = 1,
     DeepseekHarness = 2,
-    Herdr = 3,
+    GrokBot = 3,
     OtherApps = 4,
 }
 
@@ -16,7 +16,7 @@ impl CanonicalAgent {
         Self::Antigravity,
         Self::Codex,
         Self::DeepseekHarness,
-        Self::Herdr,
+        Self::GrokBot,
         Self::OtherApps,
     ];
 
@@ -29,7 +29,7 @@ impl CanonicalAgent {
             Self::Antigravity => "Antigravity",
             Self::Codex => "Codex",
             Self::DeepseekHarness => "DeepSeek Coder (DSH)",
-            Self::Herdr => "Herdr",
+            Self::GrokBot => "Grok Bot",
             Self::OtherApps => "其他软件",
         }
     }
@@ -39,7 +39,7 @@ impl CanonicalAgent {
             Self::Antigravity => "Antigravity",
             Self::Codex => "Codex",
             Self::DeepseekHarness => "Deepseek Harness",
-            Self::Herdr => "Herdr",
+            Self::GrokBot => "Grok Bot",
             Self::OtherApps => "其他软件",
         }
     }
@@ -56,7 +56,7 @@ impl CanonicalAgent {
             Self::Antigravity => "com.google.antigravity",
             Self::Codex => "com.openai.codex",
             Self::DeepseekHarness => "com.deepseek.dsh",
-            Self::Herdr => "dev.herdr.app",
+            Self::GrokBot => "com.anysphere.sand",
             Self::OtherApps => "*",
         }
     }
@@ -66,7 +66,7 @@ impl CanonicalAgent {
             Self::Antigravity => "AG",
             Self::Codex => "CX",
             Self::DeepseekHarness => "DS",
-            Self::Herdr => "HD",
+            Self::GrokBot => "GB",
             Self::OtherApps => "通用",
         }
     }

@@ -190,9 +190,18 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     draft.undo(true).unwrap();
     assert_eq!(draft.config.profiles.len(), 6);
 
-    let ag_pid = &created[0];
-    let herdr_pid = &created[1];
-    let dsh_pid = &created[2];
+    let ag_pid = created
+        .iter()
+        .find(|pid| draft.document.editable.graph.profiles[*pid].name == "Antigravity")
+        .unwrap();
+    let dsh_pid = created
+        .iter()
+        .find(|pid| draft.document.editable.graph.profiles[*pid].name == "DeepSeek Coder (DSH)")
+        .unwrap();
+    let grokbot_pid = created
+        .iter()
+        .find(|pid| draft.document.editable.graph.profiles[*pid].name == "Grok Bot")
+        .unwrap();
     assert!(resolve_host_action(&draft.document, Some(ag_pid), "AG00", false).is_none());
 
     for slot in 0..6u32 {
@@ -264,15 +273,40 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         })
     );
     assert_eq!(
-        resolve_host_action(&draft.document, Some(herdr_pid), "AG00", true).unwrap(),
-        ResolvedHostAction::OpenApp {
-            bundle_id: "dev.herdr.app".into()
+        resolve_host_action(&draft.document, Some(grokbot_pid), "AG06", true).unwrap(),
+        ResolvedHostAction::AgentCommand {
+            adapter: "grokbot".into(),
+            command: "live-voice".into(),
         }
     );
-    for binding in ["AG01", "AG02", "AG10", "ENC_CLK"] {
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(grokbot_pid), "AG10", true).unwrap(),
+        ResolvedHostAction::AgentCommand {
+            adapter: "grokbot".into(),
+            command: "toggle-dictation".into(),
+        }
+    );
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(grokbot_pid), "AG11", true).unwrap(),
+        ResolvedHostAction::AgentCommand {
+            adapter: "grokbot".into(),
+            command: "toggle-dictation".into(),
+        }
+    );
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(grokbot_pid), "AG12", true).unwrap(),
+        ResolvedHostAction::AgentCommand {
+            adapter: "grokbot".into(),
+            command: "submit".into(),
+        }
+    );
+    for binding in [
+        "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG07", "AG08", "AG09", "AG13", "AG14",
+        "ENC_CLK", "AG15", "AG16", "AG17", "AG18",
+    ] {
         assert!(
-            matches!(resolve_host_action(&draft.document, Some(herdr_pid), binding, true),
-            Some(ResolvedHostAction::Shortcut { target_bundle_id: Some(ref target), .. }) if target == "dev.herdr.app")
+            resolve_host_action(&draft.document, Some(grokbot_pid), binding, true).is_none(),
+            "Grok Bot {binding} must remain unbound"
         );
     }
 
@@ -946,9 +980,9 @@ fn bottom_row_split_and_merge_layout_routing_and_persistence() {
         .find(|pid| store.draft.document.editable.graph.profiles[*pid].name == "Antigravity")
         .unwrap()
         .clone();
-    let herdr_pid = ids
+    let grokbot_pid = ids
         .iter()
-        .find(|pid| store.draft.document.editable.graph.profiles[*pid].name == "Herdr")
+        .find(|pid| store.draft.document.editable.graph.profiles[*pid].name == "Grok Bot")
         .unwrap()
         .clone();
 
@@ -1008,22 +1042,27 @@ fn bottom_row_split_and_merge_layout_routing_and_persistence() {
 
     assert!(resolve_host_action_with_layout(
         &store.draft.document,
-        Some(&herdr_pid),
+        Some(&grokbot_pid),
         "AG10",
         true,
         false,
         BottomRowLayout::Split
     )
-    .is_some());
-    assert!(resolve_host_action_with_layout(
-        &store.draft.document,
-        Some(&herdr_pid),
-        "AG11",
-        true,
-        false,
-        BottomRowLayout::Split
-    )
     .is_none());
+    assert_eq!(
+        resolve_host_action_with_layout(
+            &store.draft.document,
+            Some(&grokbot_pid),
+            "AG11",
+            true,
+            false,
+            BottomRowLayout::Split
+        ),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "grokbot".into(),
+            command: "toggle-dictation".into(),
+        })
+    );
 
     let state_split = store.routing_state();
     assert_eq!(state_split["bottom_row_layout"], "split");
@@ -1059,15 +1098,34 @@ fn bottom_row_split_and_merge_layout_routing_and_persistence() {
             command: "push-to-talk".into(),
         })
     );
-    assert!(resolve_host_action_with_layout(
-        &store.draft.document,
-        Some(&herdr_pid),
-        "AG11",
-        true,
-        false,
-        BottomRowLayout::Merged
-    )
-    .is_some());
+    assert_eq!(
+        resolve_host_action_with_layout(
+            &store.draft.document,
+            Some(&grokbot_pid),
+            "AG10",
+            true,
+            false,
+            BottomRowLayout::Merged
+        ),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "grokbot".into(),
+            command: "toggle-dictation".into(),
+        })
+    );
+    assert_eq!(
+        resolve_host_action_with_layout(
+            &store.draft.document,
+            Some(&grokbot_pid),
+            "AG11",
+            true,
+            false,
+            BottomRowLayout::Merged
+        ),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "grokbot".into(),
+            command: "toggle-dictation".into(),
+        })
+    );
 
     let mut reopened = mi_model::storage::DocumentStore::default();
     reopened.open(doc_path).unwrap();

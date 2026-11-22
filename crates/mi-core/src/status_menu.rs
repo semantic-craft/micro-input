@@ -72,7 +72,7 @@ impl PinnedFavoritesGrid {
     pub const DEFAULT_AGENTS: [CanonicalAgent; FAVORITE_SLOT_COUNT] = [
         CanonicalAgent::Antigravity,
         CanonicalAgent::DeepseekHarness,
-        CanonicalAgent::Herdr,
+        CanonicalAgent::GrokBot,
         CanonicalAgent::Codex,
     ];
 

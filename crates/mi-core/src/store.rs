@@ -1233,6 +1233,9 @@ impl WorkbenchStore {
 
     pub fn has_all_desktop_agent_presets(&self) -> bool {
         let doc = &self.document_store.draft.document;
+        if mi_model::preset::has_retired_unmodified_starter_profiles(doc) {
+            return false;
+        }
         let profiles = &doc.editable.graph.profiles;
         let Some(local_codex_id) = self.local_codex_profile_id() else {
             return false;

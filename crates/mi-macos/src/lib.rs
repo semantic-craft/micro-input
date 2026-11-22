@@ -4,6 +4,7 @@ pub mod ax_dictation;
 pub mod codex_sessions;
 pub mod diagnostics;
 pub mod executor;
+pub(crate) mod grokbot_ax_labels;
 pub mod instance_lock;
 pub mod managed_controls;
 pub mod native_ax;

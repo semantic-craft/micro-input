@@ -160,12 +160,24 @@ fn prompt_slots_and_submit_control_actions_report_paste_only_vs_explicit_submit_
     }
 
     let submit_entries = action_library::search("", "提交控制", false, &BTreeSet::new(), false);
-    assert_eq!(submit_entries.len(), 2);
+    assert_eq!(submit_entries.len(), 3);
     for entry in &submit_entries {
         assert!(entry.capability.host_required);
         assert!(entry.capability.execution_available);
         assert!(entry.capability.unavailable_reason.is_empty());
         assert!(entry.capability.result_semantics.contains("先停"));
+    }
+
+    let grokbot_entries =
+        action_library::search("Grok Bot", "全部", false, &BTreeSet::new(), false);
+    for id in ["grokbot-live-voice", "grokbot-dictation", "grokbot-submit"] {
+        let entry = grokbot_entries
+            .iter()
+            .find(|e| e.action.id == id)
+            .unwrap_or_else(|| panic!("missing {id} in action library"));
+        assert!(entry.capability.host_required);
+        assert!(entry.capability.execution_available);
+        assert!(entry.capability.unavailable_reason.is_empty());
     }
 }
 

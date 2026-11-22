@@ -593,7 +593,7 @@ impl WorkbenchStore {
                     match agent {
                         CanonicalAgent::Antigravity
                         | CanonicalAgent::DeepseekHarness
-                        | CanonicalAgent::Herdr => {
+                        | CanonicalAgent::GrokBot => {
                             Some(NavigationPlace::app(agent.bundle_id().to_string()))
                         }
                         _ => None,

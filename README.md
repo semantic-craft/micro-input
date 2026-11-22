@@ -33,7 +33,7 @@ Micro Input 一方面在 macOS 上完整接管日常配置、通用快捷键映�
 
 - **接管日常按键配置与最新固件更新，不必再依赖 Electron 版官方软件。** 支持 281 项设备硬件键码、系统快捷键与苹果专属 `Fn` 语音键录制、本地宏、文本指令安全粘贴、桌面鼠标控制及直连键盘原生 `lights.preview` 的两区实时灯效预览，并可直接下载、校验并安全刷入含 `0.7.0-rc.16` 在内的官方最新固件，解锁板载硬件鼠标与无写 Flash 切层。
 - **从盲按快捷键变成只报待办、不造噪音的余光收件箱。** 顶部机械键按「运行静默、待办亮灯」原则指示后台会话，进行中的推理默认保持熄灯零干扰，已完成未读仅点亮对应单键常亮海洋蓝，仅当主会话或子代理卡在待审批输入或出现未读报错时才呼吸琥珀金或珊瑚红并联动底部氛围光（`sa: true`），单键直达或前台检视即刻核销熄灯。
-- **突破原生插件限制，按个人习惯重塑 Codex 与多 Agent 手感。** 针对 **Antigravity** 打磨全套物理键位与零弹窗直达链路，同时接管并扩展固定死的官方 **Codex** 插件，允许自由重绑所有 20 个控制位，并与 **Deepseek Harness**、**Herdr** 及「其他软件」共用同一套稳健路由。
+- **突破原生插件限制，按个人习惯重塑 Codex 与多 Agent 手感。** 针对 **Antigravity** 打磨全套物理键位与零弹窗直达链路，同时接管并扩展固定死的官方 **Codex** 插件，允许自由重绑所有 20 个控制位，并与 **Deepseek Harness**、**Grok Bot** 及「其他软件」共用同一套稳健路由。
 
 #### 专为 Antigravity 优化的物理工作流
 
@@ -88,7 +88,7 @@ Micro Input 针对每个关键子系统吸收了同类开源项目的成熟结�
 
 ### 面向每日编码的实用细节
 
-- **开箱即用的 4+1 应用预设。** 以 Antigravity 为主要工作台预设，同时提供可自由定制的 **Codex**、**Deepseek Harness** 与 **Herdr** 三套 Agent 方案，外加通配任意应用的「其他软件」方案，默认将底部中键映射为 macOS 原生 `Fn` 听写键，支持在工作台内联录制快捷键。外部应用全部基于原生辅助功能或公开接口适配，零第三方 `.patch` 补丁。
+- **开箱即用的 4+1 应用预设。** 以 Antigravity 为主要工作台预设，同时提供可自由定制的 **Codex**、**Deepseek Harness** 与 **Grok Bot**（三键语音聊天、点击听写与听写后发送）三套 Agent 方案，外加通配任意应用的「其他软件」方案，默认将底部中键映射为 macOS 原生 `Fn` 听写键，支持在工作台内联录制快捷键。外部应用全部基于原生辅助功能或公开接口适配，零第三方 `.patch` 补丁。
 - **不打断肌肉记忆的路由规则。** 项目依据 `R-C11` 退役了容易误触发的「跟随前台应用自动切方案」，改由六层板载路由、菜单栏手动选择和「锁定当前方案」决定当前生效目标，浏览和编辑本地草稿都不会更改运行中的键位归属。
 - **状态可核验且防漂移锁死的语音听写。** 区分「按住说话，松开停止」与 Codex「点击听写」两种手势。`DictationLeaseRegistry` 按窗口容器身份（`bundle_id + pid + window_id + scope_id`）追踪听写租约，在 Antigravity 切换对话导致窗口标题变化后，若只读核验已回落 `Idle` 即零按压自动核销，且旋钮选模型、内置浏览器、侧栏与 Subagent 选择等非听写控件完全与听写护栏解耦。按住模式具备 120 秒安全上限与原目标锁，点击听写等待转写完成后提交；若宿主清理无法确认，菜单栏常驻图标与弹层立即展示本地化警示卡并提供一键「重试清理」。
 - **多窗口焦点隔离与 50 步往返导航。** 在 Antigravity 零弹窗跳转之外，Codex 等多窗口桌面应用也会锁定当前焦点窗口执行命令，防止误发给背景项目；工作台同时维护最多 50 条跨 Agent 打开历史栈，可用导航前进与后退动作快速回到上一个处理中的窗口或会话。
@@ -166,7 +166,7 @@ Micro Input handles daily macOS key configuration and official firmware updates 
 
 - **Replaces daily macOS `Input.app` setup and handles official firmware upgrades.** Supports 281 onboard `DEVICE_KEY_TOKENS`, inline shortcut recording with Apple `Fn` voice triggers, local macros, clipboard-safe prompt snippets, CoreGraphics pointer control, live two-zone native `lights.preview` editing on connected hardware, and downloading, verifying, and flashing official `0.7.0-rc.16` firmware with pre-write Flash backups.
 - **Turns top mechanical switches into response-driven status monitors.** Top switches keep running tasks dark by default, hold steady ocean-blue (`solid`) on unread completed sessions, and pulse amber or coral-red with synchronized underglow when an agent or subagent needs approval, input, or attention.
-- **Removes fixed plugin limits across Antigravity and Codex.** Combines a dedicated Antigravity physical layout with an editable `Codex · Micro Input` profile across all 20 controls alongside **Deepseek Harness**, **Herdr**, and **Other Apps**.
+- **Removes fixed plugin limits across Antigravity and Codex.** Combines a dedicated Antigravity physical layout with an editable `Codex · Micro Input` profile across all 20 controls alongside **Deepseek Harness**, **Grok Bot**, and **Other Apps**.
 
 #### Dedicated Physical Workflows for Antigravity
 
@@ -221,7 +221,7 @@ Micro Input opens an exclusive macOS Vendor HID link to `303A:8298` over 267-byt
 
 ### Daily Coding Details
 
-- **4+1 ready-to-use profiles.** Ships tailored profiles for **Antigravity**, customizable **Codex**, **Deepseek Harness**, and **Herdr**, plus an **Other Apps** profile pre-mapped with Apple `Fn` dictation and inline shortcut recording using zero external `.patch` files.
+- **4+1 ready-to-use profiles.** Ships tailored profiles for **Antigravity**, customizable **Codex**, **Deepseek Harness**, and **Grok Bot** (voice chat, toggle dictation, and send during dictation), plus an **Other Apps** profile pre-mapped with Apple `Fn` dictation and inline shortcut recording using zero external `.patch` files.
 - **Muscle-memory-safe routing.** Gate `R-C11` retired error-prone foreground-app auto-switching in favor of six-layer onboard routing, manual menu-bar selection, and a hard profile lock toggle.
 - **Verified, title-drift-resilient dictation state machine.** Separates hold-to-talk with a 120-second limit and original target lock from Codex click-to-dictate with automatic wait-for-transcription submission. `DictationLeaseRegistry` tracks leases by window container identity (`bundle_id + pid + window_id + scope_id`), reconciles `Idle` containers with zero presses when Antigravity conversation switches mutate `AXTitle`, decouples non-dictation controls (knobs, model picker, browser, side panel, subagent picker) from dictation cleanup fences, and surfaces localized menu-bar caution cards with one-click cleanup retry whenever cleanup cannot be confirmed.
 - **Multi-window focus locking and 50-step navigation stack.** Pins Codex actions to the currently focused window across multiple open projects and maintains a 50-entry cross-agent back and forward navigation stack.
