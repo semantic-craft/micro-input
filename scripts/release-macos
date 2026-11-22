@@ -304,6 +304,35 @@ def run_checked(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None,
     return proc.stdout
 
 
+def submit_notary_archive(
+    notary_zip: Path,
+    notary_profile: str,
+    root: Path,
+    secrets: list[str],
+    runner=run_checked,
+) -> str:
+    base_cmd = [
+        'xcrun',
+        'notarytool',
+        'submit',
+        str(notary_zip),
+        '--keychain-profile',
+        notary_profile,
+        '--output-format',
+        'json',
+    ]
+    if os.environ.get('MI_NOTARY_NO_S3_ACCELERATION', '').strip() == '1':
+        return runner(base_cmd + ['--no-s3-acceleration'], cwd=root, secrets=secrets)
+    try:
+        return runner(base_cmd, cwd=root, secrets=secrets)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if not any(tok in msg for tok in ('connectTimeout', 'SSL_ERROR_SYSCALL', 's3-accelerate')):
+            raise
+        print('      S3 transfer acceleration timed out; retrying with --no-s3-acceleration...', flush=True)
+        return runner(base_cmd + ['--no-s3-acceleration'], cwd=root, secrets=secrets)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     root = Path(__file__).resolve().parent.parent
@@ -433,20 +462,7 @@ def main(argv: list[str] | None = None) -> int:
             ['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(stage_app), str(notary_zip)],
             cwd=root,
         )
-        submit_raw = run_checked(
-            [
-                'xcrun',
-                'notarytool',
-                'submit',
-                str(notary_zip),
-                '--keychain-profile',
-                notary_profile,
-                '--output-format',
-                'json',
-            ],
-            cwd=root,
-            secrets=secrets,
-        )
+        submit_raw = submit_notary_archive(notary_zip, notary_profile, root, secrets)
         submit_json = json.loads(submit_raw)
         submission_id = str(submit_json.get('id', '')).strip()
         if not submission_id:
