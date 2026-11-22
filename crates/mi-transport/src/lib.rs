@@ -118,6 +118,8 @@ pub struct HidCandidate {
     pub path: String,
     #[serde(default)]
     pub serial_number: Option<String>,
+    #[serde(default)]
+    pub location_id: Option<u32>,
 }
 pub fn is_candidate(d: &HidCandidate) -> bool {
     d.vid == 0x303a
@@ -222,6 +224,7 @@ extern "C" {
             *const std::ffi::c_char,
             *const std::ffi::c_char,
             *const std::ffi::c_char,
+            u32,
         ),
         context: *mut std::ffi::c_void,
     ) -> i32;
@@ -491,6 +494,7 @@ extern "C" fn discovered(
     product: *const std::ffi::c_char,
     path: *const std::ffi::c_char,
     serial: *const std::ffi::c_char,
+    location_id: u32,
 ) {
     unsafe {
         let string = |p| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
@@ -523,6 +527,7 @@ extern "C" fn discovered(
             product: string(product),
             path: string(path),
             serial_number,
+            location_id: (location_id != 0).then_some(location_id),
         };
         if is_candidate(&candidate) {
             (*(context as *mut Vec<HidCandidate>)).push(candidate);
@@ -1217,6 +1222,7 @@ mod tests {
             product: "Synthetic".into(),
             path: "interface-a".into(),
             serial_number: None,
+            location_id: None,
         };
         assert!(is_candidate(&d));
         assert!(!is_exclusive_vendor_candidate(&d));
@@ -1237,6 +1243,7 @@ mod tests {
             product: "Synthetic".into(),
             path: "interface-a".into(),
             serial_number: None,
+            location_id: None,
         };
         assert!(is_exclusive_vendor_candidate(&d));
         d.usage_pairs.push(UsagePair { page: 1, usage: 6 });
@@ -1264,6 +1271,7 @@ mod tests {
             product: "synthetic".into(),
             path: "mock".into(),
             serial_number: None,
+            location_id: None,
         };
         assert!(is_candidate(&d));
         d.usage = 2;
@@ -1294,6 +1302,7 @@ mod tests {
             product: "Creator Micro 2".into(),
             path: path.into(),
             serial_number: serial.map(str::to_owned),
+            location_id: None,
         }
     }
 
@@ -1513,6 +1522,7 @@ impl HidTransport for SyntheticDiscovery {
                         format!("synthetic-interface-{i}")
                     },
                     serial_number: None,
+                    location_id: None,
                 })
                 .collect()),
             _ => Err(TransportError::Unavailable("合成枚举失败".into())),

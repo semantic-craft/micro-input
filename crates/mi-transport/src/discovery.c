@@ -43,7 +43,7 @@ static void text(CFTypeRef value, char *buffer, size_t size, const char *fallbac
         if (!CFStringGetCString(value, buffer, size, kCFStringEncodingUTF8))
             snprintf(buffer, size, "%s", fallback);
 }
-typedef void (*candidate_callback)(void *, uint16_t, uint16_t, uint16_t, uint16_t, const uint16_t *, size_t, const char *, const char *, const char *, const char *);
+typedef void (*candidate_callback)(void *, uint16_t, uint16_t, uint16_t, uint16_t, const uint16_t *, size_t, const char *, const char *, const char *, const char *, uint32_t);
 int mi_enumerate(candidate_callback callback, void *context) {
     IOHIDManagerRef manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
     if (!manager) return -1;
@@ -78,10 +78,11 @@ int mi_enumerate(candidate_callback callback, void *context) {
         text(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDProductKey)), product, sizeof(product), "未命名 HID");
         text(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDTransportKey)), transport, sizeof(transport), "Unknown");
         text(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDSerialNumberKey)), serial, sizeof(serial), "");
+        uint32_t location_id = (uint32_t)number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDLocationIDKey)));
         uint64_t registry_id = 0;
         if (IORegistryEntryGetRegistryEntryID(IOHIDDeviceGetService(d), &registry_id) == KERN_SUCCESS) {
             snprintf(path, sizeof(path), "DevSrvsID:%llu", (unsigned long long)registry_id);
-            callback(context, number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDVendorIDKey))), number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDProductIDKey))), number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDPrimaryUsagePageKey))), number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDPrimaryUsageKey))), usages, found, transport, product, path, serial);
+            callback(context, number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDVendorIDKey))), number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDProductIDKey))), number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDPrimaryUsagePageKey))), number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDPrimaryUsageKey))), usages, found, transport, product, path, serial, location_id);
         }
         free(usages);
     }

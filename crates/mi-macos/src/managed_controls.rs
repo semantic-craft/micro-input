@@ -4,6 +4,14 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContainerIdentity {
+    pub bundle_id: String,
+    pub pid: i32,
+    pub window_id: u64,
+    pub scope_id: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedWindowIdentity {
     pub bundle_id: String,
@@ -14,11 +22,13 @@ pub struct ManagedWindowIdentity {
 }
 
 impl ManagedWindowIdentity {
-    pub fn same_container(&self, other: &Self) -> bool {
-        self.bundle_id == other.bundle_id
-            && self.pid == other.pid
-            && self.window_id == other.window_id
-            && self.scope_id == other.scope_id
+    pub fn container(&self) -> ContainerIdentity {
+        ContainerIdentity {
+            bundle_id: self.bundle_id.clone(),
+            pid: self.pid,
+            window_id: self.window_id,
+            scope_id: self.scope_id,
+        }
     }
 }
 
@@ -608,7 +618,7 @@ enum ActivePickerKind {
 struct ActivePickerTarget {
     kind: ActivePickerKind,
     adapter: DictationAdapter,
-    identity: ManagedWindowIdentity,
+    container: ContainerIdentity,
     updated_at: Instant,
     ax_open_confirmed: bool,
 }
@@ -1616,7 +1626,7 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         }
         (active.kind == kind
             && active.adapter == adapter
-            && active.identity.same_container(identity))
+            && active.container == identity.container())
         .then_some(active.ax_open_confirmed)
     }
 
@@ -1654,7 +1664,7 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             *guard = Some(ActivePickerTarget {
                 kind,
                 adapter,
-                identity: identity.clone(),
+                container: identity.container(),
                 updated_at: Instant::now(),
                 ax_open_confirmed,
             });
@@ -2755,9 +2765,34 @@ pub(crate) fn observe_container_dictation(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DictationLease {
+    container: ContainerIdentity,
+    captured_title: String,
+}
+
+impl DictationLease {
+    fn from_identity(identity: &ManagedWindowIdentity) -> Self {
+        Self {
+            container: identity.container(),
+            captured_title: identity.title.clone(),
+        }
+    }
+
+    fn as_window_identity(&self) -> ManagedWindowIdentity {
+        ManagedWindowIdentity {
+            bundle_id: self.container.bundle_id.clone(),
+            pid: self.container.pid,
+            window_id: self.container.window_id,
+            scope_id: self.container.scope_id,
+            title: self.captured_title.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct DictationLeaseRegistry {
-    claims: BTreeMap<String, ManagedWindowIdentity>,
+    claims: BTreeMap<String, DictationLease>,
 }
 
 impl DictationLeaseRegistry {
@@ -2770,17 +2805,19 @@ impl DictationLeaseRegistry {
         let Some(owned) = self.claims.get(&captured.identity.bundle_id).cloned() else {
             return Ok(());
         };
-        if owned == captured.identity {
+        let captured_container = captured.identity.container();
+        if owned.container == captured_container && owned.captured_title == captured.identity.title
+        {
             return Ok(());
         }
-        if provider.process_has_exited(owned.pid) {
-            self.release_claim(provider, &owned.bundle_id);
+        if provider.process_has_exited(owned.container.pid) {
+            self.release_claim(provider, &owned.container.bundle_id);
             return Ok(());
         }
-        if owned.same_container(&captured.identity)
+        if owned.container == captured_container
             && observe_container_dictation(captured, adapter) == ObservedContainerDictation::Idle
         {
-            self.release_claim(provider, &owned.bundle_id);
+            self.release_claim(provider, &owned.container.bundle_id);
             return Ok(());
         }
         Err(blocked("uncleared_dictation_target_changed"))
@@ -2792,12 +2829,13 @@ impl DictationLeaseRegistry {
         identity: &ManagedWindowIdentity,
     ) -> Result<(), String> {
         provider.retain_target(identity)?;
+        let lease = DictationLease::from_identity(identity);
         if let Some(prev) = self
             .claims
-            .insert(identity.bundle_id.clone(), identity.clone())
+            .insert(lease.container.bundle_id.clone(), lease.clone())
         {
-            if prev != *identity {
-                provider.release_target(&prev);
+            if prev.container != lease.container || prev.captured_title != lease.captured_title {
+                provider.release_target(&prev.as_window_identity());
             }
         }
         Ok(())
@@ -2809,7 +2847,7 @@ impl DictationLeaseRegistry {
         bundle_id: &str,
     ) {
         if let Some(prev) = self.claims.remove(bundle_id) {
-            provider.release_target(&prev);
+            provider.release_target(&prev.as_window_identity());
         }
     }
 
@@ -2824,8 +2862,8 @@ impl DictationLeaseRegistry {
     ) -> Result<(), String> {
         let mut failures = Vec::new();
         for owned in self.claims.values().cloned().collect::<Vec<_>>() {
-            if provider.process_has_exited(owned.pid) {
-                self.release_claim(provider, &owned.bundle_id);
+            if provider.process_has_exited(owned.container.pid) {
+                self.release_claim(provider, &owned.container.bundle_id);
                 continue;
             }
             let Some(adapter) = [
@@ -2835,15 +2873,16 @@ impl DictationLeaseRegistry {
                 DictationAdapter::GrokBot,
             ]
             .into_iter()
-            .find(|adapter| adapter_bundle(*adapter) == owned.bundle_id) else {
+            .find(|adapter| adapter_bundle(*adapter) == owned.container.bundle_id) else {
                 failures.push(blocked("unsupported_dictation_target"));
                 continue;
             };
-            let result = provider.read_container(&owned).and_then(|live| {
-                if !live.identity.same_container(&owned) {
+            let owned_identity = owned.as_window_identity();
+            let result = provider.read_container(&owned_identity).and_then(|live| {
+                if live.identity.container() != owned.container {
                     return Err("unconfirmed:dictation_target_changed".into());
                 }
-                if live.identity.title != owned.title {
+                if live.identity.title != owned.captured_title {
                     if observe_container_dictation(&live, adapter)
                         == ObservedContainerDictation::Idle
                     {
@@ -2856,7 +2895,7 @@ impl DictationLeaseRegistry {
                 }
             });
             match result {
-                Ok(_) => self.release_claim(provider, &owned.bundle_id),
+                Ok(_) => self.release_claim(provider, &owned.container.bundle_id),
                 Err(error) => failures.push(error),
             }
         }
@@ -2897,5 +2936,28 @@ mod tests {
         for (start, length) in [(-1, 0), (1, -1), (2, 0), (0, 99)] {
             assert!(insert_at_utf16_selection("a😀bc", start, length, "new").is_err());
         }
+    }
+
+    #[test]
+    fn container_identity_ignores_mutable_title_and_distinguishes_containers() {
+        let base = super::ManagedWindowIdentity {
+            bundle_id: "com.google.antigravity".into(),
+            pid: 42,
+            window_id: 7,
+            scope_id: 3,
+            title: "Conversation A".into(),
+        };
+        let renamed = super::ManagedWindowIdentity {
+            title: "Conversation B".into(),
+            ..base.clone()
+        };
+        assert_ne!(base, renamed);
+        assert_eq!(base.container(), renamed.container());
+
+        let other_scope = super::ManagedWindowIdentity {
+            scope_id: 4,
+            ..base.clone()
+        };
+        assert_ne!(base.container(), other_scope.container());
     }
 }

@@ -15,8 +15,6 @@ pub const VOICE_CHAT_START: [&str; 3] = ["Start voice chat", "发起语音聊天
 
 pub const VOICE_CHAT_END: [&str; 3] = ["Hang up", "挂断", "掛斷"];
 
-pub const SEND_MESSAGE: [&str; 3] = ["Send message", "发送消息", "傳送訊息"];
-
 pub fn is_dictation_start(label: &str) -> bool {
     DICTATION_START.contains(&label.trim())
 }
@@ -38,5 +36,5 @@ pub fn is_voice_chat_end(label: &str) -> bool {
 }
 
 pub fn is_send_message(label: &str) -> bool {
-    SEND_MESSAGE.contains(&label.trim())
+    crate::antigravity_ax_labels::is_send_message(label)
 }

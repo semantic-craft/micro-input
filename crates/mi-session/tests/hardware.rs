@@ -81,6 +81,7 @@ impl HidTransport for Fake {
             product: "Independent synthetic USB".into(),
             path: "synthetic-no-native-open".into(),
             serial_number: None,
+            location_id: None,
         }])
     }
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {

@@ -118,16 +118,7 @@ impl WorkbenchStore {
                             return Err("原设备连接已变化，未发送引导命令".to_string());
                         }
                         let link = transport.open(&target.path).map_err(|e| e.to_string())?;
-                        let budget = budget_registry.budget_for(
-                            mi_transport::budget::DeviceBudgetKey::from_identity(
-                                target.serial_number.as_deref(),
-                                None,
-                                &target.path,
-                            ),
-                            mi_transport::budget::WriteBudgetPolicy::for_transport(
-                                target.transport_hint.clone(),
-                            ),
-                        );
+                        let budget = budget_registry.budget_for_candidate(&target);
                         let session = DeviceSession::new_with_budget(
                             link,
                             Box::new(mi_proto::NativeFramer::default()),
@@ -347,6 +338,7 @@ mod tests {
             product: "Creator Micro 2".into(),
             path: "usb-1".into(),
             serial_number: None,
+            location_id: None,
         };
         let multi_err = store
             .prepare_device_with_discovery(
@@ -405,6 +397,7 @@ mod tests {
             product: "Creator Micro 2".into(),
             path: "usb-serial".into(),
             serial_number: Some("aa:bb:cc:dd:ee:ff".into()),
+            location_id: None,
         };
         store
             .prepare_device_with_discovery(|| Ok(vec![serial_candidate]), || Ok(vec![]))

@@ -5,8 +5,8 @@ use crate::karabiner::{self, ConfigPatch, Readiness, ReloadBaseline};
 use mi_model::apply::AppliedSixLayerPlan;
 use mi_session::DeviceSession;
 use mi_transport::{
-    budget::{DeviceBudgetKey, DeviceBudgetRegistry, WriteBudgetPolicy},
-    HidCandidate, HidTransport, MacTransport, TargetKeyboard, UserCommandReceiver,
+    budget::DeviceBudgetRegistry, HidCandidate, HidTransport, MacTransport, TargetKeyboard,
+    UserCommandReceiver,
 };
 use std::{
     fs::{self, OpenOptions},
@@ -27,25 +27,22 @@ pub(super) fn connect(
     budget_registry: &DeviceBudgetRegistry,
 ) -> Result<(Arc<DeviceSession>, HidCandidate), String> {
     let candidates = transport.enumerate().map_err(|e| e.to_string())?;
-    let candidate = candidates
+    let mut candidate = candidates
         .into_iter()
         .find(|candidate| {
             candidate.path == target.vendor_path
                 && mi_transport::is_exclusive_vendor_candidate(candidate)
         })
         .ok_or("已确认的专用接口已消失")?;
+    if candidate.location_id.is_none() && target.location_id != 0 {
+        candidate.location_id = Some(target.location_id);
+    }
     let link = transport.open(&candidate.path).map_err(|e| e.to_string())?;
     if !link.is_exclusive_vendor() {
         link.close();
         return Err("未取得 USB 专用接口独占".into());
     }
-    let key = DeviceBudgetKey::from_identity(
-        candidate.serial_number.as_deref(),
-        Some(target.location_id),
-        &candidate.path,
-    );
-    let policy = WriteBudgetPolicy::for_transport(candidate.transport_hint.clone());
-    let budget = budget_registry.budget_for(key, policy);
+    let budget = budget_registry.budget_for_candidate(&candidate);
     let session = DeviceSession::new_with_budget(
         link,
         Box::new(mi_proto::NativeFramer::default()),

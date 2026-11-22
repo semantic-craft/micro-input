@@ -680,6 +680,18 @@ _SCATTERED_ANTIGRAVITY_AX_LABELS: tuple[str, ...] = (
     'Show less',
     'Project options',
     'Pinned Conversations',
+    'Jump to bottom',
+    'Scroll to bottom',
+    'Scroll to Bottom',
+    'Send',
+    'Send message',
+    'Submit',
+    '跳到底部',
+    '滚动到底部',
+    '发送',
+    '发送消息',
+    '傳送訊息',
+    '提交',
 )
 
 
@@ -728,7 +740,7 @@ def find_scattered_antigravity_ax_label_violations(rel_path: str, src: str) -> l
     for lineno, literal in _iter_rust_string_literals(prod_src):
         if literal in forbidden:
             violations.append(
-                f'{rel_path}:{lineno}: scattered Antigravity AX label {literal!r}; route through crate::antigravity_ax_labels'
+                f'{rel_path}:{lineno}: scattered Antigravity AX label {literal!r}; route through crates/mi-macos/src/antigravity_ax_labels.rs'
             )
     return violations
 

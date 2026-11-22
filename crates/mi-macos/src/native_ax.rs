@@ -3817,18 +3817,7 @@ mod macos {
         ) -> Result<(), String> {
             let snapshot = self.read(target)?;
             if request.jump_to_bottom && !request.sidebar {
-                let buttons: Vec<_> = snapshot
-                    .controls
-                    .iter()
-                    .filter(|control| {
-                        control.enabled
-                            && control.pressable
-                            && matches!(
-                                control.label.trim(),
-                                "Jump to bottom" | "Scroll to bottom" | "跳到底部" | "滚动到底部"
-                            )
-                    })
-                    .collect();
+                let buttons = matching_scroll_bottom_buttons(&snapshot.controls);
                 if let [button] = buttons.as_slice() {
                     self.press(target, button.id)?;
                     let deadline = Instant::now() + Duration::from_millis(400);
@@ -4074,24 +4063,7 @@ mod macos {
                     return Err(blocked("input_focus_changed"));
                 }
                 crate::managed_controls::validate_codex_submit(&window)?;
-                let buttons: Vec<_> = window
-                    .controls
-                    .iter()
-                    .filter(|control| {
-                        control.enabled
-                            && control.pressable
-                            && matches!(
-                                control.label.trim(),
-                                "Send"
-                                    | "Send message"
-                                    | "Submit"
-                                    | "发送"
-                                    | "发送消息"
-                                    | "傳送訊息"
-                                    | "提交"
-                            )
-                    })
-                    .collect();
+                let buttons = matching_submit_buttons(&window.controls);
                 if let [button] = buttons.as_slice() {
                     return self.press(target, button.id);
                 }
@@ -4133,6 +4105,28 @@ mod macos {
             }
             Ok(())
         }
+    }
+
+    fn matching_scroll_bottom_buttons(controls: &[ManagedControl]) -> Vec<&ManagedControl> {
+        controls
+            .iter()
+            .filter(|control| {
+                control.enabled
+                    && control.pressable
+                    && crate::antigravity_ax_labels::is_scroll_to_bottom(&control.label)
+            })
+            .collect()
+    }
+
+    fn matching_submit_buttons(controls: &[ManagedControl]) -> Vec<&ManagedControl> {
+        controls
+            .iter()
+            .filter(|control| {
+                control.enabled
+                    && control.pressable
+                    && crate::antigravity_ax_labels::is_submit_message(&control.label)
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -8247,6 +8241,47 @@ mod macos {
                 find_project_see_all_button(&sidebar, 4321, "/tmp/micro-input", None),
                 Some(16)
             );
+        }
+
+        #[test]
+        fn execution_scroll_and_submit_route_through_bilingual_registry() {
+            let make_button = |id: u64, label: &str| ManagedControl {
+                id,
+                role: "AXButton".into(),
+                label: label.into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            };
+            let scroll_controls = vec![
+                make_button(1, "Scroll to Bottom"),
+                make_button(2, "跳到底部"),
+                make_button(3, "滚动到底部"),
+                make_button(4, "Send message"),
+            ];
+            let matched_scroll: Vec<u64> = matching_scroll_bottom_buttons(&scroll_controls)
+                .into_iter()
+                .map(|c| c.id)
+                .collect();
+            assert_eq!(matched_scroll, vec![1, 2, 3]);
+
+            let submit_controls = vec![
+                make_button(10, "Send"),
+                make_button(11, "Send message"),
+                make_button(12, "Submit"),
+                make_button(13, "发送"),
+                make_button(14, "发送消息"),
+                make_button(15, "傳送訊息"),
+                make_button(16, "提交"),
+                make_button(17, "Scroll to Bottom"),
+            ];
+            let matched_submit: Vec<u64> = matching_submit_buttons(&submit_controls)
+                .into_iter()
+                .map(|c| c.id)
+                .collect();
+            assert_eq!(matched_submit, vec![10, 11, 12, 13, 14, 15, 16]);
         }
     }
 }

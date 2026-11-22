@@ -464,14 +464,7 @@ impl WorkbenchStore {
             link.close();
             return Err(WorkbenchError::Storage("未取得 USB 专用接口独占".into()));
         }
-        let budget_key = mi_transport::budget::DeviceBudgetKey::from_identity(
-            target.serial_number.as_deref(),
-            None,
-            &target.path,
-        );
-        let budget_policy =
-            mi_transport::budget::WriteBudgetPolicy::for_transport(target.transport_hint.clone());
-        let budget = self.budget_registry.budget_for(budget_key, budget_policy);
+        let budget = self.budget_registry.budget_for_candidate(&target);
         let session = {
             let _guard = self.tokio_runtime.enter();
             DeviceSession::new_with_budget(

@@ -461,6 +461,7 @@ fn six_layer_connection_rejects_a_shared_vendor_link() {
         usage_pairs: vec![],
         transport_hint: mi_transport::TransportHint::Usb,
         serial_number: None,
+        location_id: Some(target.location_id),
     }]);
     assert!(matches!(
         connect(
@@ -4241,4 +4242,144 @@ fn vendor_bridge_900_request_rotation_preserves_shared_device_write_budget_acros
     );
 
     bridge.shutdown(&runtime);
+}
+
+#[test]
+fn serial_less_usb_keyboard_shares_single_budget_key_across_sync_firmware_and_six_layer_paths() {
+    use mi_transport::budget::{DeviceBudgetKey, DeviceBudgetRegistry, WritePriority};
+    use tokio::sync::broadcast;
+
+    struct ExclusiveStaticTransport {
+        candidate: HidCandidate,
+        events: broadcast::Sender<()>,
+    }
+
+    struct ExclusiveMockLink(Arc<mi_transport::MockLink>);
+
+    impl mi_transport::HidLink for ExclusiveMockLink {
+        fn backend(&self) -> mi_transport::LinkBackend {
+            mi_transport::LinkBackend::MacHidapi267Numbered
+        }
+        fn is_exclusive_vendor(&self) -> bool {
+            true
+        }
+        fn write<'a, 'c, 'b>(
+            &'a self,
+            report: &'c [u8],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), mi_transport::TransportError>>
+                    + Send
+                    + 'b,
+            >,
+        >
+        where
+            'a: 'b,
+            'c: 'b,
+            Self: 'b,
+        {
+            self.0.write(report)
+        }
+        fn read<'a, 'b>(
+            &'a self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Vec<u8>, mi_transport::TransportError>>
+                    + Send
+                    + 'b,
+            >,
+        >
+        where
+            'a: 'b,
+            Self: 'b,
+        {
+            self.0.read()
+        }
+        fn close(&self) {
+            self.0.close();
+        }
+    }
+
+    impl mi_transport::HidTransport for ExclusiveStaticTransport {
+        fn enumerate(&self) -> Result<Vec<HidCandidate>, mi_transport::TransportError> {
+            Ok(vec![self.candidate.clone()])
+        }
+        fn subscribe(&self) -> broadcast::Receiver<()> {
+            self.events.subscribe()
+        }
+        fn open(
+            &self,
+            _id: &str,
+        ) -> Result<Arc<dyn mi_transport::HidLink>, mi_transport::TransportError> {
+            let (raw, _writes) = mi_transport::MockLink::new();
+            Ok(Arc::new(ExclusiveMockLink(raw)))
+        }
+    }
+
+    let candidate = HidCandidate {
+        vid: 0x303a,
+        pid: 0x8298,
+        usage_page: 0xff00,
+        usage: 1,
+        usage_pairs: vec![mi_transport::UsagePair {
+            page: 0xff00,
+            usage: 1,
+        }],
+        transport_hint: mi_transport::TransportHint::Usb,
+        product: "Creator Micro 2".into(),
+        path: "DevSrvsID:77".into(),
+        serial_number: None,
+        location_id: Some(0x1420),
+    };
+    let target = TargetKeyboard {
+        vendor_id: 0x303a,
+        product_id: 0x8298,
+        location_id: 0x1420,
+        usb_parent: 99,
+        vendor_path: "DevSrvsID:77".into(),
+    };
+    let (events, _) = broadcast::channel(4);
+    let transport = ExclusiveStaticTransport {
+        candidate: candidate.clone(),
+        events,
+    };
+
+    let registry = DeviceBudgetRegistry::new();
+    let device_sync_budget = registry.budget_for_candidate(&candidate);
+    let firmware_store_budget = registry.budget_for_candidate(&candidate);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (six_layer_session, _) = {
+        let _guard = runtime.enter();
+        connect(&transport, &target, &registry).expect("six-layer connect must succeed")
+    };
+
+    assert_eq!(
+        DeviceBudgetKey::from_candidate(&candidate),
+        DeviceBudgetKey::UsbLocation(0x1420)
+    );
+    assert!(Arc::ptr_eq(&device_sync_budget, &firmware_store_budget));
+    assert!(Arc::ptr_eq(
+        &device_sync_budget,
+        six_layer_session.write_budget()
+    ));
+
+    let t0 = Instant::now();
+    device_sync_budget
+        .try_acquire(t0, WritePriority::Normal)
+        .unwrap();
+    firmware_store_budget
+        .try_acquire(t0 + Duration::from_millis(5), WritePriority::Normal)
+        .unwrap();
+    six_layer_session
+        .write_budget()
+        .try_acquire(t0 + Duration::from_millis(10), WritePriority::Normal)
+        .unwrap();
+    assert_eq!(
+        six_layer_session
+            .write_budget()
+            .snapshot(t0 + Duration::from_millis(20))
+            .used_in_window,
+        3
+    );
+    runtime.block_on(six_layer_session.shutdown());
 }
