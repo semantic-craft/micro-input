@@ -18,9 +18,7 @@ impl DictationAdapter {
     pub fn matches_start_label(&self, label: &str) -> bool {
         let trimmed = label.trim();
         match self {
-            Self::Antigravity => {
-                matches!(trimmed, "Record Audio" | "Record voice memo")
-            }
+            Self::Antigravity => crate::antigravity_ax_labels::is_dictation_start(trimmed),
             Self::Dsh => matches!(
                 trimmed,
                 "开始听写" | "Voice Dictation" | "开始录音" | "Start recording"
@@ -36,9 +34,7 @@ impl DictationAdapter {
     pub fn matches_stop_label(&self, label: &str) -> bool {
         let trimmed = label.trim();
         match self {
-            Self::Antigravity => {
-                matches!(trimmed, "Stop Recording" | "Recording" | "Stop recording")
-            }
+            Self::Antigravity => crate::antigravity_ax_labels::is_dictation_stop(trimmed),
             Self::Dsh => matches!(
                 trimmed,
                 "停止听写" | "Stop Dictation" | "停止并识别" | "Stop and transcribe"

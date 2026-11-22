@@ -308,66 +308,19 @@ pub(crate) fn is_dsh_model_picker_trigger(label: &str) -> bool {
 }
 
 pub(crate) fn is_antigravity_model_picker_trigger(label: &str) -> bool {
-    let trimmed = label.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lower = trimmed.to_lowercase();
-    let excluded = [
-        "actions",
-        "options",
-        "menu",
-        "switch mode",
-        "agent permissions",
-        "add context",
-        "customize sections",
-        "notifications",
-        "extensions",
-        "subagent",
-    ];
-    if excluded.iter().any(|ex| lower.contains(ex)) {
-        return false;
-    }
-    trimmed.eq_ignore_ascii_case("model")
-        || lower.starts_with("select model")
-        || lower.starts_with("choose model")
-        || lower.starts_with("switch model")
-        || trimmed == "模型"
-        || trimmed.starts_with("选择模型")
-        || trimmed.starts_with("切换模型")
+    crate::antigravity_ax_labels::is_model_picker_trigger(label)
 }
 
 pub(crate) fn is_antigravity_subagent_popup_trigger(label: &str) -> bool {
-    let trimmed = label.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lower = trimmed.to_lowercase();
-    if lower.contains("stop subagent")
-        || lower.contains("cancel subagent")
-        || lower.starts_with("open subagent:")
-        || lower.starts_with("close ")
-        || trimmed.starts_with("打开子智能体")
-        || trimmed.contains("停止子智能体")
-    {
-        return false;
-    }
-    lower.contains("subagent") || trimmed.contains("子智能体")
+    crate::antigravity_ax_labels::is_subagent_popup_trigger(label)
 }
 
 pub(crate) fn is_antigravity_overview_subagents_button(label: &str) -> bool {
-    let trimmed = label.trim();
-    let lower = trimmed.to_lowercase();
-    lower == "subagents"
-        || lower.starts_with("subagents ")
-        || trimmed == "子智能体"
-        || trimmed.starts_with("子智能体 ")
+    crate::antigravity_ax_labels::is_overview_subagents_button(label)
 }
 
 pub(crate) fn is_antigravity_open_subagent_button(label: &str) -> bool {
-    let trimmed = label.trim();
-    let lower = trimmed.to_lowercase();
-    lower.starts_with("open subagent:") || trimmed.starts_with("打开子智能体")
+    crate::antigravity_ax_labels::is_open_subagent_button(label)
 }
 
 pub(crate) fn is_dsh_subagent_picker_trigger(label: &str) -> bool {
@@ -1041,7 +994,9 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         let btn = window
             .controls
             .iter()
-            .find(|c| c.role == "AXButton" && c.label.trim() == "Toggle Side Panel")
+            .find(|c| {
+                c.role == "AXButton" && crate::antigravity_ax_labels::is_toggle_side_panel(&c.label)
+            })
             .ok_or_else(|| blocked("side_panel_control_not_found"))?;
         if !btn.enabled || !btn.pressable {
             return Err(blocked("side_panel_unavailable"));
@@ -1075,7 +1030,10 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                     refreshed
                         .controls
                         .iter()
-                        .find(|c| c.role == "AXButton" && c.label.trim() == "Toggle Side Panel")
+                        .find(|c| {
+                            c.role == "AXButton"
+                                && crate::antigravity_ax_labels::is_toggle_side_panel(&c.label)
+                        })
                         .and_then(|c| c.expanded)
                 }
                 Err(error) => return Err(format!("unconfirmed:{error}")),
@@ -1186,14 +1144,14 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
 
             let toggle_panel_btn = current.controls.iter().find(|c| {
                 c.role == "AXButton"
-                    && c.label.trim() == "Toggle Side Panel"
+                    && crate::antigravity_ax_labels::is_toggle_side_panel(&c.label)
                     && c.enabled
                     && c.pressable
             });
 
             if let Some(btn) = current.controls.iter().find(|c| {
                 c.role == "AXButton"
-                    && c.label.trim() == "New Side Question"
+                    && crate::antigravity_ax_labels::is_new_side_question(&c.label)
                     && c.enabled
                     && c.pressable
             }) {
@@ -1208,11 +1166,9 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                     }
                 }
                 std::thread::sleep(Duration::from_millis(25));
-            } else if let Some(btn) = current
-                .controls
-                .iter()
-                .find(|c| c.role == "AXButton" && c.label.trim() == "Side Question")
-            {
+            } else if let Some(btn) = current.controls.iter().find(|c| {
+                c.role == "AXButton" && crate::antigravity_ax_labels::is_side_question(&c.label)
+            }) {
                 if !btn.enabled || !btn.pressable {
                     return Err(blocked("side_question_unavailable"));
                 }
@@ -1240,7 +1196,10 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                 }
                 std::thread::sleep(Duration::from_millis(25));
             } else if let Some(btn) = current.controls.iter().find(|c| {
-                c.role == "AXButton" && c.label.trim() == "New tab" && c.enabled && c.pressable
+                c.role == "AXButton"
+                    && crate::antigravity_ax_labels::is_new_tab(&c.label)
+                    && c.enabled
+                    && c.pressable
             }) {
                 if !pressed_new_tab {
                     match provider.press(&window.identity, btn.id) {
@@ -1360,10 +1319,9 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                 },
             };
 
-            let toggle_panel_btn = current
-                .controls
-                .iter()
-                .find(|c| c.role == "AXButton" && c.label.trim() == "Toggle Side Panel");
+            let toggle_panel_btn = current.controls.iter().find(|c| {
+                c.role == "AXButton" && crate::antigravity_ax_labels::is_toggle_side_panel(&c.label)
+            });
             let panel_collapsed = toggle_panel_btn.is_some_and(|btn| btn.expanded == Some(false));
 
             if panel_collapsed {
@@ -1395,21 +1353,23 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                 continue;
             }
 
-            let has_new_tab_search = current
-                .controls
-                .iter()
-                .any(|c| c.role == "AXTextField" && c.label.trim() == "Search for content to open");
+            let has_new_tab_search = current.controls.iter().any(|c| {
+                c.role == "AXTextField"
+                    && crate::antigravity_ax_labels::is_search_for_content_to_open(&c.label)
+            });
 
             let browser_btn = current
                 .controls
                 .iter()
-                .find(|c| c.role == "AXButton" && c.label.trim() == "Browser")
+                .find(|c| {
+                    c.role == "AXButton" && crate::antigravity_ax_labels::is_browser(&c.label)
+                })
                 .or_else(|| {
                     has_new_tab_search.then(|| {
-                        current
-                            .controls
-                            .iter()
-                            .find(|c| c.role == "AXButton" && c.label.trim() == "Preview")
+                        current.controls.iter().find(|c| {
+                            c.role == "AXButton"
+                                && crate::antigravity_ax_labels::is_preview(&c.label)
+                        })
                     })?
                 });
 
@@ -1425,7 +1385,7 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             } else if has_new_tab_search {
                 if let Some(btn) = current.controls.iter().find(|c| {
                     c.role == "AXButton"
-                        && c.label.trim() == "Clear search"
+                        && crate::antigravity_ax_labels::is_clear_search(&c.label)
                         && c.enabled
                         && c.pressable
                 }) {
@@ -1437,11 +1397,9 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                     )?;
                 }
                 std::thread::sleep(Duration::from_millis(25));
-            } else if let Some(btn) = current
-                .controls
-                .iter()
-                .find(|c| c.role == "AXButton" && c.label.trim() == "New tab")
-            {
+            } else if let Some(btn) = current.controls.iter().find(|c| {
+                c.role == "AXButton" && crate::antigravity_ax_labels::is_new_tab(&c.label)
+            }) {
                 if !pressed_new_tab {
                     if !btn.enabled || !btn.pressable {
                         return Err(wrap_post_mutation(
@@ -2530,13 +2488,15 @@ fn stop_in_window<P: ManagedAxProvider>(
 }
 
 pub(crate) fn is_side_question_input(control: &ManagedControl) -> bool {
-    control.label == "Side Question Input"
+    control.label == crate::antigravity_ax_labels::SIDE_QUESTION_INPUT_SYNTHETIC_LABEL
 }
 
 fn is_antigravity_browser_open(window: &ManagedWindow) -> bool {
     window.controls.iter().any(|c| {
-        (matches!(c.role.as_str(), "AXComboBox" | "AXTextField") && c.label.trim() == "Address bar")
-            || (c.role == "AXButton" && c.label.trim() == "Open in external browser")
+        (matches!(c.role.as_str(), "AXComboBox" | "AXTextField")
+            && crate::antigravity_ax_labels::is_address_bar(&c.label))
+            || (c.role == "AXButton"
+                && crate::antigravity_ax_labels::is_open_in_external_browser(&c.label))
     })
 }
 

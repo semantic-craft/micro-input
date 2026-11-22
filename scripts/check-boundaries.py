@@ -645,6 +645,94 @@ def find_status_item_state_violations(swift_app_src: str) -> list[str]:
     return violations
 
 
+_SCATTERED_ANTIGRAVITY_AX_LABELS: tuple[str, ...] = (
+    'Record Audio',
+    'Record voice memo',
+    'Stop Recording',
+    'Stop recording',
+    'Start Voice mode',
+    'Start Live Chat',
+    'End Voice mode',
+    'End Live chat',
+    'Toggle Side Panel',
+    'Toggle sidebar',
+    'Open sidebar',
+    'Search Conversations',
+    'New Conversation in Project',
+    'New Conversation in Workspace',
+    'New Side Question',
+    'Open in external browser',
+    'Address bar',
+    'Search for content to open',
+    'Conversation Log',
+    'Agent said',
+    'Agent working',
+    'You said',
+    'Conversation turns',
+    'Agent response',
+    'User message',
+    'Markdown view mode',
+    'Stop execution',
+    'Archive conversation',
+    'Pin conversation',
+    'Unpin conversation',
+    'See all (',
+    'Show less',
+    'Project options',
+    'Pinned Conversations',
+)
+
+
+def _iter_rust_string_literals(src: str) -> Iterable[tuple[int, str]]:
+    n = len(src)
+    i = 0
+    while i < n:
+        ch = src[i]
+        if src.startswith('//', i) or src.startswith('/*', i):
+            skipped = _advance_rust_trivia_or_literal(src, i)
+            i = n if skipped is None else skipped
+            continue
+        at_ident_boundary = i == 0 or not _is_ident_char(src[i - 1])
+        if at_ident_boundary and ch == 'r':
+            j = i + 1
+            while j < n and src[j] == '#':
+                j += 1
+            if j < n and src[j] == '"':
+                hashes = j - i - 1
+                closing = '"' + '#' * hashes
+                end = src.find(closing, j + 1)
+                if end == -1:
+                    break
+                yield src.count('\n', 0, i) + 1, src[j + 1 : end]
+                i = end + len(closing)
+                continue
+        if ch == "'":
+            skipped = _advance_char_literal_from_quote(src, i)
+            if skipped is not None:
+                i = skipped
+                continue
+        if ch == '"':
+            end = _advance_quoted_string(src, i)
+            yield src.count('\n', 0, i) + 1, src[i + 1 : end - 1]
+            i = end
+            continue
+        i += 1
+
+
+def find_scattered_antigravity_ax_label_violations(rel_path: str, src: str) -> list[str]:
+    if rel_path == 'crates/mi-macos/src/antigravity_ax_labels.rs':
+        return []
+    prod_src = _strip_rust_cfg_test(src)
+    forbidden = frozenset(_SCATTERED_ANTIGRAVITY_AX_LABELS)
+    violations: list[str] = []
+    for lineno, literal in _iter_rust_string_literals(prod_src):
+        if literal in forbidden:
+            violations.append(
+                f'{rel_path}:{lineno}: scattered Antigravity AX label {literal!r}; route through crate::antigravity_ax_labels'
+            )
+    return violations
+
+
 def run_boundary_checks(root: Path = ROOT) -> None:
     sources = list((root / 'crates').rglob('*.rs'))
     found = set()
@@ -1181,6 +1269,30 @@ def run_boundary_checks(root: Path = ROOT) -> None:
     assert not rc15_violations, (
         'R-C15 violation (global key-mapping kill-switch focus isolation and paused status item state):\n  '
         + '\n  '.join(rc15_violations)
+    )
+
+    ag_labels_path = root / 'crates/mi-macos/src/antigravity_ax_labels.rs'
+    assert ag_labels_path.is_file(), (
+        'R-C16 violation: missing single-source bilingual registry crates/mi-macos/src/antigravity_ax_labels.rs'
+    )
+    ag_labels_src = ag_labels_path.read_text(encoding='utf-8')
+    assert (
+        'struct BilingualLabelSet' in ag_labels_src
+        and 'ALL_BILINGUAL_LABEL_SETS' in ag_labels_src
+    ), (
+        'R-C16 violation: crates/mi-macos/src/antigravity_ax_labels.rs must define struct BilingualLabelSet and ALL_BILINGUAL_LABEL_SETS'
+    )
+    rc16_violations: list[str] = []
+    for macos_path in sorted((root / 'crates/mi-macos/src').rglob('*.rs')):
+        rel = macos_path.relative_to(root).as_posix()
+        rc16_violations.extend(
+            find_scattered_antigravity_ax_label_violations(
+                rel, macos_path.read_text(encoding='utf-8')
+            )
+        )
+    assert not rc16_violations, (
+        'R-C16 violation (scattered Antigravity AX labels outside antigravity_ax_labels.rs):\n  '
+        + '\n  '.join(rc16_violations)
     )
 
     print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

@@ -238,8 +238,12 @@ impl ManagedAxProvider for Provider {
                         "Stop dictation" => Some("Dictate"),
                         "Record voice memo" => Some("Stop Recording"),
                         "Stop Recording" => Some("Record voice memo"),
+                        "录制语音输入" => Some("停止录制"),
+                        "停止录制" => Some("录制语音输入"),
                         "Start Voice mode" => Some("End Voice mode"),
                         "End Voice mode" => Some("Start Voice mode"),
+                        "开启语音模式" => Some("结束语音模式"),
+                        "结束语音模式" => Some("开启语音模式"),
                         _ => None,
                     } {
                         control.label = next_label.into();
@@ -5360,4 +5364,258 @@ fn active_model_picker_stays_active_when_window_title_changes_in_place() {
     );
     assert!(codex_events.contains(&"window_key:arrow_down".to_string()));
     assert!(codex_events.contains(&"window_key:return".to_string()));
+}
+
+#[test]
+fn antigravity_chinese_dictation_toggle_starts_and_stops() {
+    let provider = Provider::with_target("com.google.antigravity", "录制语音输入");
+    let controls = provider.controls();
+    assert_eq!(
+        controls.toggle_dictation("antigravity"),
+        Ok(ObservedDictationState::Recording)
+    );
+    assert_eq!(
+        controls.toggle_dictation("antigravity"),
+        Ok(ObservedDictationState::Idle)
+    );
+    assert_eq!(
+        provider.events(),
+        vec![
+            "capture:com.google.antigravity",
+            "press:录制语音输入",
+            "capture:com.google.antigravity",
+            "press:停止录制",
+        ]
+    );
+}
+
+#[test]
+fn antigravity_chinese_live_voice_toggles() {
+    let provider = Provider::with_target("com.google.antigravity", "开启语音模式");
+    let controls = provider.controls();
+    controls.toggle_live_voice("antigravity").unwrap();
+    controls.toggle_live_voice("antigravity").unwrap();
+    assert_eq!(
+        provider.events(),
+        vec![
+            "capture:com.google.antigravity",
+            "press:开启语音模式",
+            "capture:com.google.antigravity",
+            "press:结束语音模式",
+        ]
+    );
+}
+
+#[test]
+fn antigravity_chinese_model_picker_and_side_panel_and_browser_and_side_question() {
+    let model_provider = Provider::with_target("com.google.antigravity", "录制语音输入");
+    {
+        let mut state = model_provider.0.lock().unwrap();
+        state.window.controls.push(ManagedControl {
+            id: 40,
+            role: "AXButton".into(),
+            label: "模型，当前：Gemini 4 Neon High".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: None,
+        });
+        state.window.controls.push(ManagedControl {
+            id: 41,
+            role: "AXButton".into(),
+            label: "权限模式，当前：全自动放行 (Turbo)".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: None,
+        });
+    }
+    let model_controls = model_provider.controls();
+    model_controls.open_model_picker("antigravity").unwrap();
+    model_controls
+        .step_model_picker("antigravity", 0x7D)
+        .unwrap();
+    assert_eq!(
+        model_controls.confirm_model_picker("antigravity"),
+        Ok(ModelPickerConfirmResult::Confirmed)
+    );
+    assert!(model_provider
+        .events()
+        .contains(&"press:模型，当前：Gemini 4 Neon High".to_string()));
+
+    let panel_provider = Provider::with_target("com.google.antigravity", "录制语音输入");
+    {
+        let mut state = panel_provider.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![ManagedControl {
+            id: 10,
+            role: "AXButton".into(),
+            label: "切换侧边面板".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        }];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "切换侧边面板" {
+                if let Some(btn) = fixture.window.controls.iter_mut().find(|c| c.id == 10) {
+                    btn.expanded = Some(!btn.expanded.unwrap_or(false));
+                }
+            }
+        });
+    }
+    let panel_controls = panel_provider.controls();
+    panel_controls
+        .set_side_panel_open("antigravity", true)
+        .unwrap();
+    panel_controls
+        .set_side_panel_open("antigravity", false)
+        .unwrap();
+    assert_eq!(
+        panel_provider
+            .events()
+            .iter()
+            .filter(|e| *e == "press:切换侧边面板")
+            .count(),
+        2
+    );
+
+    let browser_provider = Provider::with_target("com.google.antigravity", "录制语音输入");
+    {
+        let mut state = browser_provider.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![ManagedControl {
+            id: 10,
+            role: "AXButton".into(),
+            label: "切换侧边面板".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+            expanded: Some(false),
+        }];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "切换侧边面板" {
+                if let Some(btn) = fixture.window.controls.iter_mut().find(|c| c.id == 10) {
+                    btn.expanded = Some(true);
+                }
+                fixture.window.controls.push(ManagedControl {
+                    id: 11,
+                    role: "AXButton".into(),
+                    label: "新标签页".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "新标签页" {
+                fixture.window.controls.push(ManagedControl {
+                    id: 20,
+                    role: "AXTextField".into(),
+                    label: "搜索要打开的内容".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: true,
+                    expanded: None,
+                });
+                fixture.window.controls.push(ManagedControl {
+                    id: 21,
+                    role: "AXButton".into(),
+                    label: "内置浏览器".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "内置浏览器" {
+                fixture.window.controls.retain(|c| c.id != 20 && c.id != 21);
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXComboBox".into(),
+                    label: "地址栏".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+    browser_provider
+        .controls()
+        .open_browser("antigravity")
+        .unwrap();
+    let browser_events = browser_provider.events();
+    assert!(browser_events.contains(&"press:切换侧边面板".to_string()));
+    assert!(browser_events.contains(&"press:新标签页".to_string()));
+    assert!(browser_events.contains(&"press:内置浏览器".to_string()));
+
+    let side_question_provider = Provider::with_target("com.google.antigravity", "录制语音输入");
+    {
+        let mut state = side_question_provider.0.lock().unwrap();
+        state.effect = PressEffect::NoChange;
+        state.window.controls = vec![
+            ManagedControl {
+                id: 10,
+                role: "AXButton".into(),
+                label: "切换侧边面板".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: Some(true),
+            },
+            ManagedControl {
+                id: 20,
+                role: "AXButton".into(),
+                label: "旁路提问".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+                expanded: None,
+            },
+        ];
+        state.after_press = Some(|fixture, label, _id| {
+            if label == "旁路提问" {
+                fixture.window.controls.retain(|c| c.id != 20);
+                fixture.window.controls.push(ManagedControl {
+                    id: 25,
+                    role: "AXButton".into(),
+                    label: "新建支线提问".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                    expanded: None,
+                });
+            } else if label == "新建支线提问" {
+                fixture.window.controls.push(ManagedControl {
+                    id: 30,
+                    role: "AXTextArea".into(),
+                    label: "Side Question Input".into(),
+                    enabled: true,
+                    pressable: false,
+                    editable: true,
+                    focused: false,
+                    expanded: None,
+                });
+            }
+        });
+    }
+    side_question_provider
+        .controls()
+        .open_side_question("antigravity")
+        .unwrap();
+    let sq_events = side_question_provider.events();
+    assert!(sq_events.contains(&"press:旁路提问".to_string()));
+    assert!(sq_events.contains(&"press:新建支线提问".to_string()));
+    assert!(sq_events.contains(&"focus:30".to_string()));
 }
