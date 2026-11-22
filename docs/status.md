@@ -4,8 +4,8 @@
 
 ## 当前版本与架构基线
 
-- **最新发行标签**：[v0.12.3](releases/v0.12.3.md)（`CFBundleShortVersionString = 0.12.3`；历次发行说明归档于 [releases/](releases/v0.12.3.md)）。
-- **主线演进（v0.12.3 基线）**：合入 `Grok Bot`（`com.anysphere.sand`）三键原生无障碍方案替换 `Herdr` 与未修改存量方案自动退役（PR #179）、Antigravity 中英双语 AX 标签单源收口与 `R-C16` 门禁（PR #178），延续 v0.12.2 InputKit v0.3.0 写入预算与协议基础层（PR #175）及 v0.12.1 Antigravity 后台日志存活感知（PR #173）。
+- **最新发行标签**：[v0.12.4](releases/v0.12.4.md)（`CFBundleShortVersionString = 0.12.4`；历次发行说明归档于 [releases/](releases/v0.12.4.md)）。
+- **主线演进（v0.12.4 基线）**：合入写预算统一身份 / 执行侧双语 AX 标签 / 严格退役比对与 `ContainerIdentity` 拆分（PR #181）、约束注释类型化与自托管注释棘轮（PR #182）、4 组零依赖 Rust BFS 形式化状态机模型（PR #183、#184）、行为化切片隔离测试（PR #185）以及 Python AST 门禁与 GitHub Actions CI（PR #186）。
 - **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C16`。
 
 ## 已实现与已验证能力

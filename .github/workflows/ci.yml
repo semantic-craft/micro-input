@@ -29,6 +29,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run scripts/check (Rust, Swift, formal BFS models, boundaries, comments, Python lint)
+        env:
+          RUST_TEST_THREADS: "2"
         run: ./scripts/check
 
       - name: Run scripts/verify-offline (6 isolated synthetic E2E scenarios)
