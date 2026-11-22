@@ -3449,7 +3449,7 @@ mod tests {
                     slots.codex_revision,
                 )
             };
-            let commits_after_exit = store.commit_local_update_count;
+            let gen_after_exit = store.projection_generation();
 
             store.update_navigation_catalog_for_source(LiveSessionSource::Antigravity, None);
             let rev_after_repeat = {
@@ -3461,7 +3461,8 @@ mod tests {
                 )
             };
             assert_eq!(rev_after_repeat, rev_after_exit);
-            assert_eq!(store.commit_local_update_count, commits_after_exit);
+            assert_eq!(store.projection_generation(), gen_after_exit);
+            assert_eq!(store.projection().canvas.underglow_hex, "#000000");
             assert_eq!(store.session_navigation.queued_intents.len(), 1);
 
             store

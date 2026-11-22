@@ -1,25 +1,5 @@
 import Foundation
 
-@MainActor
-public enum ViewRenderTelemetry {
-    public static var isEnabled: Bool = false
-    public private(set) static var counts: [String: Int] = [:]
-
-    public static func reset() {
-        counts.removeAll()
-    }
-
-    @inline(__always)
-    public static func record(_ surface: String) {
-        guard isEnabled else { return }
-        counts[surface, default: 0] += 1
-    }
-
-    public static func count(_ surface: String) -> Int {
-        counts[surface, default: 0]
-    }
-}
-
 public struct SidebarRowModel: Identifiable, Equatable {
     public var id: String { profileId }
     public let profileId: String

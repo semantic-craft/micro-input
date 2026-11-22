@@ -136,16 +136,18 @@ final class LocalizationCoverageTests: XCTestCase {
 
         let workbench = NSHostingView(rootView: ClassicWorkbenchView(store: store).frame(width: 1180, height: 740))
         workbench.layoutSubtreeIfNeeded()
-        ViewRenderTelemetry.isEnabled = true
-        defer { ViewRenderTelemetry.isEnabled = false }
-        ViewRenderTelemetry.reset()
 
         for query in ["t", "te", "ter", "term", ""] {
-            store.dispatch("inspector", ["SetActionSearchQuery": query])
+            let invalidated = trackSliceInvalidations(on: store) {
+                store.dispatch("inspector", ["SetActionSearchQuery": query])
+            }
             workbench.layoutSubtreeIfNeeded()
+            XCTAssertEqual(
+                invalidated,
+                ["inspector"],
+                "English inspector action search must invalidate only store.inspector, got \(invalidated)"
+            )
         }
-        XCTAssertEqual(ViewRenderTelemetry.count("CreatorMicroBoardView"), 0)
-        XCTAssertEqual(ViewRenderTelemetry.count("StatusMenuPopoverView"), 0)
 
         let reloaded = CoreStore(isolatedDirectory: dir.path)
         XCTAssertEqual(reloaded.header.uiLanguage, .en)

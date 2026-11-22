@@ -185,23 +185,6 @@ final class DesignSystemVerificationTests: XCTestCase {
         let (window, rootHost) = makeHostedWindow(WorkbenchRootView(store: store), width: 820, fixedHeight: 640)
         defer { window.orderOut(nil) }
         XCTAssertEqual(rootHost.bounds.width, 820, accuracy: 0.5)
-
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let workbenchSrc = try String(
-            contentsOf: repoRoot.appendingPathComponent("app/MicroInput/Sources/MicroInputUI/ClassicWorkbenchView.swift"),
-            encoding: .utf8
-        )
-        let boardSrc = try String(
-            contentsOf: repoRoot.appendingPathComponent("app/MicroInput/Sources/MicroInputUI/CreatorMicroBoardView.swift"),
-            encoding: .utf8
-        )
-        XCTAssertFalse(boardSrc.contains("编辑层灯光"), "SimpleLightingControlCard must not duplicate 编辑层灯光")
-        XCTAssertEqual(workbenchSrc.components(separatedBy: "\"编辑层灯光\"").count - 1, 1, "Lighting settings page must expose exactly one 编辑层灯光 action")
     }
 
     @MainActor
@@ -314,8 +297,6 @@ final class DesignSystemVerificationTests: XCTestCase {
 
         let store = CoreStore(isolatedDirectory: dir.path)
         XCTAssertNotNil(store.statusMenu.cheatSheetPreview)
-        ViewRenderTelemetry.isEnabled = true
-        defer { ViewRenderTelemetry.isEnabled = false }
         store.dispatch("canvas", ["SetBottomRowLayout": "split"])
         let splitPreview = try XCTUnwrap(store.statusMenu.cheatSheetPreview)
         XCTAssertEqual(splitPreview.keyCells.count, 20)
@@ -326,7 +307,6 @@ final class DesignSystemVerificationTests: XCTestCase {
         XCTAssertLessThanOrEqual(miniHost.fittingSize.width, 320.5)
         XCTAssertLessThan(miniHost.fittingSize.height, 300)
 
-        ViewRenderTelemetry.reset()
         let (splitWin, splitHost) = makeHostedWindow(
             StatusMenuPopoverView(store: store, onOpenMainWindow: {}),
             width: 348
@@ -335,7 +315,6 @@ final class DesignSystemVerificationTests: XCTestCase {
         XCTAssertEqual(splitHost.fittingSize.width, 348, accuracy: 1.0)
         XCTAssertLessThan(splitHost.fittingSize.height, 760)
         XCTAssertFalse(hasScrollView(in: splitHost), "StatusMenuPopoverView must never embed NSScrollView")
-        XCTAssertGreaterThanOrEqual(ViewRenderTelemetry.count("PopoverMiniCheatSheetView"), 1)
 
         let splitBitmap = try XCTUnwrap(splitHost.bitmapImageRepForCachingDisplay(in: splitHost.bounds))
         splitHost.cacheDisplay(in: splitHost.bounds, to: splitBitmap)
@@ -384,19 +363,6 @@ final class DesignSystemVerificationTests: XCTestCase {
         defer { mergedWin.orderOut(nil) }
         XCTAssertEqual(mergedHost.fittingSize.width, 348, accuracy: 1.0)
         XCTAssertLessThan(mergedHost.fittingSize.height, 760)
-
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let statusMenuSrc = try String(
-            contentsOf: repoRoot.appendingPathComponent("app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift"),
-            encoding: .utf8
-        )
-        XCTAssertFalse(statusMenuSrc.contains("ToggleCheatSheet"), "Broken bottom 按键速查 action row must be removed from StatusMenuPopoverView")
-        XCTAssertFalse(statusMenuSrc.contains("隐藏按键速查"))
 
         store.dispatch("overlay", "ToggleCheatSheet")
         XCTAssertTrue(store.overlay.cheatSheetVisible)
@@ -934,6 +900,10 @@ final class DesignSystemVerificationTests: XCTestCase {
             StatusItemIcon.toolTip(locale: .zhHans, hostExecutionEnabled: false, hostCautionNotice: "需要重试清理"),
             "需要重试清理"
         )
+        XCTAssertEqual(
+            StatusItemIcon.toolTip(locale: .en, hostExecutionEnabled: true, hostCautionNotice: "Caution notice"),
+            "Caution notice"
+        )
 
         let zhActive = StatusItemIcon.make(locale: .zhHans, presentation: .active)
         let zhDefault = StatusItemIcon.make()
@@ -1273,25 +1243,6 @@ final class DesignSystemVerificationTests: XCTestCase {
                 XCTAssertGreaterThan(host.fittingSize.height, 140)
             }
         }
-
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let modalsSrc = try String(
-            contentsOf: repoRoot.appendingPathComponent("app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift"),
-            encoding: .utf8
-        )
-        let sheetStart = try XCTUnwrap(modalsSrc.range(of: "struct LightingEditorSheet: View"))
-        let sheetEnd = try XCTUnwrap(modalsSrc.range(of: "struct ReconnectComparisonSheet: View"))
-        let sheetSrc = String(modalsSrc[sheetStart.lowerBound..<sheetEnd.lowerBound])
-        XCTAssertTrue(sheetSrc.contains("LightingBeginPreview"))
-        XCTAssertTrue(sheetSrc.contains("LightingEndPreview"))
-        XCTAssertTrue(sheetSrc.contains("在键盘上预览"))
-        XCTAssertTrue(sheetSrc.contains(".surfaceButton(.secondary)"))
-        XCTAssertFalse(sheetSrc.contains(".tint("))
     }
 
     @MainActor

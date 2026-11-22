@@ -27,7 +27,6 @@ public struct WorkbenchRootView: View {
     }
 
     public var body: some View {
-        let _ = ViewRenderTelemetry.record("WorkbenchRootView")
         let navigation = injectedNavigation ?? fallbackNavigation ?? WorkbenchNavigationModel()
         let updater = injectedUpdater ?? fallbackUpdater ?? SoftwareUpdateController()
         let launchAtLogin = injectedLaunchAtLogin ?? fallbackLaunchAtLogin ?? LaunchAtLoginController()
@@ -481,7 +480,6 @@ public struct PopoverMiniCheatSheetView: View {
     }
 
     public var body: some View {
-        let _ = ViewRenderTelemetry.record("PopoverMiniCheatSheetView")
         let layout = CheatSheetSpatialLayout(sheet: sheet)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {

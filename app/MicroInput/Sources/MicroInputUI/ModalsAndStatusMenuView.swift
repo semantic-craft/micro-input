@@ -27,7 +27,6 @@ public struct StatusMenuPopoverView: View {
     }
 
     public var body: some View {
-        let _ = ViewRenderTelemetry.record("StatusMenuPopoverView")
         let sm = store.statusMenu
         let locale = store.locale
 

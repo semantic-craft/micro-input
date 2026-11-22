@@ -224,7 +224,6 @@ public final class CoreStore {
 
     private func applyProjectionCStr(_ rawPtr: UnsafeMutablePointer<CChar>) {
         defer { mi_core_string_free(rawPtr) }
-        ViewRenderTelemetry.record("CoreStore.decodeProjection")
         let data = Data(bytesNoCopy: UnsafeMutableRawPointer(rawPtr), count: Int(strlen(rawPtr)), deallocator: .none)
         let dto: WorkbenchProjectionDTO
         do {

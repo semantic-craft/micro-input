@@ -32,7 +32,6 @@ public struct ClassicWorkbenchView: View {
     }
 
     public var body: some View {
-        let _ = ViewRenderTelemetry.record("ClassicWorkbenchView")
         let destination = navigation.destination
         VStack(spacing: 0) {
             HStack(spacing: 0) {
@@ -141,7 +140,6 @@ struct WorkbenchHeaderBarView: View {
     let store: CoreStore
 
     var body: some View {
-        let _ = ViewRenderTelemetry.record("HeaderBar")
         let h = store.header
         let isReady = (h.readyKind == "Ready")
 
@@ -236,7 +234,6 @@ private struct WorkbenchSidebarView: View {
     var onPromptRenameProfile: () -> Void
 
     var body: some View {
-        let _ = ViewRenderTelemetry.record("Sidebar")
         let s = store.sidebar
         let locale = store.locale
         VStack(alignment: .leading, spacing: 24) {
@@ -400,7 +397,6 @@ private struct WorkbenchFooterBarView: View {
     let store: CoreStore
 
     var body: some View {
-        let _ = ViewRenderTelemetry.record("FooterBar")
         let f = store.footer
         HStack {
             Text(f.statusMessage)
