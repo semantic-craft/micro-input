@@ -1013,9 +1013,9 @@ fn antigravity_legacy_bottom_row_dictation_upgrades_to_focus_input_and_push_to_t
         &d.document.editable.graph.actions[aid]
     };
     let a7 = action_for("logical-7");
-    assert_eq!(a7.id, "desktop-input");
-    assert_eq!(a7.name, "聚焦当前输入框");
-    assert_eq!(a7.payload["command"], "focus-input");
+    assert_eq!(a7.id, "ag-archive-conversation");
+    assert_eq!(a7.name, "归档当前会话");
+    assert_eq!(a7.payload["command"], "archive-conversation");
 
     let a10 = action_for("logical-10");
     assert_eq!(a10.id, "desktop-new-project-chat");
@@ -1471,9 +1471,9 @@ fn antigravity_v160_migrates_back_to_session_top_six_and_side_panel_joystick_whi
         );
     }
     for (binding, cmd) in [
-        ("AG15", "scroll-up"),
+        ("AG15", "sidebar-scroll-up"),
         ("AG16", "open-side-panel"),
-        ("AG17", "scroll-down"),
+        ("AG17", "sidebar-scroll-down"),
         ("AG18", "close-side-panel"),
     ] {
         assert_eq!(
@@ -1829,5 +1829,212 @@ fn antigravity_v160_migrates_back_to_session_top_six_and_side_panel_joystick_whi
             &mouse_leftover.document,
             &ml_lid
         )
+    );
+}
+
+#[test]
+fn antigravity_archive_slot7_and_sidebar_scroll_joystick_migrate_in_place_preserving_custom_and_other_agents(
+) {
+    let mut d = Draft::default();
+    let ids = preset::install_agent_starter_profiles(&mut d).unwrap();
+    let ag_pid = ids
+        .iter()
+        .find(|pid| d.document.editable.graph.profiles[*pid].name == "Antigravity")
+        .unwrap()
+        .clone();
+    let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG07", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "archive-conversation".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG15", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "sidebar-scroll-up".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG17", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "sidebar-scroll-down".into(),
+        })
+    );
+
+    let codex_pid = ids
+        .iter()
+        .find(|pid| {
+            d.document.editable.graph.profiles[*pid].name == preset::LOCAL_CODEX_PROFILE_NAME
+        })
+        .unwrap()
+        .clone();
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&codex_pid), "AG07", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "focus-input".into(),
+        })
+    );
+    let dsh_pid = ids
+        .iter()
+        .find(|pid| d.document.editable.graph.profiles[*pid].name == "DeepSeek Coder (DSH)")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&dsh_pid), "AG07", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "dsh-desktop".into(),
+            command: "browser".into(),
+        })
+    );
+
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        7,
+        mi_model::draft::Action {
+            id: "desktop-input".into(),
+            name: "聚焦当前输入框".into(),
+            category: "Agent".into(),
+            detail: "com.google.antigravity".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"focus-input"}),
+        },
+    )
+    .unwrap();
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        16,
+        mi_model::draft::Action {
+            id: "desktop-scroll-up".into(),
+            name: "向上滚动对话".into(),
+            category: "Agent".into(),
+            detail: "legacy".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"scroll-up"}),
+        },
+    )
+    .unwrap();
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        18,
+        mi_model::draft::Action {
+            id: "desktop-scroll-down".into(),
+            name: "向下滚动对话".into(),
+            category: "Agent".into(),
+            detail: "legacy".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"scroll-down"}),
+        },
+    )
+    .unwrap();
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        17,
+        mi_model::draft::Action {
+            id: "custom-stick-left".into(),
+            name: "自定义左摇杆".into(),
+            category: "文本".into(),
+            detail: "保留".into(),
+            payload: json!({"type":"text","text":"keep-left"}),
+        },
+    )
+    .unwrap();
+
+    assert!(preset::antigravity_layer_needs_starter_slot_migration(
+        &d.document,
+        &ag_lid
+    ));
+    assert!(
+        preset::antigravity_layer_needs_sidebar_scroll_joystick_migration(&d.document, &ag_lid)
+    );
+    assert!(preset::starter_profile_needs_legacy_spec_migration(
+        &d.document,
+        &ag_pid
+    ));
+
+    preset::install_agent_starter_profiles(&mut d).unwrap();
+
+    assert!(!preset::antigravity_layer_needs_starter_slot_migration(
+        &d.document,
+        &ag_lid
+    ));
+    assert!(
+        !preset::antigravity_layer_needs_sidebar_scroll_joystick_migration(&d.document, &ag_lid)
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG07", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "archive-conversation".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG15", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "sidebar-scroll-up".into(),
+        })
+    );
+    assert!(matches!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG16", true),
+        Some(mi_model::host_router::ResolvedHostAction::PasteText { text, .. })
+            if text == "keep-left"
+    ));
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG17", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "sidebar-scroll-down".into(),
+        })
+    );
+
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        7,
+        mi_model::draft::Action {
+            id: "custom-slot7".into(),
+            name: "我的槽位7".into(),
+            category: "Agent".into(),
+            detail: "保留".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"focus-input"}),
+        },
+    )
+    .unwrap();
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        16,
+        mi_model::draft::Action {
+            id: "custom-slot16".into(),
+            name: "我的上推".into(),
+            category: "Agent".into(),
+            detail: "保留".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"scroll-up"}),
+        },
+    )
+    .unwrap();
+    let rev_before = d.revision;
+    preset::install_agent_starter_profiles(&mut d).unwrap();
+    assert_eq!(d.revision, rev_before);
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG07", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "focus-input".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG15", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "scroll-up".into(),
+        })
     );
 }

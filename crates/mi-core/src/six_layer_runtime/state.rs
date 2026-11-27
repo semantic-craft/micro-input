@@ -185,6 +185,23 @@ impl SavedSixLayerState {
                     changed = true;
                 }
             }
+            if host.adapter == "antigravity" && host.actions.len() > 7 {
+                let d7 = slot_action("logical-7");
+                if is_action_cmd(d7, "ag-archive-conversation", "archive-conversation") {
+                    let baked_focus_input = matches!(
+                        host.actions[7].as_ref(),
+                        Some(ResolvedHostAction::AgentCommand { adapter, command })
+                            if adapter == "antigravity" && command == "focus-input"
+                    );
+                    if baked_focus_input {
+                        host.actions[7] = Some(ResolvedHostAction::AgentCommand {
+                            adapter: "antigravity".into(),
+                            command: "archive-conversation".into(),
+                        });
+                        changed = true;
+                    }
+                }
+            }
             if layer
                 .control_settings
                 .as_ref()
@@ -209,54 +226,82 @@ impl SavedSixLayerState {
                 let d17 = slot_action("logical-17");
                 let d18 = slot_action("logical-18");
                 let d19 = slot_action("logical-19");
-                let doc_has_side_panel_joystick =
-                    is_action_cmd(d16, "desktop-scroll-up", "scroll-up")
+                let doc_has_canonical_joystick =
+                    is_action_cmd(d16, "ag-sidebar-scroll-up", "sidebar-scroll-up")
                         && is_action_cmd(d17, "ag-open-side-panel", "open-side-panel")
-                        && is_action_cmd(d18, "desktop-scroll-down", "scroll-down")
+                        && is_action_cmd(d18, "ag-sidebar-scroll-down", "sidebar-scroll-down")
                         && is_action_cmd(d19, "ag-close-side-panel", "close-side-panel");
-                if doc_has_side_panel_joystick && host.actions.len() >= 20 {
-                    let baked_mouse_joystick = host.joystick_mode.as_deref() == Some("MOUSE")
-                        && host.actions[16..20].iter().all(|action| {
-                            action.as_ref().is_none_or(|a| {
-                                matches!(
-                                    a,
-                                    ResolvedHostAction::AgentCommand { command, .. }
-                                        if command.starts_with("model-picker-")
-                                )
-                            })
-                        });
-                    let baked_legacy_nav_joystick = matches!(
-                        host.actions[16].as_ref(),
-                        Some(ResolvedHostAction::AgentCommand { command, .. })
-                            if command == "scroll-up"
-                    ) && matches!(
-                        host.actions[17].as_ref(),
-                        Some(ResolvedHostAction::Shortcut { key, .. }) if key == "["
-                    ) && matches!(
-                        host.actions[18].as_ref(),
-                        Some(ResolvedHostAction::AgentCommand { command, .. })
-                            if command == "scroll-down"
-                    ) && matches!(
-                        host.actions[19].as_ref(),
-                        Some(ResolvedHostAction::Shortcut { key, .. }) if key == "]"
-                    );
-                    if baked_mouse_joystick || baked_legacy_nav_joystick {
-                        host.joystick_mode = None;
+                if host.actions.len() >= 20 {
+                    if doc_has_canonical_joystick {
+                        let baked_mouse_joystick = host.joystick_mode.as_deref() == Some("MOUSE")
+                            && host.actions[16..20].iter().all(|action| {
+                                action.as_ref().is_none_or(|a| {
+                                    matches!(
+                                        a,
+                                        ResolvedHostAction::AgentCommand { command, .. }
+                                            if command.starts_with("model-picker-")
+                                    )
+                                })
+                            });
+                        let baked_legacy_nav_joystick = matches!(
+                            host.actions[16].as_ref(),
+                            Some(ResolvedHostAction::AgentCommand { command, .. })
+                                if command == "scroll-up"
+                        ) && matches!(
+                            host.actions[17].as_ref(),
+                            Some(ResolvedHostAction::Shortcut { key, .. }) if key == "["
+                        ) && matches!(
+                            host.actions[18].as_ref(),
+                            Some(ResolvedHostAction::AgentCommand { command, .. })
+                                if command == "scroll-down"
+                        ) && matches!(
+                            host.actions[19].as_ref(),
+                            Some(ResolvedHostAction::Shortcut { key, .. }) if key == "]"
+                        );
+                        if baked_mouse_joystick || baked_legacy_nav_joystick {
+                            host.joystick_mode = None;
+                            host.actions[16] = Some(ResolvedHostAction::AgentCommand {
+                                adapter: "antigravity".into(),
+                                command: "sidebar-scroll-up".into(),
+                            });
+                            host.actions[17] = Some(ResolvedHostAction::AgentCommand {
+                                adapter: "antigravity".into(),
+                                command: "open-side-panel".into(),
+                            });
+                            host.actions[18] = Some(ResolvedHostAction::AgentCommand {
+                                adapter: "antigravity".into(),
+                                command: "sidebar-scroll-down".into(),
+                            });
+                            host.actions[19] = Some(ResolvedHostAction::AgentCommand {
+                                adapter: "antigravity".into(),
+                                command: "close-side-panel".into(),
+                            });
+                            changed = true;
+                        }
+                    }
+                    if is_action_cmd(d16, "ag-sidebar-scroll-up", "sidebar-scroll-up")
+                        && matches!(
+                            host.actions[16].as_ref(),
+                            Some(ResolvedHostAction::AgentCommand { adapter, command })
+                                if adapter == "antigravity" && command == "scroll-up"
+                        )
+                    {
                         host.actions[16] = Some(ResolvedHostAction::AgentCommand {
                             adapter: "antigravity".into(),
-                            command: "scroll-up".into(),
+                            command: "sidebar-scroll-up".into(),
                         });
-                        host.actions[17] = Some(ResolvedHostAction::AgentCommand {
-                            adapter: "antigravity".into(),
-                            command: "open-side-panel".into(),
-                        });
+                        changed = true;
+                    }
+                    if is_action_cmd(d18, "ag-sidebar-scroll-down", "sidebar-scroll-down")
+                        && matches!(
+                            host.actions[18].as_ref(),
+                            Some(ResolvedHostAction::AgentCommand { adapter, command })
+                                if adapter == "antigravity" && command == "scroll-down"
+                        )
+                    {
                         host.actions[18] = Some(ResolvedHostAction::AgentCommand {
                             adapter: "antigravity".into(),
-                            command: "scroll-down".into(),
-                        });
-                        host.actions[19] = Some(ResolvedHostAction::AgentCommand {
-                            adapter: "antigravity".into(),
-                            command: "close-side-panel".into(),
+                            command: "sidebar-scroll-down".into(),
                         });
                         changed = true;
                     }

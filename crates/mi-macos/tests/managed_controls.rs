@@ -4,7 +4,8 @@ use mi_macos::executor::{
 };
 use mi_macos::managed_controls::{
     blocked, ManagedAxControls, ManagedAxProvider, ManagedControl, ManagedWindow,
-    ManagedWindowIdentity, ModelPickerConfirmResult, ObservedDictationState, SubagentOpenResult,
+    ManagedWindowIdentity, ModelPickerConfirmResult, ObservedDictationState, SidebarStepDirection,
+    SubagentOpenResult,
 };
 use mi_model::host_router::ResolvedHostAction;
 use std::sync::{Arc, Barrier, Mutex};
@@ -932,6 +933,9 @@ impl HostOsDriver for Driver {
     }
     fn open_browser(&self, adapter: &str) -> Result<(), String> {
         self.controls.open_browser(adapter)
+    }
+    fn archive_conversation(&self, adapter: &str) -> Result<(), String> {
+        self.controls.archive_conversation(adapter)
     }
 }
 
@@ -6369,4 +6373,272 @@ fn manual_grokbot_readonly_ax_verify() {
         "grokbot_readonly_ax_verify PASS editable_inputs={} dictation={:?} voice_chat={:?}",
         readiness.editable_inputs, readiness.dictation, voice_start_matches[0].label
     );
+}
+
+#[derive(Default)]
+struct SidebarAndArchiveFixture {
+    events: Vec<String>,
+    archive_result: Option<Result<(), String>>,
+    step_result: Option<Result<(), String>>,
+}
+
+#[derive(Clone, Default)]
+struct SidebarAndArchiveProvider(Arc<Mutex<SidebarAndArchiveFixture>>);
+
+impl ManagedAxProvider for SidebarAndArchiveProvider {
+    fn capture(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .events
+            .push(format!("capture:{bundle_id}"));
+        Ok(ManagedWindow {
+            identity: ManagedWindowIdentity {
+                bundle_id: bundle_id.into(),
+                pid: 4242,
+                window_id: 9,
+                scope_id: 0,
+                title: "Antigravity".into(),
+            },
+            controls: Vec::new(),
+        })
+    }
+    fn capture_full_window(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .events
+            .push(format!("capture_full_window:{bundle_id}"));
+        Ok(ManagedWindow {
+            identity: ManagedWindowIdentity {
+                bundle_id: bundle_id.into(),
+                pid: 4242,
+                window_id: 9,
+                scope_id: 0,
+                title: "Antigravity".into(),
+            },
+            controls: Vec::new(),
+        })
+    }
+    fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
+        Ok(ManagedWindow {
+            identity: target.clone(),
+            controls: Vec::new(),
+        })
+    }
+    fn press(&mut self, _: &ManagedWindowIdentity, _: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn focus(&mut self, _: &ManagedWindowIdentity, _: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn scroll(&mut self, _: &ManagedWindowIdentity, _: &DialScrollRequest) -> Result<(), String> {
+        self.0.lock().unwrap().events.push("scroll".into());
+        Ok(())
+    }
+    fn shortcut(
+        &mut self,
+        _: &ManagedWindowIdentity,
+        _: u64,
+        _: u16,
+        _: &[String],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn insert_text(&mut self, _: &ManagedWindowIdentity, _: u64, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn submit(&mut self, _: &ManagedWindowIdentity, _: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn step_sidebar_conversation(
+        &mut self,
+        target: &ManagedWindowIdentity,
+        direction: SidebarStepDirection,
+    ) -> Result<(), String> {
+        let mut st = self.0.lock().unwrap();
+        assert_eq!(target.bundle_id, "com.google.antigravity");
+        st.events.push(format!("step_sidebar:{direction:?}"));
+        st.step_result.clone().unwrap_or(Ok(()))
+    }
+    fn archive_conversation(&mut self, target: &ManagedWindowIdentity) -> Result<(), String> {
+        let mut st = self.0.lock().unwrap();
+        assert_eq!(target.bundle_id, "com.google.antigravity");
+        st.events.push("archive_conversation".into());
+        st.archive_result.clone().unwrap_or(Ok(()))
+    }
+}
+
+#[test]
+fn antigravity_archive_conversation_handles_success_running_and_unsupported_adapter() {
+    let provider = SidebarAndArchiveProvider::default();
+    let controls =
+        ManagedAxControls::with_readback_timeout(provider.clone(), Duration::from_millis(20));
+
+    assert_eq!(controls.archive_conversation("antigravity"), Ok(()));
+    assert_eq!(
+        provider.0.lock().unwrap().events,
+        vec![
+            "capture_full_window:com.google.antigravity",
+            "archive_conversation",
+        ]
+    );
+
+    provider.0.lock().unwrap().archive_result =
+        Some(Err(blocked("conversation_running_cannot_archive")));
+    assert_eq!(
+        controls.archive_conversation("antigravity"),
+        Err(blocked("conversation_running_cannot_archive"))
+    );
+
+    assert_eq!(
+        controls.archive_conversation("codex"),
+        Err(blocked("unsupported_agent_adapter"))
+    );
+    assert_eq!(
+        controls.archive_conversation("dsh-desktop"),
+        Err(blocked("unsupported_agent_adapter"))
+    );
+}
+
+#[test]
+fn antigravity_sidebar_scroll_routes_to_step_sidebar_conversation() {
+    let provider = SidebarAndArchiveProvider::default();
+    let controls =
+        ManagedAxControls::with_readback_timeout(provider.clone(), Duration::from_millis(20));
+
+    let up_req = mi_macos::executor::parse_dial_scroll_command("antigravity", "sidebar-scroll-up")
+        .expect("sidebar-scroll-up request");
+    let down_req =
+        mi_macos::executor::parse_dial_scroll_command("antigravity", "sidebar-scroll-down")
+            .expect("sidebar-scroll-down request");
+
+    assert_eq!(controls.scroll(&up_req), Ok(()));
+    assert_eq!(controls.scroll(&down_req), Ok(()));
+    assert_eq!(
+        provider.0.lock().unwrap().events,
+        vec![
+            "capture_full_window:com.google.antigravity",
+            "step_sidebar:Previous",
+            "capture_full_window:com.google.antigravity",
+            "step_sidebar:Next",
+        ]
+    );
+
+    provider.0.lock().unwrap().events.clear();
+    let main_req = mi_macos::executor::parse_dial_scroll_command("antigravity", "scroll-up")
+        .expect("scroll-up request");
+    assert_eq!(controls.scroll(&main_req), Ok(()));
+    assert_eq!(
+        provider.0.lock().unwrap().events,
+        vec!["capture:com.google.antigravity", "scroll"]
+    );
+}
+
+#[test]
+fn live_executor_dispatches_archive_conversation_and_surfaces_managed_errors() {
+    struct ArchiveDriver {
+        controls: ManagedAxControls<SidebarAndArchiveProvider>,
+        trusted: bool,
+    }
+    impl HostOsDriver for ArchiveDriver {
+        fn is_accessibility_trusted(&self) -> bool {
+            self.trusted
+        }
+        fn open_accessibility_settings(&self) -> Result<(), String> {
+            unreachable!()
+        }
+        fn open_application(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn post_key_shortcut(&self, _: u16, _: &[String], _: bool) -> Result<(), String> {
+            unreachable!()
+        }
+        fn post_apple_fn_flags(&self, _: bool) -> Result<(), String> {
+            unreachable!()
+        }
+        fn snapshot_clipboard(&self, _: usize) -> ClipboardSnapshot {
+            unreachable!()
+        }
+        fn write_clipboard_plain_text(&self, _: &str) -> u64 {
+            unreachable!()
+        }
+        fn restore_clipboard(&self, _: &ClipboardSnapshot, _: u64) -> bool {
+            unreachable!()
+        }
+        fn open_url(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn focus_agent_input(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn stop_active_dictation(&self, _: &str) -> Result<bool, String> {
+            unreachable!()
+        }
+        fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String> {
+            self.controls.scroll(req)
+        }
+        fn move_cursor_by(&self, _: f64, _: f64) -> Result<(), String> {
+            unreachable!()
+        }
+        fn click_mouse_button(&self, _: MouseButtonKind) -> Result<(), String> {
+            unreachable!()
+        }
+        fn scroll_cursor_wheel(&self, _: i32, _: i32) -> Result<(), String> {
+            unreachable!()
+        }
+        fn new_conversation_in_project(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn toggle_live_voice(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn archive_conversation(&self, adapter: &str) -> Result<(), String> {
+            self.controls.archive_conversation(adapter)
+        }
+    }
+
+    let provider = SidebarAndArchiveProvider::default();
+    let executor = LiveHostActionExecutor::new(ArchiveDriver {
+        controls: ManagedAxControls::with_readback_timeout(
+            provider.clone(),
+            Duration::from_millis(20),
+        ),
+        trusted: true,
+    });
+    let action = ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".into(),
+        command: "archive-conversation".into(),
+    };
+    let ok = executor.execute("Antigravity", "AG07", &action);
+    assert_eq!(ok.outcome, "executed");
+
+    provider.0.lock().unwrap().archive_result =
+        Some(Err(blocked("conversation_running_cannot_archive")));
+    let running = executor.execute("Antigravity", "AG07", &action);
+    assert_eq!(running.outcome, "blocked");
+    assert_eq!(
+        running.detail,
+        "blocked:conversation_running_cannot_archive"
+    );
+
+    provider.0.lock().unwrap().archive_result =
+        Some(Err("unconfirmed:archive_conversation_readback".into()));
+    let unconfirmed = executor.execute("Antigravity", "AG07", &action);
+    assert_eq!(unconfirmed.outcome, "failed");
+    assert_eq!(
+        unconfirmed.detail,
+        "unconfirmed:archive_conversation_readback"
+    );
+
+    let untrusted = LiveHostActionExecutor::new(ArchiveDriver {
+        controls: ManagedAxControls::with_readback_timeout(
+            provider.clone(),
+            Duration::from_millis(20),
+        ),
+        trusted: false,
+    });
+    let blocked_perm = untrusted.execute("Antigravity", "AG07", &action);
+    assert_eq!(blocked_perm.outcome, "blocked");
+    assert_eq!(blocked_perm.detail, "accessibility_untrusted");
 }

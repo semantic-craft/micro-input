@@ -215,7 +215,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     }
     for (binding, command) in [
         ("AG06", "live-voice"),
-        ("AG07", "focus-input"),
+        ("AG07", "archive-conversation"),
         ("AG08", "browser"),
         ("AG09", "side-question"),
         ("AG10", "push-to-talk"),
@@ -226,9 +226,9 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         ("AG14", "model-picker-next"),
         ("ENC_CW", "model-picker-next"),
         ("ENC_CLK", "search"),
-        ("AG15", "scroll-up"),
+        ("AG15", "sidebar-scroll-up"),
         ("AG16", "open-side-panel"),
-        ("AG17", "scroll-down"),
+        ("AG17", "sidebar-scroll-down"),
         ("AG18", "close-side-panel"),
     ] {
         assert_eq!(
@@ -1015,7 +1015,7 @@ fn bottom_row_split_and_merge_layout_routing_and_persistence() {
         store.resolve_host_input("AG07", true),
         Some(ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
-            command: "focus-input".into(),
+            command: "archive-conversation".into(),
         })
     );
     assert_eq!(

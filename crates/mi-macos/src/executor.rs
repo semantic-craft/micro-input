@@ -911,6 +911,9 @@ pub trait HostOsDriver: Send + Sync {
     fn close_side_panel(&self, _adapter: &str) -> Result<(), String> {
         Err("blocked:unsupported_side_panel_adapter".into())
     }
+    fn archive_conversation(&self, _adapter: &str) -> Result<(), String> {
+        Err("blocked:unsupported_agent_command".into())
+    }
     fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
         Err(format!(
             "blocked:model_picker_key_unavailable:{adapter}:{key_code:x}"
@@ -2655,6 +2658,16 @@ impl HostOsDriver for MacOsSystemDriver {
         self.managed_controls.set_side_panel_open(adapter, false)
     }
 
+    fn archive_conversation(&self, adapter: &str) -> Result<(), String> {
+        if adapter != "antigravity" {
+            return Err("blocked:unsupported_agent_adapter".into());
+        }
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        self.managed_controls.archive_conversation(adapter)
+    }
+
     fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
         if !self.is_accessibility_trusted() {
             return Err("accessibility_untrusted".to_string());
@@ -2821,6 +2834,7 @@ pub enum RecordedOsEvent {
     OpenBrowser(String),
     OpenSidePanel(String),
     CloseSidePanel(String),
+    ArchiveConversation(String),
     SendModelPickerKey {
         adapter: String,
         key_code: u16,
@@ -3180,6 +3194,15 @@ impl HostOsDriver for RecordingOsDriver {
         }
         st.events
             .push(RecordedOsEvent::CloseSidePanel(adapter.to_string()));
+        Ok(())
+    }
+    fn archive_conversation(&self, adapter: &str) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events
+            .push(RecordedOsEvent::ArchiveConversation(adapter.to_string()));
         Ok(())
     }
     fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
@@ -4135,6 +4158,14 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
                     match self.driver.close_side_panel(effective_adapter) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    }
+                } else if command == "archive-conversation" && effective_adapter == "antigravity" {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    match self.driver.archive_conversation(effective_adapter) {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }

@@ -587,6 +587,27 @@ pub const CORE_EN_TABLE: &[(&str, &str)] = &[
         "Preview connection interrupted; preview stopped without retry (original lighting not auto-restored)",
     ),
     ("灯光预览状态不可用", "Lighting preview status unavailable"),
+    ("当前未打开可归档的会话", "No active conversation to archive"),
+    (
+        "当前会话正在运行，无法直接归档",
+        "Current conversation is running and cannot be archived",
+    ),
+    (
+        "未找到当前会话的归档按钮，请先展开左侧栏",
+        "Archive button not found for the active conversation; expand the left sidebar first",
+    ),
+    (
+        "会话归档回读未确认，请检查左侧会话栏",
+        "Conversation archive readback unconfirmed; check the left sidebar",
+    ),
+    (
+        "侧栏会话切换回读未确认，请检查目标窗口",
+        "Sidebar conversation switch readback unconfirmed; check the target window",
+    ),
+    (
+        "未找到左侧对话导航栏中的会话列表",
+        "No conversations found in the left sidebar",
+    ),
 ];
 
 pub fn en_lookup(zh: &str) -> Option<&'static str> {
@@ -683,6 +704,12 @@ fn localize_managed_error_segment(segment: &str, locale: ResolvedLocale) -> Stri
         }
         "session_instance_or_workspace_changed" => Some("目标应用窗口或工作区已变化"),
         "session_navigation_unsupported" => Some("暂不支持切换到此目标会话"),
+        "no_active_conversation" => Some("当前未打开可归档的会话"),
+        "conversation_running_cannot_archive" => Some("当前会话正在运行，无法直接归档"),
+        "archive_control_unavailable" => Some("未找到当前会话的归档按钮，请先展开左侧栏"),
+        "archive_conversation_readback" => Some("会话归档回读未确认，请检查左侧会话栏"),
+        "sidebar_conversation_step_readback" => Some("侧栏会话切换回读未确认，请检查目标窗口"),
+        "sidebar_conversations_unavailable" => Some("未找到左侧对话导航栏中的会话列表"),
         _ => None,
     };
     if let Some(zh) = known_zh {

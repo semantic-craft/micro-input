@@ -1282,6 +1282,8 @@ impl WorkbenchStore {
                         return p.layer_order.first().is_some_and(|lid| {
                             !mi_model::preset::antigravity_layer_needs_starter_slot_migration(
                                 doc, lid,
+                            ) && !mi_model::preset::antigravity_layer_needs_sidebar_scroll_joystick_migration(
+                                doc, lid,
                             ) && !mi_model::preset::coding_agent_layer_needs_encoder_migration(
                                 doc,
                                 canonical_name,

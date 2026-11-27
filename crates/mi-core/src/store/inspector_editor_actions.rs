@@ -2033,6 +2033,9 @@ pub(super) fn resolve_silkscreen_icon(slot: u32, action: Option<&Action>) -> Str
     if a.id.contains("submit") {
         return "⏎".to_string();
     }
+    if a.id.contains("archive") || cmd == Some("archive-conversation") {
+        return "🗄".to_string();
+    }
     if a.id.contains("side-panel") || matches!(cmd, Some("open-side-panel" | "close-side-panel")) {
         return "◫".to_string();
     }

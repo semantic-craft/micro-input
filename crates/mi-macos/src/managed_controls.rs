@@ -136,6 +136,22 @@ pub trait ManagedAxProvider: Send {
     ) -> Result<(), String> {
         Err(blocked("window_key_unavailable"))
     }
+    fn step_sidebar_conversation(
+        &mut self,
+        _target: &ManagedWindowIdentity,
+        _direction: SidebarStepDirection,
+    ) -> Result<(), String> {
+        Err(blocked("sidebar_conversations_unavailable"))
+    }
+    fn archive_conversation(&mut self, _target: &ManagedWindowIdentity) -> Result<(), String> {
+        Err(blocked("archive_control_unavailable"))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarStepDirection {
+    Previous,
+    Next,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1477,6 +1493,19 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         }
     }
 
+    pub fn archive_conversation(&self, adapter: &str) -> Result<(), String> {
+        if adapter != "antigravity" {
+            return Err(blocked("unsupported_agent_adapter"));
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = provider.capture_full_window("com.google.antigravity")?;
+        validate_target(&window.identity, "com.google.antigravity")?;
+        provider.archive_conversation(&window.identity)
+    }
+
     pub fn scroll(&self, request: &DialScrollRequest) -> Result<(), String> {
         if !matches!(
             request.target_bundle_id.as_str(),
@@ -1488,6 +1517,16 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
             .provider
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
+        if request.sidebar && request.target_bundle_id == "com.google.antigravity" {
+            let direction = if request.delta_lines < 0 {
+                SidebarStepDirection::Previous
+            } else {
+                SidebarStepDirection::Next
+            };
+            let window = provider.capture_full_window(&request.target_bundle_id)?;
+            validate_target(&window.identity, &request.target_bundle_id)?;
+            return provider.step_sidebar_conversation(&window.identity, direction);
+        }
         let window = provider.capture_for_scroll(&request.target_bundle_id)?;
         validate_target(&window.identity, &request.target_bundle_id)?;
         provider.scroll(&window.identity, request)?;
