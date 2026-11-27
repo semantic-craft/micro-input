@@ -1,4 +1,3 @@
-"""Unit tests for scripts/verify-hardware without touching physical USB hardware."""
 import importlib.machinery
 import importlib.util
 import json

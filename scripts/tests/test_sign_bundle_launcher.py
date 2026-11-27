@@ -1,4 +1,3 @@
-"""Unit and integration tests for scripts/sign_bundle.py inside-out bundle signing."""
 from __future__ import annotations
 
 import importlib.util

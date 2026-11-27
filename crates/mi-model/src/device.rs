@@ -1,5 +1,3 @@
-//! Candidate read-only device projection, independently implemented from the evidence summary.
-//! Exact source bytes belong to the session snapshot; this model never normalizes a file for writing.
 use super::*;
 
 fn device_binding(v: &Value) -> Binding {
@@ -11,7 +9,6 @@ fn device_binding(v: &Value) -> Binding {
         _ => Binding::Unknown(v.clone()),
     }
 }
-/// Device files are not the demo/import interchange format. Missing optional values remain unknown.
 pub fn parse_device_files(keymap: &[u8], smart: Option<&[u8]>) -> Result<DeviceConfig, ParseError> {
     let raw = strict_json(keymap)?;
     if !raw.is_object() {

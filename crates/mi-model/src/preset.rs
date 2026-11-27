@@ -1,4 +1,3 @@
-//! Own-format interchange only. No firmware serialization or device authority.
 use crate::{
     document::{new_id, LocalDocumentV2},
     draft::{ActionKind, Draft},

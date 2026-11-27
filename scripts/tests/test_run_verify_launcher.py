@@ -1,4 +1,3 @@
-"""Unit tests for scripts/run --verify QA isolation, path guard, lock, and cleanup."""
 import contextlib
 import fcntl
 import io

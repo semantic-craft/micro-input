@@ -1,4 +1,3 @@
-"""Run the real supervisor with process/signal boundaries replaced. No device I/O."""
 import contextlib
 import importlib.machinery
 import importlib.util

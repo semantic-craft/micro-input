@@ -1,6 +1,4 @@
-//! R-D04/R-D13; E-052/E-075: hidapi 2.6.7 numbered macOS reports.
 use crate::*;
-/// Every production request is validated before framing or touching the HID link.
 pub fn validate_read_only(r: &RpcRequest) -> Result<(), ProtoError> {
     let valid = match r.method {
         Method::DeviceStatus | Method::SysVersion => r.params.is_null(),

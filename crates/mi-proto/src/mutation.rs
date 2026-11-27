@@ -1,5 +1,3 @@
-//! Candidate chunk encoding only. No transport authority and no arbitrary path or method.
-//! The production read-only request vocabulary remains unchanged.
 use crate::ProtoError;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
@@ -75,11 +73,6 @@ pub fn extract_tx_id(reply: &Value, expected_id: u16) -> Result<u32, ProtoError>
         .ok_or_else(|| ProtoError::Invalid("missing transaction id in fs.txbegin reply".into()))?;
     u32::try_from(raw).map_err(|_| ProtoError::Invalid("tx id out of u32 range".into()))
 }
-/// Candidate client-side response validation, not proof that a file was written.
-/// Input 1.1.0's sendRpcCall and writeFileChunkedFromStr require a result/error
-/// envelope but impose no fs.writebin or lights.preview result payload schema (IA-07/17). Match the
-/// request ID using our existing alias rules; independent byte readback remains
-/// mandatory. This validator grants no native transport authority.
 pub fn validate_mutation_response_candidate(
     reply: &Value,
     expected_id: u16,

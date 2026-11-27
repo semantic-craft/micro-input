@@ -28,7 +28,6 @@ pub const THREE_LAYER_MATRIX_BINDINGS: [[&str; 13]; 3] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ThreeLayerBoard {
     pub profile_index: u32,
-    /// The firmware's layer index is one-based, independently of its JSON IDs.
     pub layer_index: u32,
 }
 
@@ -70,7 +69,6 @@ fn dedicated_profile(id: u64) -> Value {
     json!({"id":id,"name":THREE_LAYER_PROFILE_NAME,"layers":layers})
 }
 
-/// Recognize only the exact layer mapping; a user profile with this name is never overwritten.
 pub fn recognize_three_layer_profile(config: &DeviceConfig) -> Result<Option<u32>, String> {
     let mut found = None;
     let profiles = config.raw["profiles"]

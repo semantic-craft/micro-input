@@ -1,4 +1,3 @@
-//! Local action intents and honest prerequisites. No adapter discovery or execution.
 use crate::draft::{actions, Action, ActionKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;

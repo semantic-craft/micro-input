@@ -1,4 +1,3 @@
-//! Versioned local proposal boundary. No transport, execution or networking.
 use super::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -285,7 +284,6 @@ impl DocumentStore {
         Ok(())
     }
 }
-/// One request per process. No implicit workbench discovery or writes on read/validate.
 pub fn execute(command: &str, text: &str) -> Result<Value> {
     if text.len() as u64 > LIMIT {
         return Err(invalid("请求超过 4 MiB"));

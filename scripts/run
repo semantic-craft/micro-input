@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Launch this checkout; --verify uses an isolated QA app with preserved evidence."""
 import argparse
 import fcntl
 import json
@@ -167,7 +166,11 @@ def _validate_qa_dir(path: pathlib.Path) -> pathlib.Path:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog='scripts/run', description=__doc__, allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        prog='scripts/run',
+        description='Launch this checkout; --verify uses an isolated QA app with preserved evidence.',
+        allow_abbrev=False,
+    )
     parser.add_argument('--verify', action='store_true', help='Launch isolated QA app bundle in .scratch/qa-runs')
     parser.add_argument('--unique-bundle-id', action='store_true', help='Assign unique bundle ID for concurrent QA runs')
     parser.add_argument('--timeout', type=int, default=None, help='Execution timeout in seconds (defaults to 600 with --verify)')

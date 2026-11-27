@@ -90,17 +90,60 @@ class PythonLintLauncherTests(unittest.TestCase):
             output = proc.stdout + proc.stderr
             self.assertIn("scripts/broken.py:1:", output)
 
-    def test_allows_builtin_open_with_opener_and_argv_subprocess(self) -> None:
+    def test_rejects_module_class_function_and_async_docstrings(self) -> None:
+        cases = [
+            (
+                "module_doc.py",
+                '"""Module docstring."""\nX = 1\n',
+                "scripts/module_doc.py:1:",
+            ),
+            (
+                "cli-tool",
+                '#!/usr/bin/env python3\n\'\'\'Extensionless module docstring.\'\'\'\nX = 1\n',
+                "scripts/cli-tool:2:",
+            ),
+            (
+                "class_doc.py",
+                'class Widget:\n    """Class docstring."""\n    pass\n',
+                "scripts/class_doc.py:2:",
+            ),
+            (
+                "func_doc.py",
+                'def compute() -> int:\n    """Function docstring."""\n    return 1\n',
+                "scripts/func_doc.py:2:",
+            ),
+            (
+                "async_doc.py",
+                'async def fetch() -> int:\n    """Async function docstring."""\n    return 1\n',
+                "scripts/async_doc.py:2:",
+            ),
+        ]
+        for filename, content, expected_loc in cases:
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                scripts_dir = root / "scripts"
+                scripts_dir.mkdir()
+                (scripts_dir / filename).write_text(content, encoding="utf-8")
+                proc = self._run_lint(root)
+                self.assertNotEqual(proc.returncode, 0, msg=f"expected failure for {filename}")
+                output = proc.stdout + proc.stderr
+                self.assertIn(expected_loc, output)
+                self.assertIn("Python docstrings are forbidden", output)
+
+    def test_allows_builtin_open_with_opener_argv_subprocess_and_non_docstring_literals(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scripts_dir = root / "scripts"
             scripts_dir.mkdir()
             (scripts_dir / "good.py").write_text(
+                "import argparse\n"
                 "import subprocess\n"
                 "from pathlib import Path\n"
+                'HELP_TEXT = """Assigned multi-line string constant."""\n'
                 "def run_ok(path: Path, private_opener):\n"
+                '    parser = argparse.ArgumentParser(description="Inline CLI description.")\n'
                 '    with open(path, "w", opener=private_opener) as handle:\n'
-                '        handle.write("ok")\n'
+                "        handle.write(HELP_TEXT + str(parser.prog))\n"
                 '    subprocess.run(["ls"])\n'
                 '    subprocess.run(["ls"], shell=False)\n',
                 encoding="utf-8",

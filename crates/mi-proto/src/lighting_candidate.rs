@@ -1,9 +1,3 @@
-//! Fixed `lights.preview` encoding; sending authority belongs to the session preview.
-//!
-//! Input 1.1.0 passes the two-zone DTO directly as params (IA-17). Optional
-//! fields stay omitted; no defaults, target binding, readback, or restoration
-//! semantics are inferred. The known effects and numeric bounds below are
-//! client policy, not evidence of firmware acceptance or visual behavior.
 use crate::ProtoError;
 use serde::{Deserialize, Serialize};
 
@@ -49,15 +43,6 @@ impl LightingZoneCandidate {
     }
 }
 
-/// Produce candidate bytes only. This does not grant a `Method` variant, a
-/// transport permit, or evidence that the request can be safely applied.
-///
-/// The production request constructor still accepts only its closed read-only
-/// enum, so candidate methods cannot enter it as strings:
-/// ```compile_fail
-/// use mi_proto::RpcRequest;
-/// let request = RpcRequest::new("lights.preview", serde_json::Value::Null, 7);
-/// ```
 pub fn encode_lighting_preview_candidate(
     params: &LightingPreviewCandidate,
     id: u16,

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Sign macOS .app bundles inside-out and manage LaunchServices registration."""
 from __future__ import annotations
 
 import argparse
@@ -194,7 +193,11 @@ def unregister_launch_services(bundle_path: Path, lsregister: Path = LSREGISTER)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog='scripts/sign_bundle.py', description=__doc__, allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        prog='scripts/sign_bundle.py',
+        description='Sign macOS .app bundles inside-out and manage LaunchServices registration.',
+        allow_abbrev=False,
+    )
     parser.add_argument('bundle', type=Path, help='Path to outer .app bundle')
     parser.add_argument('--mode', choices=('dev', 'release'), default='dev')
     parser.add_argument('--identity', default=None, help='Explicit codesign identity')

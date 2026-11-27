@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Measure isolated QA startup and idle CPU/RSS; record a baseline, not an acceptance verdict."""
-
 import argparse
 import json
 import math
@@ -178,7 +176,9 @@ def baseline(process, run_dir, seconds, interval):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Measure isolated QA startup and idle CPU/RSS; record a baseline, not an acceptance verdict."
+    )
     parser.add_argument("--seconds", type=float, default=10, help="idle observation duration")
     parser.add_argument("--interval", type=float, default=1, help="sampling interval")
     args = parser.parse_args()

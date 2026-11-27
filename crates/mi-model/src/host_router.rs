@@ -1,4 +1,3 @@
-//! Deterministic, side-effect-free host routing and passthrough layer health check.
 use crate::{
     document::LocalDocumentV2,
     draft::{Action, ActionKind},
@@ -862,7 +861,6 @@ pub fn resolve_host_action(
     )
 }
 
-/// Recheck each supported physical binding; counts alone do not establish position or uniqueness.
 pub fn verified_bindings(config: &DeviceConfig, identity: &HostIdentityStatus) -> BTreeSet<String> {
     let mut allowed = BTreeSet::new();
     let (Some(p), Some(l)) = (identity.profile_index, identity.layer_index) else {

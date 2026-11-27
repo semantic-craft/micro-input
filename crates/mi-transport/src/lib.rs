@@ -44,13 +44,10 @@ pub struct TargetKeyboard {
     pub vendor_path: String,
 }
 
-/// Descriptor-only selection of one physical keyboard and its vendor sibling.
 pub fn discover_target_keyboard() -> Result<TargetKeyboard, TransportError> {
     discover_target_keyboard_preferred(None)
 }
 
-/// Descriptor-only selection of one physical keyboard and its vendor sibling,
-/// preferring the device matching `preferred_serial` when multiple units exist.
 pub fn discover_target_keyboard_preferred(
     preferred_serial: Option<&str>,
 ) -> Result<TargetKeyboard, TransportError> {
@@ -140,7 +137,6 @@ pub fn is_exclusive_vendor_candidate(d: &HidCandidate) -> bool {
             .iter()
             .all(|p| p.page == 0xff00 && p.usage == 1)
 }
-/// R-D13/E-075: selected by compiled adapters, never by environment variables or RPC input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkBackend {
     Unverified,
@@ -157,8 +153,6 @@ pub trait HidLink: Send + Sync {
         false
     }
     async fn write(&self, report: &[u8]) -> Result<(), TransportError>;
-    /// One RPC frame sequence. Native backends must not interleave blocking reads
-    /// between its reports; default preserves injectable link behavior.
     async fn write_batch(&self, reports: &[Vec<u8>]) -> Result<(), TransportError> {
         for report in reports {
             self.write(report).await?;
@@ -1769,7 +1763,6 @@ impl HidLink for SyntheticLink {
     }
 }
 
-/// Response faults are simulator-only and do not describe firmware behavior.
 #[cfg(feature = "synthetic-backend")]
 #[derive(Clone, Debug)]
 pub enum SyntheticWriteResponse {
@@ -1780,17 +1773,13 @@ pub enum SyntheticWriteResponse {
     Error,
 }
 
-/// Mutable, explicitly injected synthetic files; never populated from user configuration.
 #[cfg(feature = "synthetic-backend")]
 #[derive(Clone)]
 pub struct SyntheticFiles {
     pub keymap: Vec<u8>,
     pub smart_actions: Option<Vec<u8>>,
-    /// Reject the chunk at this byte offset before storing it.
     pub reject_offset: Option<usize>,
-    /// Store the chunk but lose its response, modeling uncertain completion.
     pub lose_ack_offset: Option<usize>,
-    /// Return a response without storing any chunk; readback must catch this.
     pub ignore_writes: bool,
     pub write_response: SyntheticWriteResponse,
     pub corrupt_completed: bool,

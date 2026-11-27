@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Zero-dependency Python AST guard for scripts/."""
 from __future__ import annotations
 
 import sys
@@ -21,6 +20,11 @@ PATH_OPEN_FIX = (
 SUBPROCESS_SHELL_FIX = (
     "subprocess with shell=True is forbidden; "
     "pass an explicit argv list instead."
+)
+DOCSTRING_FIX = (
+    "Python docstrings are forbidden under scripts/; "
+    "delete the docstring, pass an explicit description= string to ArgumentParser, "
+    "or encode invariants in types/tests."
 )
 
 
@@ -110,6 +114,12 @@ def check_file(path: Path, repo_root: Path) -> list[Violation]:
     module_names, func_names = collect_subprocess_bindings(tree)
     violations: list[Violation] = []
     for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            if ast.get_docstring(node, clean=False) is not None:
+                doc_lineno = node.body[0].lineno if node.body else getattr(node, "lineno", 1)
+                violations.append(Violation(rel_path, doc_lineno, DOCSTRING_FIX))
         if not isinstance(node, ast.Call):
             continue
         if (

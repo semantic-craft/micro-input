@@ -1,4 +1,3 @@
-//! Local editor intent only. No firmware modes, capacities or physical directions are inferred.
 use crate::{
     document::{new_id, BindingNode},
     draft::Draft,
@@ -6,7 +5,6 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Policy of this local editor, not a Creator Micro capacity.
 pub const LOCAL_SECTOR_LIMIT: u32 = 32;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ControlSettings {

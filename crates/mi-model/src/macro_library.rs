@@ -1,4 +1,3 @@
-//! Named macros and shared bindings in the existing document graph; no separate persistence.
 use crate::{
     document::{new_id, BindingNode, LocalDocumentV2},
     draft::{Action, Draft},

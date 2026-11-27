@@ -1,4 +1,3 @@
-//! Local Layer target state. Device writes are compiled separately against original bytes.
 use crate::{document::LocalDocumentV2, draft::Draft, Lights};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -202,7 +201,6 @@ impl Draft {
         })
     }
 
-    /// One history entry, including all-layer edits. Any invalid target rejects the whole edit.
     pub fn edit_lighting(
         &mut self,
         pid: &str,

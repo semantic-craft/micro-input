@@ -1,8 +1,3 @@
-//! Validated `0.7.0-rc.16+` hardware capability codecs (candidate-only; never read-only exit-chain).
-//!
-//! All requests target firmware RPC methods exposed only over an exclusive
-//! macOS 267-byte numbered HID vendor link on verified `>= 0.7.0-rc.16` firmware.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -362,7 +357,6 @@ pub fn decode_set_profile_layer_response(
     Ok(())
 }
 
-/// Parses a `kb.pl` notification (`{"m":"kb.pl","p":{"p":3,"l":1}}` or long keys).
 pub fn parse_profile_layer_notification(raw: &Value) -> Option<(u8, u8)> {
     let method = alias(raw, "method", "m").ok().flatten()?.as_str()?;
     if method != PROFILE_LAYER_NOTIFY_METHOD {

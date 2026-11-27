@@ -136,8 +136,6 @@ impl SlotTable {
         Ok(())
     }
 
-    /// Fills unpinned slots with the most recent candidates that are NOT already pinned in any slot.
-    /// Preserves pinned slots unchanged.
     pub fn sync_recent(&mut self, candidates: &[RecentCandidate]) {
         let pinned_places: std::collections::HashSet<String> = self
             .slots

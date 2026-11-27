@@ -1,4 +1,3 @@
-//! R-D07/R-C01/R-N01: one serialized queue per connection, cancellation and atomic snapshots.
 mod firmware;
 pub mod firmware_flash;
 mod input;
@@ -507,7 +506,6 @@ impl DeviceSession {
             .map(|q| u64::from(q.next_id))
             .unwrap_or_else(|_| self.sent_requests.load(Ordering::Acquire))
     }
-    /// R-D07/R-D13: close wakes read; await receiver termination before releasing the session.
     pub async fn shutdown(&self) {
         self.disconnect();
         let reader = self.reader.lock().unwrap().take();
@@ -516,7 +514,6 @@ impl DeviceSession {
         }
     }
 
-    /// Event-driven lifecycle observation, independent of RPC and input subscriptions.
     pub async fn wait_disconnected(&self) {
         let changed = self.changed.notified();
         tokio::pin!(changed);
@@ -870,7 +867,6 @@ impl DeviceSession {
         })
         .await
     }
-    /// E-053/R-D09: identity reads never invoke the configuration schema or file service.
     pub async fn read_identity_info(&self) -> Result<IdentityInfo, SessionError> {
         *self.firmware.lock().unwrap() = None;
         *self.battery_status.lock().unwrap() = (None, None);
@@ -1015,7 +1011,6 @@ impl DeviceSession {
             smart_actions,
         })
     }
-    /// Bounded read transaction. A failed/cancelled attempt never publishes a partial snapshot.
     pub async fn read_config_snapshot(&self) -> Result<DeviceConfig, SessionError> {
         let _lease = self
             .read_gate

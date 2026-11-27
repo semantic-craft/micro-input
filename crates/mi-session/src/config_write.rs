@@ -1,4 +1,3 @@
-//! Plan-bound keymap application and exact-byte restoration; never an arbitrary RPC API.
 use super::*;
 use mi_model::{
     apply::PreparedCandidate,
@@ -12,7 +11,6 @@ pub enum Outcome {
     Verified,
     VerifiedLocalSaveFailed,
 }
-/// Owns consumed plan IDs for one live connection. A failure is never retried automatically.
 pub struct ConfigWriter {
     session: Arc<DeviceSession>,
     native_interface: Option<String>,
@@ -77,7 +75,6 @@ impl ConfigWriter {
         }
         value
     }
-    /// Revalidate the supported backend and independently read complete files.
     pub async fn inspect(&self) -> Result<serde_json::Value, SessionError> {
         let info = self.session.read_identity_info().await?;
         let Some(firmware) = info
@@ -105,7 +102,6 @@ impl ConfigWriter {
         let current = self.inspect().await.map_err(|e| e.to_string())?;
         record.prepare_restore(current)
     }
-    /// Independent explicit readback after restart; no automatic write or local update.
     pub async fn confirm_readback(&self, record: &mut OperationRecord) -> Result<(), String> {
         let current = self.inspect().await.map_err(|e| e.to_string())?;
         record.confirm_readback(&current)
@@ -121,7 +117,6 @@ impl ConfigWriter {
     pub async fn apply(&self, plan: &PreparedCandidate) -> Outcome {
         self.apply_observed(plan, |_, _| {}).await
     }
-    /// Checkpoint observation used by offline fault tests and durable state tracking.
     pub async fn apply_observed(
         &self,
         plan: &PreparedCandidate,
@@ -435,7 +430,6 @@ pub enum SixLayerSnapshotCheck {
 #[derive(Debug)]
 pub struct SixLayerWriteFailure {
     pub detail: String,
-    /// True only after reading exact original files, or before any mutation.
     pub original_verified: bool,
     pub backup: Option<PathBuf>,
 }

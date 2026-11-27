@@ -15,9 +15,15 @@ EXPECTED_FIX = (
 
 
 class CommentRatchetLauncherTests(unittest.TestCase):
-    def _run_check(self, root: Path) -> subprocess.CompletedProcess[str]:
+    def _run_check(
+        self, root: Path, *, include_doc_comments: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        cmd = [sys.executable, "-B", str(CHECK_COMMENTS), "check"]
+        if include_doc_comments:
+            cmd.append("--include-doc-comments")
+        cmd.append(str(root))
         return subprocess.run(
-            [sys.executable, "-B", str(CHECK_COMMENTS), "check", str(root)],
+            cmd,
             capture_output=True,
             text=True,
             check=False,
@@ -92,8 +98,70 @@ class CommentRatchetLauncherTests(unittest.TestCase):
                 self.assertIn(expected_loc, proc.stdout)
                 self.assertIn(EXPECTED_FIX, proc.stdout)
 
+    def test_include_doc_comments_allows_shebangs_inner_attrs_swift_tools_and_safety(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_zero_config(root)
+            (root / "lib.rs").write_text(
+                "#![allow(clippy::missing_safety_doc)]\n"
+                "pub unsafe fn ok() {\n"
+                "    // SAFETY: invariant verified by caller.\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (root / "Package.swift").write_text(
+                "// swift-tools-version: 5.9\n"
+                "let value = 1\n",
+                encoding="utf-8",
+            )
+            (root / "tool.py").write_text(
+                "#!/usr/bin/env python3\n"
+                "VALUE = 1\n",
+                encoding="utf-8",
+            )
+            (root / "run.sh").write_text(
+                "#!/bin/bash\n"
+                "set -euo pipefail\n"
+                "echo ok\n",
+                encoding="utf-8",
+            )
+            proc = self._run_check(root, include_doc_comments=True)
+            self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+            self.assertEqual(proc.stdout.strip(), "")
+
+    def test_include_doc_comments_rejects_triple_slash_inner_doc_and_jsdoc_blocks(self) -> None:
+        cases = [
+            (
+                "triple_slash.rs",
+                "/// Item doc comment.\npub fn f() {}\n",
+                "triple_slash.rs:1:",
+            ),
+            (
+                "inner_doc.rs",
+                "//! Crate doc comment.\npub fn f() {}\n",
+                "inner_doc.rs:1:",
+            ),
+            (
+                "block_doc.swift",
+                "// swift-tools-version: 5.9\n/** Swift block doc comment. */\nlet x = 1\n",
+                "block_doc.swift:2:",
+            ),
+        ]
+        for filename, content, expected_loc in cases:
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self._write_zero_config(root)
+                (root / filename).write_text(content, encoding="utf-8")
+                proc = self._run_check(root, include_doc_comments=True)
+                self.assertNotEqual(proc.returncode, 0, msg=f"expected failure for {filename}")
+                self.assertIn(expected_loc, proc.stdout)
+                self.assertIn(EXPECTED_FIX, proc.stdout)
+
     def test_check_script_invokes_self_hosted_comment_ratchet_unconditionally(self) -> None:
         text = CHECK_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('python3 -B scripts/check_comments.py check "$PWD"', text)
+        self.assertIn(
+            'python3 -B scripts/check_comments.py check --include-doc-comments "$PWD"',
+            text,
+        )
         self.assertNotIn("MICRO_INPUT_COMMENT_RATCHET", text)
         self.assertNotIn("agent-home/tools/comment-ratchet", text)

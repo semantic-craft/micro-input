@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Prepare and inspect an offline hardware-acceptance kit. No device I/O exists here."""
 import argparse
 import hashlib
 import json
@@ -171,7 +170,9 @@ def compare(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description='Prepare and inspect an offline hardware-acceptance kit. No device I/O exists here.'
+    )
     commands = parser.add_subparsers(dest='command', required=True)
     prep = commands.add_parser('prepare', help='create a new private offline kit')
     prep.add_argument('--output', type=Path)

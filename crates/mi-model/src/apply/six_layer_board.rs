@@ -1050,8 +1050,6 @@ fn splice_raw_layer_joystick(raw_layer: &RawValue, replacement: &Value) -> Resul
     Ok(out)
 }
 
-/// Inspects `(profile_index, layer_index)` in `/fs/keymap.json` (`layer_index` is 1-based when `>= 1`)
-/// and returns normalized `"mouse" | "scroll" | "radial" | "vendor"`, or `None` if absent/unrecognized.
 pub fn extract_keymap_joystick_hardware_mode(
     keymap_bytes: &[u8],
     active_profile: Option<u8>,
@@ -1102,9 +1100,6 @@ fn grid_contains_any_token(grid: &Value, needles: &[&str]) -> bool {
         .any(|token| needles.contains(&token))
 }
 
-/// Patches `layout.joystick` in `keymap_bytes` for the selected `profile_index` (defaults to
-/// `activeProfileId`) and `layer_index` (0-based; `None` patches all layers in the target profile),
-/// preserving all unknown JSON fields and exact bytes outside patched `joystick` object(s).
 pub fn patch_keymap_joystick_hardware_mode(
     keymap_bytes: &[u8],
     firmware: &str,

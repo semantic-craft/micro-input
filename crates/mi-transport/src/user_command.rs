@@ -64,7 +64,6 @@ pub struct Activation {
     pub layer_override: Option<u8>,
     pub released: bool,
     pub generation: String,
-    /// Receiver order, not a HID sequence number.
     pub received_sequence: u64,
     pub received_at: Instant,
 }

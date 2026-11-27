@@ -1,4 +1,3 @@
-//! Explicit device preview. Native stop does not restore runtime state.
 use super::*;
 use mi_model::lighting::{Edit, Lighting, Zone};
 use serde_json::json;
