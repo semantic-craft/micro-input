@@ -4,8 +4,8 @@
 
 ## 当前版本与架构基线
 
-- **最新发行标签**：[v0.12.4](releases/v0.12.4.md)（`CFBundleShortVersionString = 0.12.4`；历次发行说明归档于 [releases/](releases/v0.12.4.md)）。
-- **主线演进（v0.12.4 基线）**：合入写预算统一身份 / 执行侧双语 AX 标签 / 严格退役比对与 `ContainerIdentity` 拆分（PR #181）、约束注释类型化与自托管注释棘轮（PR #182）、4 组零依赖 Rust BFS 形式化状态机模型（PR #183、#184）、行为化切片隔离测试（PR #185）以及 Python AST 门禁与 GitHub Actions CI（PR #186）。
+- **最新发行标签**：[v0.12.5](releases/v0.12.5.md)（`CFBundleShortVersionString = 0.12.5`；历次发行说明归档于 [releases/](releases/v0.12.5.md)）。
+- **主线演进（v0.12.5 基线）**：合入 Karabiner-Elements 17.0.0 CLI 路径与轮转日志兼容、指数退避六层自愈、`resume()` 失败回滚以及 Antigravity 摇杆侧栏会话步进与一键归档自动切入下一条会话（PR #189），以及注释与历史文档精简（PR #188）。
 - **技术架构**：七个纯 Rust 内核 crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ `crates/mi-ffi` 9 函数 `extern "C"` 静态库 + 13 个原生 SwiftUI/AppKit 源文件（`app/MicroInput`），经 `CoreStore` `@Observable` + 12 个 `Equatable` 域切片驱动界面；静态与安全边界由 `scripts/check-boundaries.py` 强制执行 `R-C01` 至 `R-C16`。
 
 ## 已实现与已验证能力
@@ -15,7 +15,7 @@
 - **USB 独占与跨固件支持**：支持 Creator Micro 2（USB `303A:8298`）固件 `0.6.3` 与官方预发布 `0.7.0-rc.16`。所有写操作均先保存原字节与完整恢复链再写入、逐块读回核对；不静默改写设备 Flash。
 - **六层物理路由与按层混合摇杆**：
   - 第 1 层（`Codex · Micro Input`）：接管全部 20 个控制位，顶部 `AG00–AG05` 独立承载 6 槽 Codex 会话状态灯与直达跳转，在 `0.7.0-rc.16+` 上摇杆默认采用硬件 `MOUSE` 模式；
-  - 第 2 层（`Antigravity`）：顶部 `AG00–AG05` 为 6 槽会话状态灯与直达跳转，摇杆默认采用四向 `RADIAL`（上/下滚动对话、左划打开右边栏、右划关闭右边栏）；
+  - 第 2 层（`Antigravity`）：顶部 `AG00–AG05` 为 6 槽会话状态灯与直达跳转，槽位 7 为一键归档当前会话并自动切入下一条，摇杆默认采用四向 `RADIAL`（上/下切换并滚动侧栏对话、左划打开右边栏、右划关闭右边栏）；
   - 第 3 层（`DeepSeek Harness`）：顶部两键为 `Subagent` + `左键点击`（`AG02–AG05` 留空），摇杆默认采用硬件 `MOUSE` 模式；
   - 第 4–6 层：保留未分配。
 - **响应驱动双源状态灯与 `0.7.0-rc.16` 能力**：`SharedVendorBridge` 通过 `v.oai.thstatus`（`AG00–AG17`）真实总线 ACK 独立同步第 1 层（`AG00–AG05` Codex）与第 2 层（`AG06–AG11` Antigravity）可行动会话槽位（第 3 层非会话键位保持熄灯，900 请求预轮转），默认保持运行中会话熄灯、未读完成常亮海洋蓝（`solid`），仅在会话或子代理待审批输入、Antigravity 后台日志检出自动重试/60 秒无进展/API 报错（如 `429`）或守护进程断连时呼吸琥珀金/珊瑚红并同步单路底光（`sa: true`），同时在工作台槽位与键帽悬浮提示展示具体原因；`0.7.0-rc.16` 支持 `mouse.config` 四档预设与滑块调校、`joystick.deadzone`（默认恢复出厂 `0.15`）、`kb.pl.set` 无写 Flash 实时切层、`pm.config`/`pm.state` 休眠状态读取及 `device.name` / `kb.sa.rgb` 动态灯效，详见 [0.7.0 进阶硬件能力](firmware-v070-capabilities.md)。
