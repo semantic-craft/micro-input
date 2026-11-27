@@ -776,7 +776,7 @@ impl RunningSixLayer {
                     .duration_since(wall)
                     .unwrap_or_default()
                     .saturating_sub(now_monotonic.duration_since(monotonic))
-                    > Duration::from_secs(1);
+                    > Duration::from_secs(5);
                 wall = now_wall;
                 monotonic = now_monotonic;
                 if !check_input_connection(&receiver, slept, || {

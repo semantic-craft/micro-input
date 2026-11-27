@@ -463,13 +463,14 @@ pub async fn resume(
             rule,
         )?;
         let baseline = ReloadBaseline::capture()?;
-        patch.install(&document_dir.join("karabiner-backups"))?;
-        installation.config.installed = patch.installed.clone();
-        installation.config.installed_device = patch.installed_device.clone();
-        installation.target = target.clone();
-        saved.installation = Some(installation.clone());
-        save(&document_dir.join("six-layer-runtime.json"), &saved)?;
-        let readiness = wait_ready(&baseline, &patch, &target)?;
+        let readiness = install_resume_patch_with(
+            document_dir,
+            &mut saved,
+            &mut installation,
+            &target,
+            &patch,
+            |patch, target| wait_ready(&baseline, patch, target),
+        )?;
         let mut running = new_running(
             receiver,
             readiness,
@@ -496,6 +497,40 @@ pub(super) async fn with_verification_session<T>(
     let result = operation.await;
     session.shutdown().await;
     result
+}
+
+pub(super) fn install_resume_patch_with<F>(
+    document_dir: &Path,
+    saved: &mut SavedSixLayerState,
+    installation: &mut Installation,
+    target: &TargetKeyboard,
+    patch: &ConfigPatch,
+    wait_ready_fn: F,
+) -> Result<Readiness, String>
+where
+    F: FnOnce(&ConfigPatch, &TargetKeyboard) -> Result<Readiness, String>,
+{
+    patch.install(&document_dir.join("karabiner-backups"))?;
+    let readiness = match wait_ready_fn(patch, target) {
+        Ok(ready) => ready,
+        Err(error) => {
+            let _ = patch.rollback_exact();
+            return Err(error);
+        }
+    };
+    let mut next_installation = installation.clone();
+    next_installation.config.installed = patch.installed.clone();
+    next_installation.config.installed_device = patch.installed_device.clone();
+    next_installation.target = target.clone();
+    let mut next_saved = saved.clone();
+    next_saved.installation = Some(next_installation.clone());
+    if let Err(error) = save(&document_dir.join("six-layer-runtime.json"), &next_saved) {
+        let _ = patch.rollback_exact();
+        return Err(error);
+    }
+    *installation = next_installation;
+    *saved = next_saved;
+    Ok(readiness)
 }
 
 fn wait_ready(
@@ -553,4 +588,119 @@ pub async fn restore(
         save(&document_dir.join("six-layer-runtime.json"), &saved)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::six_layer_runtime::state::load;
+    use mi_model::board_layers::BoardLayerPlan;
+    use mi_model::host_router::BottomRowLayout;
+
+    fn sample_plan() -> AppliedSixLayerPlan {
+        let mut draft = mi_model::draft::Draft::default();
+        mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
+        let id = |name: &str| {
+            draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, profile)| profile.name == name)
+                .unwrap()
+                .0
+                .clone()
+        };
+        let desired =
+            BoardLayerPlan::recommended(id("Codex"), id("Antigravity"), id("DeepSeek Coder (DSH)"));
+        AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
+            .unwrap()
+    }
+
+    fn sample_target() -> TargetKeyboard {
+        TargetKeyboard {
+            vendor_id: 0x303a,
+            product_id: 0x8298,
+            location_id: 42,
+            usb_parent: 8,
+            vendor_path: "synthetic-vendor".into(),
+        }
+    }
+
+    #[test]
+    fn resume_rolls_back_karabiner_and_preserves_saved_state_when_wait_ready_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let karabiner_path = dir.path().join("karabiner.json");
+        let original = br#"{"profiles":[{"name":"Default","selected":true,"devices":[],"complex_modifications":{"rules":[]}}]}"#.to_vec();
+        fs::write(&karabiner_path, &original).unwrap();
+
+        let target = sample_target();
+        let prev_receiver = UserCommandReceiver::bind().unwrap();
+        let prev_rule = karabiner::rules(&target, &prev_receiver, BottomRowLayout::Split).unwrap();
+        let prev_patch =
+            karabiner::prepare_config(karabiner_path.clone(), original.clone(), &target, prev_rule)
+                .unwrap();
+
+        let mut installation = Installation {
+            status: InstallationStatus::Applied,
+            plan: sample_plan(),
+            target: target.clone(),
+            profile_index: 0,
+            backup: dir.path().join("backup"),
+            config: prev_patch.clone(),
+        };
+        let mut saved = SavedSixLayerState {
+            version: 1,
+            legacy_native_paused_confirmation: None,
+            installation: Some(installation.clone()),
+        };
+        let state_path = dir.path().join("six-layer-runtime.json");
+        save(&state_path, &saved).unwrap();
+
+        let next_receiver = UserCommandReceiver::bind().unwrap();
+        let next_rule = karabiner::rules(&target, &next_receiver, BottomRowLayout::Split).unwrap();
+        let next_patch = karabiner::prepare_config(
+            karabiner_path.clone(),
+            fs::read(&karabiner_path).unwrap(),
+            &target,
+            next_rule,
+        )
+        .unwrap();
+
+        let err = install_resume_patch_with(
+            dir.path(),
+            &mut saved,
+            &mut installation,
+            &target,
+            &next_patch,
+            |_, _| Err("readiness timeout".into()),
+        )
+        .unwrap_err();
+        assert_eq!(err, "readiness timeout");
+        assert_eq!(fs::read(&karabiner_path).unwrap(), original);
+        assert_eq!(installation.config.installed, prev_patch.installed);
+        let persisted = load(&state_path).unwrap();
+        assert_eq!(
+            persisted.installation.unwrap().config.installed,
+            prev_patch.installed
+        );
+
+        install_resume_patch_with(
+            dir.path(),
+            &mut saved,
+            &mut installation,
+            &target,
+            &next_patch,
+            |_, _| Ok(Readiness::isolated()),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&karabiner_path).unwrap(), next_patch.installed);
+        assert_eq!(installation.config.installed, next_patch.installed);
+        let persisted_after = load(&state_path).unwrap();
+        assert_eq!(
+            persisted_after.installation.unwrap().config.installed,
+            next_patch.installed
+        );
+    }
 }

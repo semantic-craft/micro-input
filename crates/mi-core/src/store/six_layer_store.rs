@@ -2,6 +2,16 @@ use super::*;
 use crate::six_layer_runtime::{self, InstallationStatus};
 use mi_model::apply::AppliedSixLayerPlan;
 
+pub(crate) fn six_layer_auto_resume_backoff(attempt: u8) -> Duration {
+    match attempt {
+        0 => Duration::from_secs(3),
+        1 => Duration::from_secs(5),
+        2 => Duration::from_secs(10),
+        3 => Duration::from_secs(20),
+        _ => Duration::from_secs(30),
+    }
+}
+
 pub(super) fn runtime_action_profile_id<'a>(
     doc: &'a LocalDocumentV2,
     profile_id: &'a str,
@@ -252,46 +262,57 @@ impl WorkbenchStore {
         }
     }
 
-    pub(super) fn try_auto_resume_six_layer(&mut self, now: Instant) {
+    pub(super) fn take_auto_resume_six_layer_attempt(
+        &mut self,
+        now: Instant,
+        device_present: impl FnOnce() -> bool,
+    ) -> Option<AppliedSixLayerPlan> {
         if self.firmware_update.reserved()
             || self.config.isolated
             || !self.config.auto_connect_usb
             || self.system_lifecycle != SystemLifecycle::Awake
+            || !self.ptt_controller.cleanup_confirmed
+            || self.live_executor.has_unconfirmed_apple_fn_release()
             || self.six_layer_job.is_some()
             || self
                 .six_layer_running
                 .as_ref()
                 .is_some_and(|running| running.receiver.failure().is_none())
         {
-            return;
+            return None;
         }
         let connected_fw = self.observed_connected_firmware();
-        let Some(plan) = self
+        let plan = self
             .six_layer_state
             .installation
             .as_ref()
             .filter(|inst| {
                 Self::validate_six_layer_installation_health(inst, connected_fw.as_deref()).is_ok()
             })
-            .map(|inst| inst.plan.clone())
-        else {
-            return;
-        };
-        if self.six_layer_auto_resume_attempts >= 3
-            || self
-                .six_layer_next_auto_resume_at
-                .is_some_and(|ready_at| now < ready_at)
+            .map(|inst| inst.plan.clone())?;
+        if self
+            .six_layer_next_auto_resume_at
+            .is_some_and(|ready_at| now < ready_at)
         {
-            return;
+            return None;
         }
-        let preferred = self.document_store.preferred_device_serial();
-        if mi_transport::discover_target_keyboard_preferred(preferred.as_deref()).is_err() {
-            return;
+        if !device_present() {
+            return None;
         }
-        self.six_layer_auto_resume_attempts += 1;
-        self.six_layer_next_auto_resume_at = Some(now + Duration::from_secs(3));
+        let backoff = six_layer_auto_resume_backoff(self.six_layer_auto_resume_attempts);
+        self.six_layer_auto_resume_attempts = self.six_layer_auto_resume_attempts.saturating_add(1);
+        self.six_layer_next_auto_resume_at = Some(now + backoff);
         self.resume_requires_explicit_connect = false;
-        let _ = self.start_six_layer_apply(Some(plan));
+        Some(plan)
+    }
+
+    pub(super) fn try_auto_resume_six_layer(&mut self, now: Instant) {
+        let preferred = self.document_store.preferred_device_serial();
+        if let Some(plan) = self.take_auto_resume_six_layer_attempt(now, || {
+            mi_transport::discover_target_keyboard_preferred(preferred.as_deref()).is_ok()
+        }) {
+            let _ = self.start_six_layer_apply(Some(plan));
+        }
     }
 
     pub(super) fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
@@ -536,7 +557,15 @@ impl WorkbenchStore {
                     self.v070_hardware.on_disconnected();
                     self.sa_rgb_coordinator.clear_on_disconnect();
                 }
-                Err(error) => self.status_message = error,
+                Err(error) => {
+                    self.status_message = error;
+                    self.six_layer_next_auto_resume_at = Some(
+                        self.update_now
+                            + six_layer_auto_resume_backoff(
+                                self.six_layer_auto_resume_attempts.saturating_sub(1),
+                            ),
+                    );
+                }
             }
             self.commit_runtime_update();
         }
@@ -2377,5 +2406,99 @@ mod tests {
         assert!(store.projection().status_menu.host_caution_notice.is_none());
         assert!(!store.projection().header.banner.is_caution());
         assert_eq!(store.status_message, "已启用软件按键映射");
+    }
+
+    #[test]
+    fn six_layer_auto_resume_backoff_schedule_caps_at_thirty_seconds() {
+        assert_eq!(six_layer_auto_resume_backoff(0), Duration::from_secs(3));
+        assert_eq!(six_layer_auto_resume_backoff(1), Duration::from_secs(5));
+        assert_eq!(six_layer_auto_resume_backoff(2), Duration::from_secs(10));
+        assert_eq!(six_layer_auto_resume_backoff(3), Duration::from_secs(20));
+        assert_eq!(six_layer_auto_resume_backoff(4), Duration::from_secs(30));
+        assert_eq!(six_layer_auto_resume_backoff(12), Duration::from_secs(30));
+        assert_eq!(
+            six_layer_auto_resume_backoff(u8::MAX),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn auto_resume_retries_past_three_attempts_respects_cleanup_and_spaces_after_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = WorkbenchStoreConfig::isolated(dir.path());
+        config.isolated = false;
+        config.auto_connect_usb = false;
+        let mut store = WorkbenchStore::open(config).unwrap();
+        store.config.auto_connect_usb = true;
+
+        let dummy_session = mock_session(&store.tokio_runtime);
+        let mut dummy_running =
+            six_layer_runtime::RunningSixLayer::isolated(dummy_session.clone(), dir.path());
+        store.tokio_runtime.block_on(dummy_session.shutdown());
+        dummy_running.installation.plan = store.compiled_six_layer_plan().unwrap();
+        dummy_running.installation.status = InstallationStatus::Applied;
+        store.six_layer_state.installation = Some(dummy_running.installation.clone());
+        drop(dummy_running);
+
+        let mut now = Instant::now();
+        store.ptt_controller.cleanup_confirmed = false;
+        let mut probe_called = false;
+        assert!(store
+            .take_auto_resume_six_layer_attempt(now, || {
+                probe_called = true;
+                true
+            })
+            .is_none());
+        assert!(!probe_called);
+        assert_eq!(store.six_layer_auto_resume_attempts, 0);
+
+        store.ptt_controller.cleanup_confirmed = true;
+        let expected_backoffs = [3_u64, 5, 10, 20, 30, 30];
+        for (idx, expected_secs) in expected_backoffs.iter().enumerate() {
+            assert!(
+                store
+                    .take_auto_resume_six_layer_attempt(now, || true)
+                    .is_some(),
+                "attempt {idx} must remain eligible"
+            );
+            assert_eq!(store.six_layer_auto_resume_attempts, (idx + 1) as u8);
+            assert_eq!(
+                store.six_layer_next_auto_resume_at,
+                Some(now + Duration::from_secs(*expected_secs))
+            );
+            assert!(store
+                .take_auto_resume_six_layer_attempt(
+                    now + Duration::from_secs(*expected_secs - 1),
+                    || true,
+                )
+                .is_none());
+            now += Duration::from_secs(*expected_secs);
+        }
+
+        store.six_layer_auto_resume_attempts = u8::MAX;
+        store.six_layer_next_auto_resume_at = None;
+        assert!(store
+            .take_auto_resume_six_layer_attempt(now, || true)
+            .is_some());
+        assert_eq!(store.six_layer_auto_resume_attempts, u8::MAX);
+        assert_eq!(
+            store.six_layer_next_auto_resume_at,
+            Some(now + Duration::from_secs(30))
+        );
+
+        store.six_layer_auto_resume_attempts = 2;
+        store.six_layer_next_auto_resume_at = Some(now);
+        let failure_time = now + Duration::from_secs(8);
+        store.update_now = failure_time;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Err("wait_ready timeout".into())).unwrap();
+        store.six_layer_job = Some(rx);
+        store.config.auto_connect_usb = false;
+        store.poll_six_layer_runtime();
+        assert_eq!(store.status_message, "wait_ready timeout");
+        assert_eq!(
+            store.six_layer_next_auto_resume_at,
+            Some(failure_time + Duration::from_secs(5))
+        );
     }
 }

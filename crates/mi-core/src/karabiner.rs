@@ -6,6 +6,7 @@ use mi_transport::{ActivationPayload, TargetKeyboard, UserCommandReceiver};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
@@ -16,10 +17,26 @@ use std::{
 };
 
 pub const RULE_MARKER: &str = "Micro Input — six layers v1";
-const CLI: &str = "/Library/Application Support/org.pqrs/Karabiner-Elements/bin/karabiner_cli";
+const CLI_CANDIDATES: &[&str] = &[
+    "/Applications/Karabiner-Elements.app/Contents/Helpers/karabiner_cli",
+    "/Library/Application Support/org.pqrs/Karabiner-Elements/bin/karabiner_cli",
+];
 const LOG: &str = "/var/log/karabiner/core_service.log";
 const OUTPUT_LIMIT: u64 = 2 * 1024 * 1024;
 const MAX_LOG_READ_BYTES: u64 = 1024 * 1024;
+
+pub fn resolve_karabiner_cli_from(candidates: &[&Path]) -> Result<PathBuf, String> {
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_path_buf())
+        .ok_or_else(|| "未找到 karabiner_cli 可执行文件".into())
+}
+
+pub fn resolve_karabiner_cli() -> Result<PathBuf, String> {
+    let candidates: Vec<&Path> = CLI_CANDIDATES.iter().map(Path::new).collect();
+    resolve_karabiner_cli_from(&candidates)
+}
 
 pub fn rules(
     target: &TargetKeyboard,
@@ -283,7 +300,7 @@ impl ConfigPatch {
     }
 }
 
-fn run(program: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+fn run(program: impl AsRef<OsStr>, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -491,11 +508,12 @@ impl ReloadBaseline {
         if fs::read(&patch.path).map_err(|e| e.to_string())? != patch.installed {
             return Err("Karabiner 配置已变化".into());
         }
+        let cli = resolve_karabiner_cli()?;
         let guidance: Value =
-            serde_json::from_slice(&run(CLI, &["--show-settings-window-guidance"])?)
+            serde_json::from_slice(&run(&cli, &["--show-settings-window-guidance"])?)
                 .map_err(|e| e.to_string())?;
         validate_guidance(&guidance)?;
-        let devices: Value = serde_json::from_slice(&run(CLI, &["--list-connected-devices"])?)
+        let devices: Value = serde_json::from_slice(&run(&cli, &["--list-connected-devices"])?)
             .map_err(|e| e.to_string())?;
         let id = keyboard_device_id(&devices, target)?;
         check_log_readiness(Path::new(LOG), self.inode, self.offset, &patch.path, id)?;
@@ -520,6 +538,42 @@ fn read_log_tail(path: &Path, start_offset: u64) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn rotated_log_paths(log_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(stem) = log_path.file_stem().and_then(OsStr::to_str) {
+        let parent = log_path.parent().unwrap_or_else(|| Path::new(""));
+        let ext = log_path.extension().and_then(OsStr::to_str);
+        for generation in [3_u8, 2, 1] {
+            let name = match ext {
+                Some(ext) => format!("{stem}.{generation}.{ext}"),
+                None => format!("{stem}.{generation}"),
+            };
+            let sibling = parent.join(name);
+            if sibling.is_file() {
+                paths.push(sibling);
+            }
+        }
+    }
+    paths.push(log_path.to_path_buf());
+    paths
+}
+
+fn read_rotated_log_history(log_path: &Path, current_tail: &str) -> (String, bool) {
+    let paths = rotated_log_paths(log_path);
+    let has_rotated_siblings = paths.len() > 1;
+    let mut history = String::new();
+    for sibling in &paths[..paths.len().saturating_sub(1)] {
+        if let Ok(bytes) = read_log_tail(sibling, 0) {
+            history.push_str(&String::from_utf8_lossy(&bytes));
+            if !history.ends_with('\n') {
+                history.push('\n');
+            }
+        }
+    }
+    history.push_str(current_tail);
+    (history, has_rotated_siblings)
+}
+
 fn check_log_readiness(
     log_path: &Path,
     expected_inode: u64,
@@ -533,38 +587,46 @@ fn check_log_readiness(
     if tail_log.contains("karabiner.json error:") {
         return Err("尚未观测到 Karabiner 成功载入本次配置".into());
     }
-    if meta.ino() != expected_inode || meta.len() < baseline_offset {
-        if tail_log.contains(&format!("(device_id:{device_id})")) {
-            validate_grabbed(&tail_log, device_id)?;
+    let rotated_since_baseline = meta.ino() != expected_inode || meta.len() < baseline_offset;
+    if !rotated_since_baseline {
+        let new_bytes = read_log_tail(log_path, baseline_offset)?;
+        let new = String::from_utf8_lossy(&new_bytes);
+        if !new.lines().any(|line| {
+            line.contains("Load ") && line.contains(patch_path.to_string_lossy().as_ref())
+        }) || !new.contains("core_configuration is updated.")
+            || new.contains("karabiner.json error:")
+        {
+            return Err("尚未观测到 Karabiner 成功载入本次配置".into());
         }
-        return Ok(());
     }
-    let new_bytes = read_log_tail(log_path, baseline_offset)?;
-    let new = String::from_utf8_lossy(&new_bytes);
-    if !new
-        .lines()
-        .any(|line| line.contains("Load ") && line.contains(patch_path.to_string_lossy().as_ref()))
-        || !new.contains("core_configuration is updated.")
-        || new.contains("karabiner.json error:")
-    {
-        return Err("尚未观测到 Karabiner 成功载入本次配置".into());
-    }
-    validate_grabbed(&tail_log, device_id)
+    let (history, has_rotated_siblings) = read_rotated_log_history(log_path, &tail_log);
+    validate_grabbed_with_rotation(
+        &history,
+        device_id,
+        has_rotated_siblings || rotated_since_baseline,
+    )
 }
 
 pub fn validate_grabbed(log: &str, id: u64) -> Result<(), String> {
+    validate_grabbed_with_rotation(log, id, false)
+}
+
+pub fn validate_grabbed_with_rotation(
+    history: &str,
+    id: u64,
+    has_rotated_siblings: bool,
+) -> Result<(), String> {
     let marker = format!("(device_id:{id})");
-    let last = log
-        .lines()
-        .rfind(|line| {
-            line.contains(&marker)
-                && (line.contains("hid device events monitor") || line.contains("terminated"))
-        })
-        .ok_or("未找到目标键盘的抓取记录")?;
-    if !last.contains("hid device events monitor is started (grabbed).") {
-        return Err("目标标准键盘未被 Karabiner 抓取".into());
+    let last = history.lines().rfind(|line| {
+        line.contains(&marker)
+            && (line.contains("hid device events monitor") || line.contains("terminated"))
+    });
+    match last {
+        Some(line) if line.contains("hid device events monitor is started (grabbed).") => Ok(()),
+        Some(_) => Err("目标标准键盘未被 Karabiner 抓取".into()),
+        None if has_rotated_siblings => Ok(()),
+        None => Err("未找到目标键盘的抓取记录".into()),
     }
-    Ok(())
 }
 
 impl Readiness {
@@ -806,5 +868,122 @@ mod tests {
         let rotated = "keyboard (device_id:17) hid device events monitor is started (grabbed).\n";
         fs::write(&log_path, rotated).unwrap();
         check_log_readiness(&log_path, baseline_inode, baseline_offset, &patch_path, 17).unwrap();
+    }
+
+    #[test]
+    fn resolve_karabiner_cli_prefers_v17_app_helper_and_falls_back_to_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let v17 = dir
+            .path()
+            .join("Karabiner-Elements.app/Contents/Helpers/karabiner_cli");
+        let legacy = dir
+            .path()
+            .join("org.pqrs/Karabiner-Elements/bin/karabiner_cli");
+        let candidates = [v17.as_path(), legacy.as_path()];
+
+        assert!(resolve_karabiner_cli_from(&candidates).is_err());
+
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, b"#!/bin/sh\n").unwrap();
+        assert_eq!(resolve_karabiner_cli_from(&candidates).unwrap(), legacy);
+
+        fs::create_dir_all(&v17).unwrap();
+        assert_eq!(resolve_karabiner_cli_from(&candidates).unwrap(), legacy);
+        fs::remove_dir(&v17).unwrap();
+
+        fs::write(&v17, b"#!/bin/sh\n").unwrap();
+        assert_eq!(resolve_karabiner_cli_from(&candidates).unwrap(), v17);
+    }
+
+    #[test]
+    fn check_log_readiness_finds_grabbed_device_in_rotated_sibling_and_rejects_later_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("core_service.log");
+        let sibling_1 = dir.path().join("core_service.1.log");
+        let sibling_2 = dir.path().join("core_service.2.log");
+        let patch_path = dir.path().join("karabiner.json");
+        fs::write(&patch_path, b"{}").unwrap();
+
+        fs::write(
+            &sibling_2,
+            "Creator Micro 2 (device_id:17) hid device events monitor is stopped.\n",
+        )
+        .unwrap();
+        fs::write(
+            &sibling_1,
+            "Creator Micro 2 (device_id:17) hid device events monitor is started (grabbed).\n",
+        )
+        .unwrap();
+        fs::write(&log_path, "unrelated line\n").unwrap();
+        let meta = fs::metadata(&log_path).unwrap();
+        let baseline_inode = meta.ino();
+        let baseline_offset = meta.len();
+
+        let reload = format!(
+            "Load {}\ncore_configuration is updated.\n",
+            patch_path.display()
+        );
+        let mut f = OpenOptions::new().append(true).open(&log_path).unwrap();
+        f.write_all(reload.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+
+        check_log_readiness(&log_path, baseline_inode, baseline_offset, &patch_path, 17).unwrap();
+
+        f.write_all(b"Creator Micro 2 (device_id:17) hid device events monitor is stopped.\n")
+            .unwrap();
+        f.sync_all().unwrap();
+        assert!(
+            check_log_readiness(&log_path, baseline_inode, baseline_offset, &patch_path, 17)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn check_log_readiness_tolerates_aged_out_grab_only_when_rotated_siblings_exist_and_reload_succeeded(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("core_service.log");
+        let sibling_1 = dir.path().join("core_service.1.log");
+        let patch_path = dir.path().join("karabiner.json");
+        fs::write(&patch_path, b"{}").unwrap();
+
+        fs::write(&log_path, "earlier unrelated traffic\n").unwrap();
+        let meta = fs::metadata(&log_path).unwrap();
+        let baseline_inode = meta.ino();
+        let baseline_offset = meta.len();
+
+        let reload = format!(
+            "Load {}\ncore_configuration is updated.\n",
+            patch_path.display()
+        );
+        let mut f = OpenOptions::new().append(true).open(&log_path).unwrap();
+        f.write_all(reload.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+
+        assert_eq!(
+            check_log_readiness(&log_path, baseline_inode, baseline_offset, &patch_path, 17)
+                .unwrap_err(),
+            "未找到目标键盘的抓取记录"
+        );
+
+        fs::write(
+            &sibling_1,
+            "older unrelated traffic without device mention\n",
+        )
+        .unwrap();
+        check_log_readiness(&log_path, baseline_inode, baseline_offset, &patch_path, 17).unwrap();
+
+        let after_meta = fs::metadata(&log_path).unwrap();
+        assert_eq!(
+            check_log_readiness(
+                &log_path,
+                after_meta.ino(),
+                after_meta.len(),
+                &patch_path,
+                17,
+            )
+            .unwrap_err(),
+            "尚未观测到 Karabiner 成功载入本次配置"
+        );
     }
 }
