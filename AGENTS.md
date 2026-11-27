@@ -3,7 +3,7 @@
 - 五项持续交付范围与接续入口见 [持续交付](docs/autonomous-delivery.md)。完成一个 PR 后核对 #44 与下一可执行切片；代码合并不代表安装或实体效果验收。
 - **机器自动验收与日常迭代策略**：功能实现默认以 `scripts/verify-offline`（含静态/单元门禁 + 六个合成隔离 QA 场景自动回执校验）全量通过作为交付准绳，通过后可直接更新本机日常版 `/Applications/Micro Input.app` 供实际使用，不因等待人工逐键验收阻塞交付；日常使用中发现的体验或边缘问题再按需迭代修复。
 
-- 开工读 README.md、docs/status.md、docs/development.md、lessons.md，以及 docs/spec/SPEC.md、docs/spec/BUILD_PROMPT.md、docs/spec/UNKNOWNS.md 与 #44，按当前 Rust 核心 + C-ABI + SwiftUI 架构推进交付。
+- 开工读 README.md、docs/status.md、docs/development.md、lessons.md，以及 docs/spec/SPEC.md、docs/spec/UNKNOWNS.md 与 #44，按当前 Rust 核心 + C-ABI + SwiftUI 架构推进交付。
 - 接手未完成工单、实现或评审产品改动前，必读 [研究成果接入规则](docs/agents/research-context.md)，按任务选读 Input 架构、候选协议和模块契约，并在交付中记录采用的证据与验证缺口。拆分任务或交接时传递该入口。
 - 技术架构借鉴 [`metasequoiaime/msime`](https://github.com/metasequoiaime/msime) 的「纯 Rust 跨平台内核 + 薄 C-ABI 边界 + 原生宿主薄壳」设计：全部协议、模型、跨进程桥接、macOS 宿主执行与工作台状态机收敛在纯 Rust 内核（`crates/mi-proto`、`crates/mi-transport`、`crates/mi-model`、`crates/mi-session`、`crates/mi-bridge`、`crates/mi-macos`、`crates/mi-core`），经 9 函数极简 C-ABI 静态库（`crates/mi-ffi`）暴露给 100% 原生 macOS SwiftUI/AppKit 薄壳（`app/MicroInput`），彻底退役 UniFFI、`crates/mi-gpui` 及肥 Swift 业务层。
 - 兼容功能或协议工作查 docs/status.md 中对应调研原件，分别标明观察、官方说明、社区线索和未知；社区旧版参数不能充当当前固件规格。

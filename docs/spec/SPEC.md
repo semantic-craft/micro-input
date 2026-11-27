@@ -1,207 +1,102 @@
-# Micro Input — 完整产品规格 v1.2
+# Micro Input 产品规格
 
-2026-11-02，Asia/Shanghai。产品基线来自用户明确确认的 Q1–Q9 与阶段0–6；它定义目标产品，不宣称已交付。现行范围覆盖 Creator Micro 管理与 coding 场景，替代早期仅围绕兼容面的 v0.1。稳定规则 ID 保留，新产品规则使用 P/E/K/X 前缀。
+面向 macOS 14+ 的独立 AI Coding 工作台与 **Work Louder Creator Micro 2** 原生配置器。全部协议分帧、本地文档、设备会话、Agent 桥接、macOS 辅助功能执行与工作台状态机收敛于七个纯 Rust crate（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`），经 `crates/mi-ffi` 的 9 个 `extern "C"` 函数驱动 `app/MicroInput` 原生 SwiftUI 与 AppKit 薄壳。
 
-PR #12/#13 已交付离线工作台与核心草稿（见 BUILD_PROMPT S1a/S2a）；当前按 35 张工单在统一集成分支实施，**不接任务自动化；未知协议不发送，设备写入仍须满足协议与恢复门槛**。后续阶段须单独明确实施范围；未来能力列入规格不等于现在授权执行。术语见 [GLOSSARY](../../GLOSSARY.md)，证据与范围见 [EVIDENCE](EVIDENCE.md)，构建及验收见 [BUILD_PROMPT](BUILD_PROMPT.md)，未知项见 [UNKNOWNS](UNKNOWNS.md)。
+术语定义见 [GLOSSARY](../../GLOSSARY.md)，当前进度见 [status.md](../status.md)，模块边界见 [module-contracts.md](../module-contracts.md)，底层约束见 [DECISIONS.md](../DECISIONS.md)，未决项见 [UNKNOWNS](UNKNOWNS.md)。仓库静态门禁 `R-C01` 至 `R-C16` 对照表维护在 [AGENTS.md](../../AGENTS.md)。
 
-## Problem Statement
+## 目标与闭环
 
-用户需要管理自己的 Creator Micro，并优先服务编辑器、终端和 coding agent 工作。用户认为 Input.app 臃肿，设置难用、不友好且稳定性体验不足；这是用户体验诉求，尚无可量化的性能对比结论。现有操作容易混淆浏览、编辑和设备生效，底层字段与复杂参数增加理解成本，使用不同 coding 工具时还需要自己拼接动作。
+产品服务三类日常需求：为任意桌面外设复用本机 Antigravity 状态解析与无障碍控制链、在不连接硬件时通过工作台与 `⇧⌘M` 菜单栏查看并直达会话、以及连接 Creator Micro 2（USB `303A:8298`）接管 281 项键码配置、官方固件升级与六层板载路由。内置 4+1 套桌面方案：`Antigravity`、`Codex · Micro Input`、`DeepSeek Harness`、`Grok Bot` 与通配「其他软件」。核心工作流保持「浏览与草稿分离 → 本地撤销与差异检查 → 显式备份与应用 → 逐字节读回核验」，未知协议不发送，合成验证不冒充实体硬件签收。
 
-产品须让用户清楚知道当前设备会做什么、修改将影响什么、什么需要宿主常驻，以及出错后如何保留和恢复工作。技术栈不能代替轻量、可靠和好用的验收。
+## 产品、交互与权限边界
 
-## Solution
+| 规则 | 决定 |
+| --- | --- |
+| R-P01 | 产品中心为 Creator Micro 2 配置管理与桌面 AI Coding 操控，不建设跨工具任务调度器或新聊天客户端。 |
+| R-P02 | 采用菜单栏加主工作台双入口；主视图围绕实体布局选中控件并分配动作，保持单色中性层级（见 [DESIGN.md](../designs/DESIGN.md)）、键盘可访问性与深浅色一致。 |
+| R-P03 | 工作台左侧浏览方案与层、中间展示 4×4 硬件拓扑、右侧编辑所选控件参数与动作库，支持撤销/重做、结构差异审阅及中英双语切换；关闭主窗保留菜单栏常驻，显式退出才结束进程。 |
+| R-E01 | 浏览选中、本地草稿、设备核验快照与当前生效路由四种状态严格分离；普通导航零设备写入。 |
+| R-E02 | 编辑写入本地版本化草稿，支持整次撤销、重做与变更预览；切换浏览对象保留草稿，仅显式丢弃才移除未应用改动。 |
+| R-E03 | 设备应用绑定明确设备身份、基线快照与草稿修订号；基线漂移阻止覆盖并触发重新比较，防止重复提交。 |
+| R-E04 | 离线编辑保留来源与基线；重连按基线、本地草稿与设备快照做三方比较，存在冲突或未知字段变化时阻断自动合并并保持未知字段只读原样保留。 |
+| R-E05 | 设备写入与串口刷机前必须落盘原字节备份与 `fsync` 操作记录，写入后独立读回核对；失败停止且不自动重放，不承诺跨文件硬件事务原子性。 |
+| R-E06 | 硬件灯光实时预览为显式设备级入口，持有专用桥接租约并在关闭、切层、断连、睡眠或 30 秒到期时停止发送，不写入设备 Flash。 |
+| R-E07 | 配置绑定按稳定 Profile、Layer 与逻辑控件 UUID 定位，不以数组下标或显示名称充当持久身份；降低扇区数或切摇杆模式保留原槽位绑定。 |
+| R-E08 | 本地文档使用 `0700`/`0600` 私有权限与 `O_NOFOLLOW` 校验，经临时文件 `fsync` 后同目录原子重命名；单文档上限 4 MiB，损坏或高版本文件原样保留并禁止覆盖。 |
+| R-E09 | `LocalDocumentV2` 分离 `baseline`、`origin` 与可编辑图，`v1` 文档先完成原字节备份与校验后再原子迁移。 |
+| R-E10 | 被引用对象拒绝删除并列出引用；重连冲突须由用户在保留本地、采用设备或取消之间作整份选择。 |
+| R-E11 | 原生 `Preview::begin_native` 仅向已核验固件（`0.6.3` / `0.7.0*`）发送两区已知灯光参数，结束只排空在途请求，不宣称硬件自动恢复原运行态。 |
+| R-K01 | 统一可搜索动作库，按意图分类并支持收藏；每个条目披露目标、前置条件、宿主依赖与不可用原因。 |
+| R-K02 | 通配「其他软件」与专用方案（`Antigravity`、`Codex · Micro Input`、`DeepSeek Harness`、`Grok Bot`）并存；专用能力逐应用核验窗口定位、控件确认与回读，未验证适配器不标已支持。 |
+| R-K03 | 宿主动作绑定明确目标窗口与控件身份，对双微动 2U 宽键与按住状态去重，听写租约按容器身份追踪并在未确认清理时熔断告警。 |
+| R-K04 | 运行期路由仅由六层板载路由、菜单栏手动选择方案与锁定当前方案决定；前台应用自动跟随已退役（`R-C11`），编辑浏览不改变生效目标。 |
+| R-K05 | 动作采用结构化参数模型（快捷键、文本粘贴、打开应用/URL、Agent 命令、会话直达、宏与鼠标控制），Rust 统一校验参数，收藏独立存于宿主偏好。 |
+| R-K06 | 外部桌面应用零 `.patch` 侵入适配；受管应用内的快捷键与文本动作同样验证目标窗口与分屏身份，拒绝盲发全局按键。 |
+| R-K07 | 按键速查与状态菜单复用执行器真实动作来源，区分宿主生效配置与设备读回状态，未绑定与过期状态显式呈现。 |
+| R-K08 | 手动固定或锁定方案跨前台切换与重启保持，旧版自动跟随偏好字段加载时静默丢弃且不写回。 |
+| R-X01 | Agent Experience（`mi draft` 本地一次性 CLI）仅在文档锁与 `Stamp` 校验下读取状态、校验并生成独立提案文件，不暴露任意 RPC 或无审阅写入口。 |
+| R-X02 | 性能声明以可复现测量为准（`scripts/perf-baseline` 与见诸 [DECISIONS.md](../DECISIONS.md) 的基准对照）；合成、探针与实体硬件验收分开记录，诊断默认脱敏。 |
+| R-X03 | 功能交付默认以 `scripts/verify-offline` 全量通过为准绳；涉及预设迁移、USB/BLE 连接态或设备写入时，须按本机真实配置与设备读回核验。 |
+| R-X04 | 逻辑编辑不假冒实体开关验收；`mi draft` 仅开放受限白名单操作，由用户在工作台审阅接受或拒绝。 |
 
-提供原生 macOS Creator Micro 管理软件，菜单栏负责设备状态和常用切换，主视图以设备实体布局为中心，动作库围绕用户意图组织。早期五模块与进程内 UniFFI 选型已收敛为七模块纯 Rust 内核 + 9 函数极简 C-ABI（`crates/mi-ffi`）+ 原生 SwiftUI 薄壳（`app/MicroInput`），面向 Creator Micro 2 的 USB 独占链路推进（早期基线与当前实装状态对照见 [status.md](../status.md)）。
+## 核心结构与配置模型
 
-完整闭环为接入设备 → 选择要浏览/编辑的 Profile 和 Layer → 点选实体控件 → 搜索、配置动作 → 在草稿中撤销和检查差异 → 明确应用 → 核对结果 → 日常切换。离线可编辑，重连先比较。日常使用以手动选择、锁定当前方案或六层板载路由为准（前台应用自动切换已由 `R-C11` 退役）。
+| 规则 | 决定 |
+| --- | --- |
+| R-A01 | 纯 Rust 内核加原生 macOS 14+ SwiftUI/AppKit 薄壳，非输入法或 Electron 客户端，完整公证安装包保持轻量独立分发。 |
+| R-A02 | 七个 Rust 内核 crate 持有全部协议、存储、桥接、宿主执行与状态机，`crates/mi-ffi` 仅暴露 9 个 `ffi_guard` 保护的 `extern "C"` 函数并按 `projection_generation` 短路无变化投影。 |
+| R-A03 | 菜单栏、主窗口与被动浮层共享同一 `CoreStore` 的 `Equatable` 域切片，禁止整树广播模型。 |
+| R-A04 | `mi-bridge` 与 `mi-macos` 进程内承载本地守护进程轮询、Karabiner 联动、辅助功能核验与被动浮层，不引入常驻特权守护进程。 |
+| R-A05 | 通用会话出口维持四项只读方法与两份配置文件白名单；配置写入、灯光预览与 `0.7.0` 扩展命令均走专用受控入口。 |
+| R-A06 | 零原厂 SDK、Electron 资源或 `.NET` 依赖；自有实现仅依据脱敏协议契约编写。 |
+| R-C01 | 设备快照以 `fs.list` → `fs.readbin` → 原始字节 SHA-1 → 再次 `fs.list` 核验结果为准，草稿或演示数据绝不冒充设备读回。 |
+| R-C02 | 配置写入通过一次性 `PreparedCandidate` 执行，先存原字节备份再分块写入并完整读回校验。 |
+| R-C03 | 模型保留原始设备 token 与未知 JSON 字段，显示层投影与底层原值分离，未知绑定原样呈现。 |
+| R-C04 | 自有预设交换格式（`micro-input-preset` v1）执行结构校验与 UUID 重映射，与厂商私有格式明确区分。 |
+| R-C05 | 模型覆盖 Profile、Layer、13 开关矩阵、旋钮手势、摇杆扇区/硬件鼠标、双区灯光与宏步骤，保留 1-based 原生层索引与 `ACT` 别名兼容。 |
+| R-C06 | 自有持久化目录独立管理工作台文档、六层状态、偏好与恢复记录，不读取或修改官方 `Input.app` 数据库。 |
+| R-C07 | 外部 shell 命令执行默认关闭；开机自启与通知遵循用户显式开关，私有宏与文本载荷不进入诊断导出。 |
+| R-C08 | 内置预设安装幂等且仅退役未修改的旧演示方案，保留用户自定义键位，安装过程绝不触发动作执行。 |
 
-Herdr、DeepSeek Harness（DSH）、ZCode、QwenWork 等是动作适配对象，不是产品中心。产品不演变成跨 agent 任务调度平台。Agent Experience 指代理能通过结构化接口协助准备、解释和检查配置草稿；设备应用仍由用户审阅触发。
+## 设备通信与宿主运行边界
 
-## User Stories
-
-以下故事均是目标要求，不是兼容能力声明。US 编号与下文规则、阶段验收共同追踪。
-
-1. **US-01** As a Creator Micro user, I want a small native menu-bar app, so that managing my device does not dominate my desktop.
-2. **US-02** As a device owner, I want to see connection state and verified identity, so that I know which device I am configuring.
-3. **US-03** As a device owner, I want to select among ambiguous USB candidates, so that the app does not act on the wrong interface or device.
-4. **US-04** As a user, I want permission and connection failures explained, so that I can recover without guessing or terminating other apps.
-5. **US-05** As a user, I want a layout matching the physical controls, so that I can select the control I intend to change.
-6. **US-06** As a user, I want to inspect the current binding and its details, so that unfamiliar settings become understandable.
-7. **US-07** As a user, I want Profile and Layer browsing separated from activation, so that inspecting settings does not change device behavior.
-8. **US-08** As a user, I want to distinguish the edited Profile from the active Profile, so that I understand what is currently in effect.
-9. **US-09** As a user, I want to create, rename, duplicate and organize Profiles and Layers in a draft, so that I can adapt configurations without losing existing work.
-10. **US-10** As a user, I want searchable actions expressed as intentions, so that I can configure controls without learning raw tokens first.
-11. **US-11** As a user, I want action categories and favorites, so that frequent operations are easy to find.
-12. **US-12** As a user, I want prerequisites and unavailable states shown beside an action, so that I know why it may not work.
-13. **US-13** As a user, I want advanced token and raw-value details on demand, so that I can diagnose mappings without cluttering normal editing.
-14. **US-14** As a user, I want to assign keys and shortcuts, so that common development operations need fewer keystrokes.
-15. **US-15** As a user, I want to configure macros with explicit press, release and delay semantics, so that repeated input is predictable.
-16. **US-16** As a user, I want to edit tap, double-tap, hold and tap-hold actions, so that each control can support several deliberate gestures.
-17. **US-17** As a user, I want to configure encoder and joystick behavior, so that these controls are useful in my coding workflow.
-18. **US-18** As a user, I want to configure supported lighting, so that the device gives useful visual feedback.
-19. **US-19** As a user, I want live previews to be explicitly enabled, so that browsing a lighting setting does not silently write to hardware.
-20. **US-20** As a user, I want to undo draft edits and review a change summary, so that I can correct mistakes before applying them.
-21. **US-21** As a user, I want to prepare configurations without the device connected, so that I can work away from my desk.
-22. **US-22** As a user, I want reconnect-time comparison with the device, so that an old local draft cannot silently overwrite newer settings.
-23. **US-23** As a user, I want one explicit apply operation with a clear target and revision, so that I know precisely what will change.
-24. **US-24** As a user, I want a preserved pre-apply configuration and a verified result, so that a successful send is not confused with a successful save.
-25. **US-25** As a user, I want failed applications to preserve my draft and report uncertain device state, so that I can make an informed recovery decision.
-26. **US-26** As a user, I want a validated restore operation, so that I can return to an earlier configuration when recovery is supported.
-27. **US-27** As a user, I want import and export with compatibility and reference checks, so that configurations can be reused without losing unknown data.
-28. **US-28** As a developer, I want a general Coding preset, so that common editor and terminal operations are immediately useful.
-29. **US-29** As a developer, I want tool-specific configurations for Herdr, DSH, ZCode and QwenWork, so that the device fits my chosen environment.
-30. **US-30** As a developer, I want semantic actions where reliable tool interfaces exist, so that I can configure an intent instead of memorizing shortcuts.
-31. **US-31** As a developer, I want shortcut-based actions to disclose their focus assumptions, so that they are not mistaken for precise session control.
-32. **US-32** As a user, I want to switch configurations from the menu bar or device, so that routine changes do not require opening the full editor.
-33. **US-33** As a user, I want optional foreground-app switching with visible active state, so that automatic changes remain understandable and reversible.（已由 `R-C11` 退役，现行宿主路由改为六层板载路由、手动选择方案与锁定当前方案。）
-34. **US-34** As a user, I want a radial menu and mapping reference overlay, so that I can discover available actions without losing my work context.
-35. **US-35** As a user, I want text, application and URL actions with clear execution conditions, so that device controls can perform useful host operations.
-36. **US-36** As a user, I want command execution disabled by default, so that importing or browsing a configuration never runs a shell command.
-37. **US-37** As a user, I want device-resident and host-dependent actions distinguished, so that closing the host has predictable consequences.
-38. **US-38** As a user, I want disconnection, reconnection and lock/unlock handled correctly, so that stale operations cannot affect a later session.
-39. **US-39** As a user, I want to keep the menu-bar host running when I close the editor and release it when I quit, so that lifetime behavior is clear.
-40. **US-40** As a user, I want optional login startup and restrained notifications, so that the app follows my preferences without stealing focus.
-41. **US-41** As a user, I want keyboard navigation, accessible labels and consistent light/dark appearance, so that the configuration experience remains usable and polished.
-42. **US-42** As a user, I want private configuration content excluded from diagnostics by default, so that troubleshooting does not expose my macros or commands.
-43. **US-43** As a user, I want an agent to explain and prepare configuration drafts, so that I can get assistance while retaining the final apply decision.
-44. **US-44** As an integrating agent, I want versioned structured reads, draft changes, validation and diffs, so that my results are inspectable and do not depend on clicking UI coordinates.
-45. **US-45** As a maintainer, I want simulated devices and external-behavior tests, so that changes can be validated without modifying a user's hardware.
-46. **US-46** As a maintainer, I want isolated device, model, host and tool-adapter boundaries, so that adding one coding tool does not require rewriting unrelated parts.
-47. **US-47** As a user, I want measured startup, idle resource use and interaction responsiveness, so that claims of efficiency reflect actual use.
-48. **US-48** As a user, I want unsupported firmware, unknown fields and unverified capabilities labeled honestly, so that the app does not invent compatibility.
-
-## Implementation Decisions
-
-### 产品、交互与权限边界（DECIDED）
-
-| 规则 | 决定 | 证据 |
-| --- | --- | --- |
-| R-P01 | 产品中心是Creator Micro管理，coding为优先场景；不建设agent任务面板、跨工具调度器或新聊天客户端。 | E-049 |
-| R-P02 | 菜单栏+主视图；主视图以实体布局→选中控件→分配动作组织；原生样式、键盘焦点、深浅色和无障碍标签一致。菜单栏日常操作不要求主窗打开。 | E-049 |
-| R-P03 | 选定工作台：左侧配置浏览，中间设备逻辑布局，右侧所选控件编辑面板；动作名称可见，搜索/分类后更换动作，差异显示配置/层/控件及前后值。修改才突出变更入口，支持撤销/重做；菜单栏与主窗共享浏览状态。紧凑窗口下布局区可滚动，系统字体与语义色支持跟随系统/浅色/深色。菜单栏面板共享状态，关闭主窗保留进程，明确退出结束进程。键盘入口：⌘[/⌘]选控件、⌘E动作库、Tab进入搜索、回车分配首个匹配结果、⌘D差异、Esc取消、⌘Z/⇧⌘Z撤销/重做、⇧⌘M菜单栏面板。S2a草稿按版本化本地文档保存；参数编辑点击保存后持久化，退出重开恢复；未保存的参数输入不冒充已保存草稿。 | E-067 |
-| R-E01 | 浏览、草稿、设备快照、设备活动配置四种状态分开。导航零写入；宿主设置与设备设置显示各自生效方式。 | E-043, E-050 |
-| R-E02 | 编辑进入本地草稿，提供撤销、重做、保存和变更预览；切换编辑对象保留草稿，显式丢弃才移除未应用修改。 | E-050 |
-| R-E03 | 应用以明确设备、基线快照、草稿修订号为目标；先展示变化再由用户执行。基线变化则阻止覆盖并重新比较；连续点击不重复提交。 | E-050 |
-| R-E04 | 离线编辑保留来源/固件/基线；重连按设备当前值与草稿比较，冲突不静默选边。不兼容或未知字段不能在编辑/导出/应用中悄悄丢弃。 | E-050, E-055 |
-| R-E05 | 应用前保留设备配置副本，记录可确认的步骤；失败保留草稿并报告设备状态是否确定。只有经过实机验证的恢复方案才能标为可恢复，不承诺事务原子性或自动回滚。 | E-050, E-054 |
-| R-E06 | 灯光等实时预览是单独的显式入口，标明设备副作用；不继承为所有编辑自动保存。只读阶段禁用；原生 S3 预览遵循 R-E11。 | E-050 |
-| R-K01 | 统一可搜索动作库，分类与收藏；条目有稳定标识、可读名称、参数、目标、前置条件、宿主依赖、可用性和结果语义。高级信息按需展开。 | E-051 |
-| R-K02 | 通用Coding与工具专用配置并存。适配Herdr/DSH/ZCode/QwenWork等前逐工具验证“启动/聚焦、具体会话定位、语义操作、结果确认”；未验证能力不可标已支持。快捷键回退标明焦点前提。 | E-051, E-065 |
-| R-K03 | 设备触发的coding操作必须有明确目标；去重按下/释放与宽键事件；多宿主执行/灯光所有权未解决前不启用重叠消费者。切换会话不是自动分派任务。 | E-051, E-060 |
-| R-K04 | 先手动菜单栏或设备切换配置，生效对象始终可见。原前台应用自动切换已由 `R-C11` 退役，现行仅保留六层板载路由、手动选择方案与锁定当前方案，草稿不因此自动应用。 | E-051, E-026 |
-| R-X01 | AX指Agent Experience，另保留无障碍要求。代理只读结构化状态、准备/校验草稿和差异；与UI共用模型/校验，不暴露任意RPC或无审阅应用入口。 | E-049, E-051 |
-| R-X02 | 性能预算先测量再制定；验收记录版本、环境、提交和来源。模拟/探针/应用/合并/发布分开报告。诊断默认脱敏，无遥测要求。 | E-049, E-063, E-064 |
-| R-X03 | 最终产品范围不构成本轮执行许可：S1a/S2a 已交付，当前按依赖图实施 35 张工单；不接自动化，不写设备。每阶段独立任务和完成门槛。 | E-051 |
-
-### 核心结构与存储
-
-| 规则 | 决定 | 证据 |
-| --- | --- | --- |
-| R-A01 | Rust核心+SwiftUI原生macOS应用，非IME，不要求兼容Electron实现；macOS 14+为当前构建基线。 | E-003, E-049, E-063 |
-| R-A02 | 七模块纯 Rust 内核（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）承担协议分帧、模型校验、跨进程桥接、macOS 宿主执行与工作台状态机；早期 UniFFI 选型已收敛为 `crates/mi-ffi` 暴露的 7 函数极简 C-ABI 静态库，UI 不直接发 HID 或 RPC。 | E-049, E-063 |
-| R-A03 | 菜单栏、主窗和浮层共享核心状态，各自只获得所需能力；主窗关闭与退出应用分开。 | E-005, E-051 |
-| R-A04 | 后续mi-host/HostKit承接宿主动作、工具适配与系统权限；Overlays承接径向菜单/映射提示。需要时才增加模块/进程；当前不引入守护进程、HTTP服务或XPC。 | E-021, E-049 |
-| R-A05 | 高层方法白名单；只读、草稿、未来设备应用分别建能力面。UI和agent均无通用RPC透传。 | E-022, E-051 |
-| R-A06 | 丢弃edge-js/.NET和原厂资源依赖。未引用静态事实不等于证明原程序运行时绝不加载。 | E-040 |
-| R-C01 | 设备快照以实际设备文件为准，keymap必需，smart文件可缺且区别于空文件；演示/导入/草稿不能冒充设备读回。读取结果完整且校验后才替换视图。 | E-030, E-054 |
-| R-C02 | 未来写入按明确应用流程设计；原客户端smart后keymap及校验只作证据，不能证明事务或恢复。当前不引入生产写方法。 | E-031, E-050 |
-| R-C03 | 保留原始token与未知字段；已知显示投影与设备值分开。类型错误可拒绝，未知token不显示为空绑定；原token转换非完整键码表。 | E-038, E-055 |
-| R-C04 | 导入导出含引用完整性/冲突检查与格式版本；自有格式和厂商Profile/Layer兼容分别标识。厂商schema未验不能承诺无损互导。 | E-039, E-050 |
-| R-C05 | Profile ID与index分开；设备活动索引未知时显示未知。模型包含Layer、13开关矩阵[2,4,4,3]、旋钮3槽候选、摇杆扇区、两区灯光、宏、Multi四分支/term、分组和linkedApps。实体按键图与开关映射单独验证；设备schema≠演示schema；数值范围、容量与完整事件编码待确认。 | E-044–E-046, E-055, E-060 |
-| R-C06 | 自有持久化保存快照、草稿、差异、备份与设置；不读取或迁移原Input数据库。具体存储选型随阶段2确定，先保证原始值和修订一致性。 | E-028, E-047, E-050 |
-| R-C07 | 命令执行默认关；通知与登录启动由用户控制。数据默认本地，配置内容不进入公开诊断。 | E-029, E-051 |
-| R-C08 | 自编Coding预设与原厂Preset兼容分开；安装预设形成草稿，引用ID冲突明确处理；不能暗中激活或执行宏/命令。 | E-045, E-051 |
-
-### 设备通信与独立实现边界
-
-| 规则 | 决定 | 证据 |
-| --- | --- | --- |
-| R-D01 | Creator Micro 2候选VID303A、PID8297/8298；当前本机验证范围8298/USB。8297仅静态识别；8360及其他型号不因名称近似承诺兼容。 | E-010, E-052, E-057 |
-| R-D02 | OS事件驱动发现，约175ms合并；检查vendor usage及完整usage pairs，不能将PrimaryUsage固定为唯一依据。USB用OS Transport证据；多候选明确选择，PID不作唯一物理ID。 | E-011, E-052, E-059 |
-| R-D03 | 当前不用串口和legacy文本协议；旧型号/bootloader不进入Micro2 USB实现。 | E-011, E-017 |
-| R-D04 | Framer可替换。已有node-hid静态布局与一次IOKit短查询，不再把全部字节定义写成无来源；但每种后端须明确report ID是否单独传入、长度和接收边界。先证据→离线向量→获准只读实机验证；未知时不发送。 | E-052, E-057, E-059, E-062, E-066 |
-| R-D05 | RPC响应按持有ID匹配，通知单独派发，保留未知字段/错误。长短字段与完整JSON/换行边界须按来源验证。0–998仅当前客户端策略，不证明固件上限或防跨进程串台。 | E-013, E-053, E-059 |
-| R-D06 | BLE是后续候选，传输切换/去重/配对槽另验；不因HID推断或社区报告扩入USB MVP。 | E-048, E-061 |
-| R-D07 | 每设备串行请求，约50ms间隔；可取消和有界超时/重组内存。断连使pending open、队列、回包与快照失效，新会话隔离；非独占，不抢占/结束他人进程。超时值是策略，不是固件保证。 | E-012, E-035, E-056, E-063 |
-| R-D08 | 只读生产候选仅device.status、sys.version、fs.list、fs.readbin；文件仅keymap/smart_actions。fs.read只是社区替代路径。list→readbin→字节校验→再list检测变化，不能声称跨文件原子性。参数与schema依据统一证据补齐，未验证部分保持占位。 | E-054, E-059 |
-| R-D09 | 身份字段缺失显示未知，不以OS VersionNumber冒充固件；状态缺version时可查询版本是自研策略。host.focused_app留待宿主阶段；危险方法不进白名单。 | E-053, E-057 |
-| R-D10 | 显示固件与兼容状态，保持稳定版策略；不刷固件、不复位、不启动bootloader/selftest。历史latest查询只对记录日期有效。 | E-017, E-058 |
-| R-D11 | 不引入LVGL/屏幕/壁纸/媒体卡片功能。 | E-019, E-025 |
-
-### 宿主动作与权限
-
-| 规则 | 决定 | 证据 |
-| --- | --- | --- |
-| R-H01 | macOS原生宿主，沿用当前非沙盒开发方向；正式签名、分发方式和权限稳定性后续单独验收，不能用ad-hoc一次成功替代。 | E-001, E-002, E-063 |
-| R-H02 | 枚举不请求Input Monitoring。真实open/read失败区分权限、占用、Secure Input及其他I/O原因；按实际能力引导设置并重检，不以预检猜测所有失败。 | E-008, E-037, E-059, E-063 |
-| R-H03 | 没有实际CoreBluetooth路径时不申请蓝牙权限。 | E-048 |
-| R-H04 | 可选前台应用感知采用事件驱动；需连接设备且支持该能力；只在变化时上报，断开即停。采集应用、自动切换、设备上报是不同动作；不照搬5秒采集作为全局规则。 | E-025–E-027, E-046 |
-| R-H05 | kb.sa.inserttext由宿主执行，成功/失败与剪贴板恢复可验；不因恢复覆盖用户期间新复制的内容。实现与权限方式待验证。 | E-024, E-027 |
-| R-H06 | kb.sa.openapp/openurl验证参数与目标；无效目标不执行，向用户提供可理解原因，不泄露私有参数。 | E-024, E-049 |
-| R-H07 | CGEvent/AppleEvents等权限按具体动作申请和诊断，不在枚举或只读配置阶段请求辅助功能/自动化权限。 | E-027, E-037 |
-| R-H08 | kb.radial浮层不抢焦点，显示器/Spaces行为明确；摇杆选择和确认语义、扇区上限待验。 | E-024, E-032 |
-| R-H09 | kb.sa.exec默认关闭，显式许可且标明执行目标/上下文；导入、浏览、校验草稿不得执行命令。 | E-024, E-029 |
-| R-H10 | kb.cs.show/hide/toggle映射提示浮层，不抢焦点；大小、定位、拖动及隐藏生命周期可验。 | E-024, E-032 |
-| R-H11 | 菜单栏主视图开关、明确退出和可选登录启动；关闭主窗保留必要宿主，退出释放设备/监听。后续实现时明确通知和常驻策略。 | E-033, E-049 |
-| R-H12 | 动作标明device-resident或host-required；已见kb.sa通知由宿主执行，宿主缺席设备行为未知。不能承诺所有宏都需宿主或所有动作都能离线执行。 | E-024, E-031 |
-| R-U01 | 自有更新方案后续选择；无自动升级固件或替用户升级工具。 | E-034, E-049 |
-| R-U02 | 诊断仅描述版本/能力/失败阶段及经批准的只读结果，默认不含宏、命令文本、序列号、原始回包；不照搬厂商诊断RPC清单。 | E-036, E-049 |
-| R-N01 | 只读MVP禁止设备写入、删除、事务、Profile激活、灯光预览、复位/刷机；枚举不发RPC。后续S3审阅配置应用见E-108，显式原生预览见R-E11，通用RPC仍只读。已验证的读请求可能用HID output发送，不等同配置写入。用户后续单独授权的测试工具可在明确的唯一临时文件内自动验收，须保存并核对两配置原字节、活动状态和清理结果，结果不确定即停止修改且不自动重试；不由此开放生产写入口或宣称配置应用/恢复已验。 | E-043, E-051, E-091 |
-| R-N02 | 单设备单会话起步；多候选由用户选择；与Input/Codex并存不能靠非独占或ID范围宣称安全。 | E-012, E-059 |
-| R-N03 | 未知字段、未知token、缺失引用、数据来源与过期状态可见，原始值保留；未知项不可写成已实现。 | E-044, E-055 |
-| R-N04 | 复用MockTransport/高层API及自编合成向量；禁止将测试Framer/schema当真实协议。实现只用自撰行为规格，不复制厂商代码、资源或用户数据。 | E-041, E-062, E-063 |
-
-## Testing Decisions
-
-1. **最高共同边界是异步高层核心接口，经真实UniFFI驱动SwiftUI。** 在该边界验证来源、配置浏览/草稿/差异、错误和会话状态；避免分别为每个视图建立一套模拟业务逻辑。后续agent接口复用同一核心契约。
-2. 只对边界不可观察的协议细节使用下层测试：Framer/Codec的有界分片与重组、Method白名单、读文件校验、会话取消/迟到响应。模拟设备提供可编程连接、通知和内存文件表，不接实际设备。
-3. 已有候选先例是PR #8的解析、Swift桥接/导航零请求、断连与pending open取消、大整数保留、同批通知测试；选择性接续后必须在新提交重跑，不将旧结果移植为新提交通过。
-4. 好测试关注外部结果和副作用：页面选择前后出口零请求，错误/未知不会变为空或成功，失败不污染已有快照，草稿校验不执行动作，应用/恢复只在获准阶段验收。不能仅断言内部调用顺序或复述实现。
-5. 核心模拟通过后，使用实际交付构建验收UI、当前设备/固件/USB/backend、权限、生命周期；合成/探针不能代替应用路径。硬件未在场、权限或协议未解锁时记未完成。
-6. 分阶段检查项与停止条件以 [BUILD_PROMPT](BUILD_PROMPT.md) 为唯一验收清单；本规格引用同一阶段编号，不维护第二套勾选状态。每项交付关联规则ID、证据ID、提交及环境。
-7. 性能先记录启动、菜单和切换延迟、idle CPU/RSS、断连恢复、长时间使用与签名重启；具体预算为UNKNOWN-15，阶段5签收前制定并执行，不能单凭技术栈宣称改善。
+| 规则 | 决定 |
+| --- | --- |
+| R-D01 | 目标硬件为 Creator Micro 2（VID `0x303A`，实机已验 PID `0x8298` USB）；`0x8297` 仅作静态识别，不向未验证型号外推兼容。 |
+| R-D02 | `IOKit` 描述符监听匹配 vendor usage page `0xFF00` 与 usage `1`，枚举阶段零打开、零报告读写；句柄打开统一经进程级单线程 `HidOpenOwner` 串行化。 |
+| R-D03 | 运行态配置通信走 USB HID 编号报告 `0x06`（通道 `0x02`）；官方固件升级独立走显式确认的 ESP32-S3 USB 串口引导模式（`0x303A:0x1001`），见 [固件更新契约](../firmware-update.md)。 |
+| R-D04 | 分帧层按 61 字节 UTF-8 切片连续持锁批量发送，入站按通道累积并以换行切分完整 JSON，未知后端组合严格 `no-send`。 |
+| R-D05 | 单连接请求 ID 在 `0..999` 单调递增不回绕，先匹配持有 ID 再校验方法回显，耗尽前自动预轮转或断开会话。 |
+| R-D06 | Vendor `0xFF00` 配置读写当前仅对确认的 USB 传输放行；BLE 仅作常规 HID 键鼠使用，详情保留在 [UNKNOWNS](UNKNOWNS.md)。 |
+| R-D07 | 单设备串行队列配合发送/变更 Drop 守卫，半途取消或超时立即断开旧会话并使旧代回调失效，不自动终止外部进程。 |
+| R-D08 | 通用只读白名单限定为 `device.status`、`sys.version`、`fs.list` 与 `fs.readbin`（仅 `keymap.json` 与 `smart_actions.json`），单文件上限 4 MiB。 |
+| R-D09 | 缺失状态字段显式标为未知，不以 OS `VersionNumber` 冒充固件版本。 |
+| R-D10 | 支持官方 `0.6.3` 与 `0.7.0-rc.16` 固件能力识别及 SHA-256 校验刷写，写前保存 16 MB 完整备份并核对 `0x8000` 分区表以保留 `nvs` 与 `fs` 用户数据。 |
+| R-D11 | 不引入屏幕壁纸、媒体卡片或 LVGL 相关功能。 |
+| R-D12 | 连接状态明确区分候选枚举、句柄打开、身份确认与快照核验，打开失败不臆断具体系统权限原因。 |
+| R-D13 | 唯一 reader 分配入站序号并将输入送入有界队列；发生 `InputStreamGap` 时清理按住状态并封锁旧流，不猜测丢失的松键事件。 |
+| R-H01 | 原生非沙盒签名分发通过 `scripts/install-app` 校验 `Developer ID Application` 与公证结果，跨签名家族变更时自动重置失效 TCC 记录。 |
+| R-H02 | 设备枚举不触发 Input Monitoring 弹窗；真实打开或读取失败按可观测错误分类引导用户排查。 |
+| R-H03 | 未启用 CoreBluetooth 路径，不申请蓝牙权限。 |
+| R-H04 | 前台应用与焦点窗口观察采用事件驱动，睡眠时统一排空活跃听写、预览租约与后台轮询，唤醒后按描述符安全重连。 |
+| R-H05 | 快捷文本粘贴在剪贴板写入前后核对变更计数，避免恢复旧内容覆盖用户新复制的数据。 |
+| R-H06 | 打开应用与 URL 先校验 Bundle ID 与允许协议方案，拒绝非法目标并给出本地化原因。 |
+| R-H07 | 辅助功能权限仅在实际执行宿主动作或点击权限引导时通过 `AXIsProcessTrustedWithOptions` 触发登记。 |
+| R-H08 | 「轮盘菜单」采用不抢焦点的原生被动面板（`R-C10`），要求先回中再拨动八向选区，支持旋钮按下或回弹确认。 |
+| R-H09 | `kb.sa.exec` 默认禁用，浏览、导入与校验草稿绝不执行外部命令。 |
+| R-H10 | 按键速查在菜单栏弹层内固定呈现 4×4 物理拓扑与旋钮/摇杆方向，不抢占当前编辑窗口焦点。 |
+| R-H11 | 单实例排他锁（`instance.lock`）在挂载状态栏图标前获取，防止开发包与安装版双开；全局按键映射开关脱离键盘默认焦点链（`R-C15`）。 |
+| R-H12 | 界面明确区分板载硬件键码（含 `0.7.0-rc.16` 原生鼠标与 `kb.pl.set` 切层）与依赖 Micro Input 常驻的宿主动作。 |
+| R-U01 | 应用内集成 Ed25519 签名的 Sparkle 更新检查；设备固件升级仅在用户显式确认引导模式目标后执行。 |
+| R-U02 | 诊断包仅导出版本、能力摘要、脱敏状态与操作元数据，排除私有配置载荷、序列号与原始对话内容。 |
+| R-N01 | 通用 RPC 通道在生产代码中强制保持只读；实机 H0/H1 验收工具须经显式授权与唯一准备包锁（`.h1-claimed.json`）门控。 |
+| R-N02 | 自动 USB 连接仅在恰好存在唯一已验证型号（`303A:8298`）候选时触发，多候选由用户显式选择。 |
+| R-N03 | 未知固件字段、未核验硬件能力与过期快照如实标注，绝不静默丢弃或伪造成功。 |
+| R-N04 | 离线测试与六个隔离 QA 场景全部基于自撰合成向量与内存桩运行，严格经 feature 与启动环境同生产二进制隔离。 |
+| R-N05 | 公开社区项目仅作自然语言协议与交互参考，不移植未授权代码或绕过实机核验解锁 `UNKNOWN-*`。 |
 
 ## Out of Scope
 
-- 当前任务实现已批准产品规格，不接自动任务触发/调度；任何设备写入/激活仍须满足协议、备份和恢复前提。阶段3及之后的设备操作须后续明确任务并满足证据与恢复前提。
-- 产品不做跨agent任务编排/聊天平台、IME、内核驱动、厂商遥测、媒体/壁纸/LVGL，不做设备 selftest。2026-11-14 用户将官方固件更新加入范围：提供版本检查、下载校验、显式 bootloader 与串口刷写，约束及实机缺口见[固件更新契约](../firmware-update.md)。
-- 首轮不做BLE、多设备并行、Windows/Linux、旧VIA/QMK设备或其他Work Louder型号；未来扩大范围需新证据与规格决定。
-- 不承诺全token/参数范围、全部工具API、厂商Preset互导、事务原子性或自动恢复；未知项继续占位。
-- 不复制、调用或移植原厂Input/wl-device-kit实现与资源；不读取原Input数据库/宏载荷补规格。历史调查存在静态分析，本项目不声称已经取得严格人员隔离的clean-room证明。
-
-## Further Notes
-
-阶段0规格统一 → 阶段1真实只读 → 阶段2离线编辑 → 阶段3可验证应用/恢复 → 阶段4Coding日常使用 → 阶段5切换/体验完善 → 阶段6Agent协助扩展。离线编辑可以在只读补证等待期间独立推进，但不因此提前解锁设备写入。
-
-发布到GitHub的规格工单是本版本快照与任务入口；仓库文档维护现行产品契约，后续规则变更须同步工单版本/引用。`ready-for-agent` 表示该票的接口、文件范围、检查点和证据门槛足以开工，不能理解为允许执行所有后续阶段；未细化票使用 `needs-info` 并记录缺项。原 #1–#6 仍只覆盖阶段1，全部保持原完成状态；旧PR #7/#8关闭未合并，主分支没有它们的应用实现。
-
-
-## S2a — 独立本地文档与社区设计边界
-
-| 规则 | 契约 | 证据 |
-| --- | --- | --- |
-| R-E07 | 绑定以文档内Profile ID、Layer ID、逻辑控件ID定位，禁止持久化数组下标或显示名称作为身份。缺失/重复ID拒绝可编辑文档。物理控件、键帽呈现、动作角色独立；当前逻辑位置不是已验证实体映射，不把任务键或灯光能力固定给某一实体位置。 | E-069, E-070 |
-| R-K05 | 动作带结构化类型与参数：Shortcut、Text、OpenUrl、OpenApp、AgentCommand、FocusSession、SkillReference。SwiftUI编辑参数，Rust校验。OpenApp通过本机应用选择器保存bundle ID，类型与参数由Rust校验；收藏存为独立宿主偏好，不计入草稿修订/撤销/设备差异。所有目录条目显示目标、前提、来源与不可执行原因。工具引用仅为本地意图，不表示API、事件或执行能力已验证；未知类型/字段保留原文件并只读。 | E-069, E-070, E-084 |
-| R-E08 | 自有JSON schema_version=1持久化基线来源/raw、绑定、动作参数和修订。保存先校验，临时文件sync后同目录rename；保存失败不提交内存修改。多实例修改拒绝覆盖。损坏/高版本文件原样保留并停止编辑；本版本没有旧持久格式，不编造迁移。未来迁移须先备份并通过迁移后校验再替换。撤销栈仅会话内，撤销后的内容同样持久化。 | E-070 |
-| R-D12 | 设备状态分候选发现、句柄打开、只读通信验证、能力验证。SDK枚举/打开成功不等于兼容完成。权限、疑似占用、断连、超时、协议未验证分开诊断；无证据不能把I/O错误断言为权限失败。此轮只整理证据，连接状态机扩展仍由S1验收。 | E-057, E-069 |
-| R-N05 | 第三方实现仅作社区设计参考。不得加载第三方依赖的原厂 SDK、移植其源码或资源，或借用其设备写入路径；社区字段不解锁本项目 UNKNOWN。 | E-069 |
-
-本地文档默认保存在用户Application Support/MicroInput/workbench.json；MI_DOCUMENT_DIR仅覆盖开发/验收目录，不用于设备发现。首次修改创建文件，修改自动保存；参数表单必须点击“保存参数到草稿”。单文件上限4 MiB是本地资源策略，不是固件限制。坏文件和高版本文件不自动重置；.lock/.pending残留拒绝覆盖并显示检查提示。T06已提供v1→v2字节备份迁移与Profile/Layer本地管理；快照经显式操作另存独立草稿，重开恢复所选文档。T08 已提供自有本地普通宏步骤编辑和共享引用管理（E-085），厂商宏格式/容量未核实；导入导出、Multi 编辑、设备应用及恢复按钮仍未开放，不宣称S2父阶段完成。
-
-## 已批准的实施与交互契约
-
-2026-11-02 用户接受实施准备审查修订。以下是设计要求，非新增设备事实；现行模块接口与边界见[模块契约](../module-contracts.md)。原有 48 条故事与 35 张工单保留，完整索引为 [#44](https://github.com/semantic-craft/micro-input/issues/44)。
-
-| 规则 | 契约 | 来源 |
-| --- | --- | --- |
-| R-D13 | 发现、连接、身份查询、配置读取独立；连接不隐式读配置。每会话唯一 reader 分派响应/通知，旧 generation 无效；有界队列溢出停用输入并报告缺口，不丢释放后继续执行。未知 backend 不发送；四种读方法/两文件白名单在生产出口强制执行。详见 D01–D05。 | E-073 |
-| R-E09 | 首次结构编辑由 #15 引入本地 v2，baseline/raw、可编辑图和源 ID 映射分离；v1 先备份、校验、原子替换，失败不改内存/原件。旧 logical-N 不是物理身份。撤销覆盖可编辑图；恢复票复用真实迁移，不为关票制造新格式。 | E-073 |
-| R-E10 | 被引用对象拒绝删除并列明引用。重连按 D07 比较表处理：无冲突才可合并；异值、删除/修改、未知 raw 变化阻断自动合并。保留本地/采用设备均为明确的整份选择；取消不改状态。成功保存才更新 base/draft/revision，写前重新核对身份和摘要。 | E-073 |
-| R-E11 | 原生预览为显式设备级操作：将所选草稿灯光的两区已知参数发送到当前核验连接，不切换 Profile/Layer、不写配置文件。结束、关闭或 30 秒到期停止待发更新并等待在途请求，返回 Stopped；不声称自动恢复或运行态读回。失败停止且不重发，明确断连退役旧预览。合成恢复模拟器的 Restored/原子比较不作为原生开放前提。 | E-073 |
-| R-K06 | 通用预设复用 #20 安装器，仅生成草稿；专用适配最低为发现目标、聚焦明确目标、向该目标放入文本而不提交，两个目标交叉验证。焦点快捷键不是精确路由；工具身份/接口缺证据继续阻塞，不以不支持签收。工具范围及原生验收见 D08。 | E-073 |
-| R-K07 | 映射提示分别标注宿主启用 revision 与设备验证读回的活动配置；未知/过期/不一致显式显示。草稿和浏览选中不冒充当前生效状态。 | E-073 |
-| R-K08 | 自动切换默认关闭；手动覆盖只由用户“恢复自动切换”解除，跨前台事件和重启保持。宿主切换不暗含设备激活；本轮不启用该能力。 | E-073 |
-| R-X04 | 逻辑编辑 #19 不以前置全控件实测 #14 为门槛，但不得宣称物理映射已验。#14 保留全实测验收；事件不足时才依赖后续获准的 #23 最小绑定准备/恢复。#26 与最终 #44 不跳过 #14。Agent 草稿接口选一次性本地 CLI + JSON，复用文档服务，无网络/任务执行；schema 与受限操作见 D08/T29 契约，真实子进程与工作台审阅验收见 E-093。 | E-073, E-093 |
-
-完整范围不代表全部实施就绪。采用本设计不解除 UNKNOWN，不授权设备写入或宿主执行。原生、设备和跨版本验收仍必须在对应阶段实际完成。
+- 不构建跨 Agent 任务编排器、云端聊天客户端、系统输入法（IME）、内核态驱动、厂商遥测或屏幕壁纸/LVGL 功能，不执行设备 `selftest`。
+- 不在当前范围支持 BLE Vendor 配置写入、多把键盘并发控制、Windows/Linux 宿主、旧款 VIA/QMK 设备或未经实机核验的其他 Work Louder 型号。
+- 不读取、迁移或写入官方 `Input.app` 本地数据库，不向第三方桌面 Agent 维护侵入式 `.patch` 补丁，也不承诺跨文件硬件掉电事务原子性。

@@ -23,7 +23,7 @@ Micro Input 采用纯 Rust 内核、极简 C-ABI 边界与原生 SwiftUI 和 App
 - **本机 Daemon 发现与 `Connect` 接口摘要读取，适合驱动外设屏幕与状态灯。** [antigravity_daemon.rs](crates/mi-core/src/store/antigravity_daemon.rs) 中的 `find_freshest_antigravity_hub` 扫描 `~/.gemini/antigravity/daemon` 下最新修改的 `hub_*.json`，读取 `httpPort`、`httpsPort` 与 `csrfToken`，随后在 `poll_antigravity_daemon_candidates_with_frontmost` 向本地 `127.0.0.1` 端点 `POST /exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories` 携带 `Connect-Protocol-Version: 1` 与 `x-codeium-csrf-token` 拉取 `trajectorySummaries`，全程零读取 `transcriptPath` 对话正文或用户凭据，外部设备软件可直接借此点亮键盘 RGB 或更新 LCD 键帽标题。
 - **精确剔除噪音条目的主会话分类与子代理待审批冒泡，避免外设灯光误报。** `classify_antigravity_trajectory_summaries` 对齐前端会话列表口径，自动排除 `archived`、`antigravity.isSubagent`、`parentConversationId`、`subagentSpec`、`isBattleModeFork`、`nestingDepth` 大于 0、`hideFromConversationList` 以及 `SIDE_QUESTION` 和 `COMMIT_MESSAGE_GENERATION` 任务，同时将活跃子代理的 `waitingSteps` 向上归集到顶层主会话，使待审批提示稳定落在可直达的主会话槽位。
 - **基于 `AXDocument` 与侧栏 `AXLink` 的零弹窗直达，适合映射外设单键切换会话。** [session_navigation.rs](crates/mi-macos/src/session_navigation.rs) 解析窗口文档地址 `https://127.0.0.1` 下 `/c/<id>` 与 `project` 查询参数以确认前台当前打开的会话并消除未读提示；[native_ax.rs](crates/mi-macos/src/native_ax.rs) 通过 `ObservationPurpose::Sessions` 匹配侧栏 `AXLink` 并原地展开折叠项目组完成跳转，避免脚本常见「先弹搜索框再关闭」造成的画面闪烁，接入规范同时写在 [Antigravity 接入说明](integrations/antigravity/README.md) 与 [antigravity.rs](crates/mi-bridge/src/antigravity.rs)。
-- **有界辅助功能树校验与语音控件直触，降低自定义快捷键和脚踏板延迟。** `validate_control_membership` 以 `MAX_NODES = 16384` 与 `MAX_DEPTH = 48` 限制遍历边界并用定向 `AXChildren` 路径复验取代多轮全树扫描，配合 [延迟测量记录](docs/designs/host-input-latency.md) 中可复现的批读优化把聚焦耗时降低 39.7%；Gemini Live 语音则直接对 Start 与 End Voice 按钮发送 `AXPress`，方便外部宏键或语音脚踏稳定开关语音。
+- **有界辅助功能树校验与语音控件直触，降低自定义快捷键和脚踏板延迟。** `validate_control_membership` 以 `MAX_NODES = 16384` 与 `MAX_DEPTH = 48` 限制遍历边界并用定向 `AXChildren` 路径复验取代多轮全树扫描，配合 [架构决策](docs/DECISIONS.md) 中记录的批读与路径校验优化把聚焦耗时降低 39.7%；Gemini Live 语音则直接对 Start 与 End Voice 按钮发送 `AXPress`，方便外部宏键或语音脚踏稳定开关语音。
 
 ### 对 Creator Micro 2 使用者的意义
 
@@ -58,7 +58,7 @@ Micro Input 一方面在 macOS 上完整接管日常配置、通用快捷键映�
 除了补足通用键位工具在多 Agent 场景上的短板，项目从一开始确立了三条工程边界。
 
 - **原生链路与最小接口。** 协议分帧、配置模型、本地文档、设备会话与 macOS 宿主执行全部收拢在 7 个核心 Rust crate 中，分别为 `mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos` 和 `mi-core`。`crates/mi-ffi` 通过 9 个 `extern "C"` 导出函数驱动由 13 个 Swift 源文件构成的原生长驻界面。
-- **把未知和边界写到台面上。** 未穷尽的固件行为和待实机验证项全部登记在 [UNKNOWNS](docs/spec/UNKNOWNS.md)。`scripts/check-boundaries.py` 在每次检查时强制核验 `R-C01` 至 `R-C15` 静态门禁与公证路径卫生检查，确保生产只读退出路径、安全文件权限与防误触约束不被绕过，合成测试通过绝不冒充实体按键通过。
+- **把未知和边界写到台面上。** 未穷尽的固件行为和待实机验证项全部登记在 [UNKNOWNS](docs/spec/UNKNOWNS.md)。`scripts/check-boundaries.py` 在每次检查时强制核验 `R-C01` 至 `R-C16` 静态门禁与公证路径卫生检查，确保生产只读退出路径、安全文件权限与防误触约束不被绕过，合成测试通过绝不冒充实体按键通过。
 - **宁可拒绝写入，绝不静默毁坏配置。** 设备读取、本地草稿、基线快照与真实写入严格分离。本地私有配置与恢复备份经 `private_fs` 以 `O_NOFOLLOW` 文件描述符核验属主与 `0700`/`0600` 权限，配置应用和固件刷写前必须保存完整原字节备份与 `fsync` 操作记录，写入后逐字节读回核对一致才标记完成。
 
 ### 结合同类项目的工程取舍
@@ -67,12 +67,12 @@ Micro Input 针对每个关键子系统吸收了同类开源项目的成熟结�
 
 | 参考项目 | 吸收的设计 | Micro Input 的实现与改进 |
 | --- | --- | --- |
-| [`metasequoiaime/msime`](https://github.com/metasequoiaime/msime) | 纯 Rust 跨平台内核加薄 C-ABI 与原生宿主壳 | 退役早期 UniFFI 与重型界面方案，业务逻辑留在 Rust，Swift 只负责单色界面投影与菜单栏生命周期 |
+| [`metasequoiaime/msime`](https://github.com/metasequoiaime/msime) | 纯 Rust 跨平台内核加薄 C-ABI 与原生宿主壳 | 退役早期桥接层与重型界面方案，业务逻辑留在 Rust，Swift 只负责单色界面投影与菜单栏生命周期 |
 | [Red Badger Crux](https://github.com/redbadger/crux) | 状态变更、外部副作用与界面投影分离 | SwiftUI `CoreStore` 使用 `@Observable` 与 12 个按相等性比对的细粒度域属性；`mi_core_dispatch_json` 在 `projection_generation` 不变时直接返回空指针，避免冗余 JSON 序列化与全树刷新 |
 | [Karabiner-Elements](https://karabiner-elements.pqrs.org/) | 事件拦截与活动动作所有者解耦 | 通过 `to.send_user_command` 与独立接收器接管受管层输入；按下触发的听写或按键即使在切层或规则退役后，仍沿原目标身份完成释放与清理 |
 | [Kanata `keyberon`](https://github.com/jtroo/kanata) | 显式单调时间推进与有界事件队列 | 由消费边界传入 `Instant`，为硬件输入设置容量预算与 `InputStreamGap` 缺口隔离；队列积压不阻塞断连信号，丢包区间不猜测松键 |
 | [Paseo `mattt/paseo-creator-micro`](https://github.com/mattt/paseo-creator-micro) | 输入消费、状态轮询与灯光刷新各自独立 | 保留独立执行线程，但拒绝盲发全局快捷键；每次 Agent 操作都绑定精确的窗口与辅助功能控件身份 |
-| [Hammerspoon AX](https://www.hammerspoon.org/docs/hs.axuielement.html) 与 [`agent-desktop`](https://github.com/vercel-labs/agent-desktop) | 按需批读辅助功能属性与写后回读 | 批读 `AXLink.AXURL`、`AXButton.AXExpanded` 与 `AXStaticText.AXValue`，并用定向 `AXChildren` 路径复验取代 4 轮重复全树扫描，在 Antigravity 2.31.0 中将 `focus_agent_input` 中位耗时从 483.7 ms 降至 291.7 ms，release 构建从 486.9 ms 降至 284.3 ms，降幅 39.7%，详见 [延迟测量记录](docs/designs/host-input-latency.md) |
+| [Hammerspoon AX](https://www.hammerspoon.org/docs/hs.axuielement.html) 与 [`agent-desktop`](https://github.com/vercel-labs/agent-desktop) | 按需批读辅助功能属性与写后回读 | 批读 `AXLink.AXURL`、`AXButton.AXExpanded` 与 `AXStaticText.AXValue`，并用定向 `AXChildren` 路径复验取代 4 轮重复全树扫描，在 Antigravity 2.31.0 中将 `focus_agent_input` 中位耗时从 483.7 ms 降至 291.7 ms，release 构建从 486.9 ms 降至 284.3 ms，降幅 39.7%，详见 [架构决策](docs/DECISIONS.md) |
 | [Lagrange](https://github.com/varungupta3009/Lagrange) | 工作区与会话摘要交叉索引 | 对照工作区 URI 与项目 ID 过滤会话列表，全程零读取用户对话正文与认证凭据 |
 | [`openai/apps-sdk-ui`](https://github.com/openai/apps-sdk-ui) 与 [`shadcn/ui`](https://github.com/shadcn-ui/ui) | 单色中性视觉层级 | 通过 [DESIGN.md](docs/designs/DESIGN.md) 与门禁 `R-C09` 禁用系统亮蓝按钮与迷你控件，色彩仅用于真实设备状态、会话进度点与背光预览 |
 
@@ -111,7 +111,7 @@ Work Louder Creator Micro 2 (USB 303A:8298, HID Report 0x06)
 更多设计与验证记录留在仓库内供独立查阅。
 
 - 当前开发进度、历史验收记录与原始调研入口见 [开发状态与历史验收日志](docs/status.md)。
-- 产品规格、未决项与证据台账见 [SPEC](docs/spec/SPEC.md)、[UNKNOWNS](docs/spec/UNKNOWNS.md) 与 [EVIDENCE](docs/spec/EVIDENCE.md)。
+- 产品规格与未决项见 [SPEC](docs/spec/SPEC.md) 与 [UNKNOWNS](docs/spec/UNKNOWNS.md)。
 - 模块边界、架构决策、视觉规范与设备契约见 [模块契约](docs/module-contracts.md)、[DECISIONS.md](docs/DECISIONS.md)、[DESIGN.md](docs/designs/DESIGN.md)、[桌面应用控制](docs/designs/four-app-control.md)、[固件更新契约](docs/firmware-update.md) 与 [0.7.0 进阶硬件能力](docs/firmware-v070-capabilities.md)。
 
 ### 本地构建与离线验证
@@ -119,12 +119,12 @@ Work Louder Creator Micro 2 (USB 303A:8298, HID Report 0x06)
 构建需要 macOS 14+、Rust stable 与 Swift 工具链。
 
 ```sh
-scripts/check           # 静态与边界门禁 R-C01 至 R-C15、Rust 与 Swift 单测、C-ABI 静态库与开发包构建
+scripts/check           # 静态与边界门禁 R-C01 至 R-C16、Rust 与 Swift 单测、C-ABI 静态库与开发包构建
 scripts/verify-offline  # 全量检查加 6 个隔离合成 QA 场景及自动清理核对，不连接真实设备
 scripts/run             # 启动当前 checkout 构建的 target/MicroInput.app，带单实例排他锁
 ```
 
-本地默认脚本不连接或修改实体键盘，实机备份、写入与硬件验收入口见 [开发与验证入口](docs/development.md) 与 [实机验收准备](docs/designs/hardware-acceptance.md)。
+本地默认脚本不连接或修改实体键盘，实机备份、写入与硬件验收入口见 [开发与验证入口](docs/development.md) 与 [架构决策](docs/DECISIONS.md)。
 
 ### 给正在阅读本仓库的 AI Agent
 
@@ -156,7 +156,7 @@ Micro Input bundles USB HID device transport strictly for Creator Micro 2, while
 - **Local daemon discovery and `Connect` summary polling for peripheral screens and LEDs.** `find_freshest_antigravity_hub` in [antigravity_daemon.rs](crates/mi-core/src/store/antigravity_daemon.rs) scans `~/.gemini/antigravity/daemon` for the latest `hub_*.json` file, reads `httpPort`, `httpsPort`, and `csrfToken`, and queries local `127.0.0.1` via `POST /exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories` with `Connect-Protocol-Version: 1` and `x-codeium-csrf-token` in `poll_antigravity_daemon_candidates_with_frontmost`. It reads `trajectorySummaries` with zero reads of `transcriptPath` files or credentials.
 - **Accurate main-session filtering and subagent attention rollup to prevent false key lighting.** `classify_antigravity_trajectory_summaries` excludes `archived`, `antigravity.isSubagent`, `parentConversationId`, `subagentSpec`, `isBattleModeFork`, `nestingDepth` above zero, `hideFromConversationList`, `SIDE_QUESTION`, and `COMMIT_MESSAGE_GENERATION`, while rolling active subagent `waitingSteps` up to their parent conversation so approval prompts stay pinned to jumpable main sessions.
 - **Zero-flicker `/c/<id>` session jumping via `AXDocument` and sidebar `AXLink`.** [session_navigation.rs](crates/mi-macos/src/session_navigation.rs) inspects window `AXDocument` URLs under `https://127.0.0.1` for `/c/<id>` and `project` parameters to acknowledge when a conversation is opened frontmost. [native_ax.rs](crates/mi-macos/src/native_ax.rs) matches sidebar `AXLink` nodes through `ObservationPurpose::Sessions` and expands collapsed project groups in place instead of flashing search popups, with protocol contracts documented in [Antigravity integration notes](integrations/antigravity/README.md) and [antigravity.rs](crates/mi-bridge/src/antigravity.rs).
-- **Bounded AX verification and direct Gemini Live controls for macro keys and pedals.** `validate_control_membership` bounds tree walks with `MAX_NODES = 16384` and `MAX_DEPTH = 48` and replaces repeated full-tree scans with batched attributes and directional `AXChildren` path re-verification, cutting median `focus_agent_input` latency by 39.7% in [host input latency benchmarks](docs/designs/host-input-latency.md). Gemini Live presses Start Voice and End Voice buttons directly via `AXPress` rather than fragile keystrokes.
+- **Bounded AX verification and direct Gemini Live controls for macro keys and pedals.** `validate_control_membership` bounds tree walks with `MAX_NODES = 16384` and `MAX_DEPTH = 48` and replaces repeated full-tree scans with batched attributes and directional `AXChildren` path re-verification, cutting median `focus_agent_input` latency by 39.7% as documented in [DECISIONS.md](docs/DECISIONS.md). Gemini Live presses Start Voice and End Voice buttons directly via `AXPress` rather than fragile keystrokes.
 
 ### What This Means for Creator Micro 2 Owners
 
@@ -191,7 +191,7 @@ Micro Input handles daily macOS key configuration and official firmware updates 
 Micro Input enforces three engineering boundaries from the ground up.
 
 - **Pure Rust core behind a thin C-ABI shell.** Framing, document models, local drafts, device sessions, agent bridges, and macOS execution live in 7 Rust crates named `mi-proto`, `mi-transport`, `mi-model`, `mi-session`, `mi-bridge`, `mi-macos`, and `mi-core`, driving 13 SwiftUI and AppKit files via 9 `extern "C"` functions in `crates/mi-ffi`.
-- **Explicit unknowns and static gates.** Unverified firmware edges stay logged in [UNKNOWNS](docs/spec/UNKNOWNS.md). `scripts/check-boundaries.py` enforces static rules `R-C01` through `R-C15` and notarization path hygiene on every run so read-only safety checks, private file permissions, and UI focus guards stay intact and synthetic runs never impersonate physical hardware sign-off.
+- **Explicit unknowns and static gates.** Unverified firmware edges stay logged in [UNKNOWNS](docs/spec/UNKNOWNS.md). `scripts/check-boundaries.py` enforces static rules `R-C01` through `R-C16` and notarization path hygiene on every run so read-only safety checks, private file permissions, and UI focus guards stay intact and synthetic runs never impersonate physical hardware sign-off.
 - **Refuse writes before risking device state.** Device snapshots, local drafts, and baselines remain strictly isolated. Private local files and recovery backups are verified via `private_fs` `O_NOFOLLOW` descriptor ownership and `0700`/`0600` checks, with full pre-write backups, `fsync` operation logs, and byte-for-byte readback checks required before marking any apply or Flash operation complete.
 
 ### Engineering Tradeoffs from Peer Projects
@@ -200,12 +200,12 @@ Micro Input borrows proven designs across subsystems while closing gaps specific
 
 | Reference Project | Adopted Pattern | Micro Input Implementation and Gain |
 | --- | --- | --- |
-| [`metasequoiaime/msime`](https://github.com/metasequoiaime/msime) | Pure Rust core plus thin C-ABI and native UI shell | Retired early UniFFI and heavy UI experiments; all logic stays in Rust while Swift renders views and status-item lifecycle |
+| [`metasequoiaime/msime`](https://github.com/metasequoiaime/msime) | Pure Rust core plus thin C-ABI and native UI shell | Retired early FFI codegen and heavy UI experiments; all logic stays in Rust while Swift renders views and status-item lifecycle |
 | [Red Badger Crux](https://github.com/redbadger/crux) | Clean separation of state updates, effects, and UI projection | SwiftUI `CoreStore` uses `@Observable` with 12 equatable domain slices; `mi_core_dispatch_json` returns null when `projection_generation` is unchanged to skip serialization and view invalidation |
 | [Karabiner-Elements](https://karabiner-elements.pqrs.org/) | Decoupling physical interception from active owner lifetime | Consumes managed layer inputs over `to.send_user_command`; held dictation or key presses still release cleanly against their original target after layer changes |
 | [Kanata `keyberon`](https://github.com/jtroo/kanata) | Explicit monotonic timestamps and bounded event queues | Injects `Instant` at consumption boundaries and isolates overflows with `InputStreamGap` so dropped packets never block disconnects or guess key releases |
 | [Paseo `mattt/paseo-creator-micro`](https://github.com/mattt/paseo-creator-micro) | Separate threads for input consumption, polling, and LEDs | Keeps dedicated worker threads while replacing blind global shortcuts with verified window and control identities |
-| [Hammerspoon AX](https://www.hammerspoon.org/docs/hs.axuielement.html) and [`agent-desktop`](https://github.com/vercel-labs/agent-desktop) | Batched Accessibility reads and post-write verification | Batches `AXLink.AXURL`, `AXButton.AXExpanded`, and `AXStaticText.AXValue` and uses directional `AXChildren` checks instead of 4 full-tree scans, cutting `focus_agent_input` median time from 483.7 ms to 291.7 ms debug and 486.9 ms to 284.3 ms release in Antigravity 2.31.0; see [host input latency benchmarks](docs/designs/host-input-latency.md) |
+| [Hammerspoon AX](https://www.hammerspoon.org/docs/hs.axuielement.html) and [`agent-desktop`](https://github.com/vercel-labs/agent-desktop) | Batched Accessibility reads and post-write verification | Batches `AXLink.AXURL`, `AXButton.AXExpanded`, and `AXStaticText.AXValue` and uses directional `AXChildren` checks instead of 4 full-tree scans, cutting `focus_agent_input` median time from 483.7 ms to 291.7 ms debug and 486.9 ms to 284.3 ms release in Antigravity 2.31.0; see [DECISIONS.md](docs/DECISIONS.md) |
 | [Lagrange](https://github.com/varungupta3009/Lagrange) | Workspace and summary cross-indexing | Filters session lists by workspace URI and project ID without touching conversation transcripts or auth secrets |
 | [`openai/apps-sdk-ui`](https://github.com/openai/apps-sdk-ui) and [`shadcn/ui`](https://github.com/shadcn-ui/ui) | Monochrome neutral interface hierarchy | [DESIGN.md](docs/designs/DESIGN.md) and gate `R-C09` ban bright accent controls and mini widgets so color signals only real device, session, and backlight state |
 
@@ -244,7 +244,7 @@ Work Louder Creator Micro 2 (USB 303A:8298, HID Report 0x06)
 Further design specifications, research logs, and verification ledgers live inside the repository.
 
 - Development progress, historical verification notes, and original research links live in [Development Status and Verification Log](docs/status.md).
-- Product specification, unknowns, and evidence ledgers live in [SPEC](docs/spec/SPEC.md), [UNKNOWNS](docs/spec/UNKNOWNS.md), and [EVIDENCE](docs/spec/EVIDENCE.md).
+- Product specification and unknowns live in [SPEC](docs/spec/SPEC.md) and [UNKNOWNS](docs/spec/UNKNOWNS.md).
 - Module boundaries, architectural decisions, design rules, and protocol contracts live in [Module Contracts](docs/module-contracts.md), [DECISIONS.md](docs/DECISIONS.md), [DESIGN.md](docs/designs/DESIGN.md), [Four-App Control](docs/designs/four-app-control.md), [Firmware Update Contract](docs/firmware-update.md), and [Firmware v0.7.0 Capabilities](docs/firmware-v070-capabilities.md).
 
 ### Local Build and Offline Verification
@@ -252,12 +252,12 @@ Further design specifications, research logs, and verification ledgers live insi
 Building requires macOS 14+, Rust stable, and the Swift toolchain.
 
 ```sh
-scripts/check           # Static boundary gates R-C01 to R-C15, Rust + Swift tests, C-ABI static lib, and app build
+scripts/check           # Static boundary gates R-C01 to R-C16, Rust + Swift tests, C-ABI static lib, and app build
 scripts/verify-offline  # Full checks plus 6 isolated synthetic QA scenarios and cleanup checks without real hardware
 scripts/run             # Launches target/MicroInput.app from the current checkout under a single-instance lock
 ```
 
-Default verification scripts never connect to or write physical devices; real-hardware backup and acceptance scripts are documented in [Development Guide](docs/development.md) and [Hardware Acceptance](docs/designs/hardware-acceptance.md).
+Default verification scripts never connect to or write physical devices; real-hardware backup and acceptance scripts are documented in [Development Guide](docs/development.md) and [DECISIONS.md](docs/DECISIONS.md).
 
 ### Notice for AI Agents
 
