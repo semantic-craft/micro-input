@@ -1,5 +1,42 @@
 use crate::executor::DialScrollRequest;
-use crate::managed_controls::{blocked, ManagedAxProvider, ManagedWindow, ManagedWindowIdentity};
+use crate::managed_controls::{
+    blocked, ManagedAxProvider, ManagedWindow, ManagedWindowIdentity, SidebarStepDirection,
+};
+
+pub(crate) fn extract_antigravity_conversation_id(url: &str) -> Option<&str> {
+    let trimmed = url.trim();
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/')?;
+    let port_str = host
+        .strip_prefix("127.0.0.1:")
+        .or_else(|| host.strip_prefix("localhost:"))?;
+    let port = port_str.parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+    let after_c = path.strip_prefix("c/")?;
+    let cid = after_c.split(['?', '#', '/']).next()?;
+    (!cid.is_empty()).then_some(cid)
+}
+
+pub(crate) fn select_adjacent_sidebar_conversation<'a>(
+    cids: &'a [String],
+    active_cid: Option<&str>,
+    direction: SidebarStepDirection,
+) -> Option<&'a str> {
+    if cids.is_empty() {
+        return None;
+    }
+    let Some(idx) = active_cid.and_then(|active| cids.iter().position(|cid| cid == active)) else {
+        return Some(cids[0].as_str());
+    };
+    match direction {
+        SidebarStepDirection::Previous => idx.checked_sub(1).map(|prev| cids[prev].as_str()),
+        SidebarStepDirection::Next => cids.get(idx + 1).map(String::as_str),
+    }
+}
 
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug, Default)]
@@ -46,6 +83,16 @@ impl ManagedAxProvider for NativeAxProvider {
         _: u16,
         _: &[String],
     ) -> Result<(), String> {
+        Err(blocked("macos_required"))
+    }
+    fn step_sidebar_conversation(
+        &mut self,
+        _: &ManagedWindowIdentity,
+        _: SidebarStepDirection,
+    ) -> Result<(), String> {
+        Err(blocked("macos_required"))
+    }
+    fn archive_conversation(&mut self, _: &ManagedWindowIdentity) -> Result<(), String> {
         Err(blocked("macos_required"))
     }
 }
@@ -939,10 +986,10 @@ mod macos {
                     .map(lenient_url_attribute)
                     .transpose()?;
                 data.pressable = data.enabled
-                    && data
-                        .url
-                        .as_deref()
-                        .is_some_and(|url| url.starts_with("https://127.0.0.1:"))
+                    && data.url.as_deref().is_some_and(|url| {
+                        url.starts_with("https://127.0.0.1:")
+                            || extract_antigravity_conversation_id(url).is_some()
+                    })
                     && actions()?.iter().any(|action| action == "AXPress");
             }
             ObservationPurpose::Sessions if data.role == "AXButton" => {
@@ -1416,6 +1463,188 @@ mod macos {
         } else {
             None
         }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SidebarArchiveLookup {
+        Found { archive_button_idx: usize },
+        RunningConversation,
+        RowNotFound,
+        ArchiveControlMissing,
+    }
+
+    fn find_sidebar_row_archive_action(
+        observation: &WindowObservation,
+        target_cid: &str,
+    ) -> SidebarArchiveLookup {
+        let nodes = &observation.nodes;
+        let mut saw_matching_row = false;
+        for (link_idx, link) in nodes.iter().enumerate() {
+            if link.data.role != "AXLink" {
+                continue;
+            }
+            if link
+                .data
+                .url
+                .as_deref()
+                .and_then(extract_antigravity_conversation_id)
+                != Some(target_cid)
+            {
+                continue;
+            }
+            saw_matching_row = true;
+            let link_end = subtree_end(nodes, link_idx);
+            let mut container = link.parent;
+            for _ in 0..2 {
+                if let Some(c) = container {
+                    if subtree_end(nodes, c) == link_end {
+                        container = nodes[c].parent;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            let Some(container_idx) = container else {
+                continue;
+            };
+            let container_end = subtree_end(nodes, container_idx);
+            let mut has_stop = false;
+            let mut archive_button_idx = None;
+            let mut idx = link_end;
+            while idx < container_end {
+                let node = &nodes[idx];
+                if node.data.role == "AXLink" || node.data.role == "AXHeading" {
+                    break;
+                }
+                if node.data.role == "AXButton" {
+                    if is_row_boundary_button(node) {
+                        break;
+                    }
+                    let trimmed = node.data.label.trim();
+                    if crate::antigravity_ax_labels::is_stop_execution(trimmed) {
+                        has_stop = true;
+                    } else if crate::antigravity_ax_labels::is_archive_conversation(trimmed)
+                        && archive_button_idx.is_none()
+                    {
+                        archive_button_idx = Some(idx);
+                    }
+                }
+                idx += 1;
+            }
+            if has_stop {
+                return SidebarArchiveLookup::RunningConversation;
+            }
+            if let Some(archive_button_idx) = archive_button_idx {
+                return SidebarArchiveLookup::Found { archive_button_idx };
+            }
+        }
+        if saw_matching_row {
+            SidebarArchiveLookup::ArchiveControlMissing
+        } else {
+            SidebarArchiveLookup::RowNotFound
+        }
+    }
+
+    fn collect_ordered_sidebar_conversation_links(
+        observation: &WindowObservation,
+    ) -> Vec<(String, usize)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut links = Vec::new();
+        for (idx, node) in observation.nodes.iter().enumerate() {
+            if node.data.role != "AXLink" {
+                continue;
+            }
+            let Some(cid) = node
+                .data
+                .url
+                .as_deref()
+                .and_then(extract_antigravity_conversation_id)
+            else {
+                continue;
+            };
+            if seen.insert(cid.to_string()) {
+                links.push((cid.to_string(), idx));
+            }
+        }
+        links
+    }
+
+    fn find_antigravity_hub_web_area(observation: &WindowObservation) -> Option<usize> {
+        let mut fallback = None;
+        for (idx, node) in observation.nodes.iter().enumerate() {
+            if node.data.role != "AXWebArea" {
+                continue;
+            }
+            let Some(url) = node.data.url.as_deref().filter(|u| !u.trim().is_empty()) else {
+                continue;
+            };
+            let mut ancestor = node.parent;
+            let mut nested = false;
+            while let Some(parent_idx) = ancestor {
+                let parent = &observation.nodes[parent_idx];
+                if parent.data.role == "AXWebArea"
+                    && parent
+                        .data
+                        .url
+                        .as_deref()
+                        .is_some_and(|u| !u.trim().is_empty())
+                {
+                    nested = true;
+                    break;
+                }
+                ancestor = parent.parent;
+            }
+            if nested || !is_antigravity_hub_web_area(Some(url), None) {
+                continue;
+            }
+            if extract_antigravity_conversation_id(url).is_some() {
+                return Some(idx);
+            }
+            if fallback.is_none() {
+                fallback = Some(idx);
+            }
+        }
+        fallback
+    }
+
+    fn read_hub_active_cid(observation: &WindowObservation) -> (Option<Owned>, Option<String>) {
+        let Some(idx) = find_antigravity_hub_web_area(observation) else {
+            return (None, None);
+        };
+        let node = &observation.nodes[idx];
+        let active_cid = node
+            .data
+            .url
+            .as_deref()
+            .and_then(extract_antigravity_conversation_id)
+            .map(str::to_owned);
+        (Some(node.element.clone()), active_cid)
+    }
+
+    fn read_live_hub_cid(
+        window: &Owned,
+        hub_web_area: Option<&Owned>,
+        deadline: Instant,
+    ) -> Result<Option<String>, String> {
+        if let Some(web_area) = hub_web_area {
+            if let Ok(url_opt) = web_area
+                .attr("AXURL")
+                .and_then(|val| val.map(lenient_url_attribute).transpose())
+            {
+                if let Some(url) = url_opt.as_deref().filter(|u| !u.trim().is_empty()) {
+                    if is_antigravity_hub_web_area(Some(url), None) {
+                        return Ok(extract_antigravity_conversation_id(url).map(str::to_owned));
+                    }
+                }
+            }
+        }
+        let obs = observe_window_until(
+            window.clone(),
+            ObservationPurpose::SessionDocuments,
+            deadline,
+        )?;
+        let (_, active_cid) = read_hub_active_cid(&obs);
+        Ok(active_cid)
     }
 
     fn observe_sidebar_conversations(
@@ -3676,6 +3905,33 @@ mod macos {
             unsafe { CGEventPostToPid(target.pid, event.0.cast_mut()) };
             Err("unconfirmed:scroll_dispatched".into())
         }
+        fn observe_antigravity_sidebar(&self, window: &Owned) -> Result<WindowObservation, String> {
+            let mut observation = observe_window(window.clone(), ObservationPurpose::Sessions)?;
+            if !collect_ordered_sidebar_conversation_links(&observation).is_empty() {
+                return Ok(observation);
+            }
+            if let Some(toggle_idx) = find_collapsed_toggle_sidebar_button(&observation) {
+                observation.nodes[toggle_idx].element.action("AXPress")?;
+                let deadline = Instant::now() + Duration::from_millis(500);
+                loop {
+                    if let Ok(refreshed) =
+                        observe_window_until(window.clone(), ObservationPurpose::Sessions, deadline)
+                    {
+                        let has_links =
+                            !collect_ordered_sidebar_conversation_links(&refreshed).is_empty();
+                        observation = refreshed;
+                        if has_links {
+                            break;
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+            Ok(observation)
+        }
     }
 
     impl ManagedAxProvider for NativeAxProvider {
@@ -3815,6 +4071,14 @@ mod macos {
             target: &ManagedWindowIdentity,
             request: &DialScrollRequest,
         ) -> Result<(), String> {
+            if request.sidebar && target.bundle_id == "com.google.antigravity" {
+                let direction = if request.delta_lines < 0 {
+                    SidebarStepDirection::Previous
+                } else {
+                    SidebarStepDirection::Next
+                };
+                return self.step_sidebar_conversation(target, direction);
+            }
             let snapshot = self.read(target)?;
             if request.jump_to_bottom && !request.sidebar {
                 let buttons = matching_scroll_bottom_buttons(&snapshot.controls);
@@ -4069,6 +4333,99 @@ mod macos {
                 }
                 if buttons.len() > 1 || Instant::now() >= deadline {
                     return Err(blocked("ambiguous_or_missing_submit_control"));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+        fn step_sidebar_conversation(
+            &mut self,
+            target: &ManagedWindowIdentity,
+            direction: SidebarStepDirection,
+        ) -> Result<(), String> {
+            let (_, window) = self.validate(target)?;
+            let observation = self.observe_antigravity_sidebar(&window)?;
+            let links = collect_ordered_sidebar_conversation_links(&observation);
+            if links.is_empty() {
+                return Err(blocked("sidebar_conversations_unavailable"));
+            }
+            let (hub_web_area, active_cid) = read_hub_active_cid(&observation);
+            let cids: Vec<String> = links.iter().map(|(cid, _)| cid.clone()).collect();
+            let Some(next_cid) =
+                select_adjacent_sidebar_conversation(&cids, active_cid.as_deref(), direction)
+            else {
+                if let Some(active) = active_cid.as_deref() {
+                    if let Some((_, node_idx)) = links.iter().find(|(cid, _)| cid == active) {
+                        let _ = observation.nodes[*node_idx]
+                            .element
+                            .action("AXScrollToVisible");
+                    }
+                }
+                return Ok(());
+            };
+            let Some((_, node_idx)) = links.iter().find(|(cid, _)| cid == next_cid) else {
+                return Err(blocked("sidebar_conversations_unavailable"));
+            };
+            let link_node = &observation.nodes[*node_idx];
+            if !link_node.data.enabled {
+                return Err(blocked("sidebar_conversations_unavailable"));
+            }
+            let _ = link_node.element.action("AXScrollToVisible");
+            link_node.element.action("AXPress")?;
+            let deadline = Instant::now() + Duration::from_millis(500);
+            loop {
+                if let Ok(live_cid) = read_live_hub_cid(&window, hub_web_area.as_ref(), deadline) {
+                    if live_cid.as_deref() == Some(next_cid) {
+                        return Ok(());
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err("unconfirmed:sidebar_conversation_step_readback".into());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+        fn archive_conversation(&mut self, target: &ManagedWindowIdentity) -> Result<(), String> {
+            let (_, window) = self.validate(target)?;
+            let observation = self.observe_antigravity_sidebar(&window)?;
+            let (hub_web_area, Some(active_cid)) = read_hub_active_cid(&observation) else {
+                return Err(blocked("no_active_conversation"));
+            };
+            let archive_button_idx =
+                match find_sidebar_row_archive_action(&observation, &active_cid) {
+                    SidebarArchiveLookup::Found { archive_button_idx } => archive_button_idx,
+                    SidebarArchiveLookup::RunningConversation => {
+                        return Err(blocked("conversation_running_cannot_archive"));
+                    }
+                    SidebarArchiveLookup::RowNotFound
+                    | SidebarArchiveLookup::ArchiveControlMissing => {
+                        return Err(blocked("archive_control_unavailable"));
+                    }
+                };
+            let button = &observation.nodes[archive_button_idx];
+            if !button.data.enabled || !button.data.pressable {
+                return Err(blocked("archive_control_unavailable"));
+            }
+            let _ = button.element.action("AXScrollToVisible");
+            button.element.action("AXPress")?;
+            let deadline = Instant::now() + Duration::from_millis(700);
+            loop {
+                if let Ok(live_cid) = read_live_hub_cid(&window, hub_web_area.as_ref(), deadline) {
+                    if live_cid.as_deref() != Some(active_cid.as_str()) {
+                        return Ok(());
+                    }
+                }
+                if let Ok(refreshed) =
+                    observe_window_until(window.clone(), ObservationPurpose::Sessions, deadline)
+                {
+                    if collect_ordered_sidebar_conversation_links(&refreshed)
+                        .iter()
+                        .all(|(cid, _)| cid != &active_cid)
+                    {
+                        return Ok(());
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err("unconfirmed:archive_conversation_readback".into());
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
@@ -8282,6 +8639,220 @@ mod macos {
                 .map(|c| c.id)
                 .collect();
             assert_eq!(matched_submit, vec![10, 11, 12, 13, 14, 15, 16]);
+        }
+
+        #[test]
+        fn extract_antigravity_conversation_id_parses_loopback_urls_and_rejects_invalid() {
+            assert_eq!(
+                extract_antigravity_conversation_id("https://127.0.0.1:43210/c/conv-abc-123"),
+                Some("conv-abc-123")
+            );
+            assert_eq!(
+                extract_antigravity_conversation_id(
+                    "https://127.0.0.1:43210/c/conv-abc-123?project=foo#turn-1"
+                ),
+                Some("conv-abc-123")
+            );
+            assert_eq!(
+                extract_antigravity_conversation_id("http://localhost:8080/c/conv-local/details"),
+                Some("conv-local")
+            );
+            assert_eq!(
+                extract_antigravity_conversation_id("https://localhost:443/c/conv-https"),
+                Some("conv-https")
+            );
+            assert_eq!(
+                extract_antigravity_conversation_id("https://127.0.0.1:43210/c/"),
+                None
+            );
+            assert_eq!(
+                extract_antigravity_conversation_id("https://127.0.0.1:43210/c/?project=foo"),
+                None
+            );
+            assert_eq!(
+                extract_antigravity_conversation_id("https://127.0.0.1:0/c/conv-zero-port"),
+                None
+            );
+            assert_eq!(
+                extract_antigravity_conversation_id("https://example.com:443/c/conv-remote"),
+                None
+            );
+            assert_eq!(
+                extract_antigravity_conversation_id("https://127.0.0.1:43210/settings"),
+                None
+            );
+        }
+
+        #[test]
+        fn select_adjacent_sidebar_conversation_steps_and_handles_edges_and_unknown_active() {
+            let empty: Vec<String> = Vec::new();
+            assert_eq!(
+                select_adjacent_sidebar_conversation(&empty, None, SidebarStepDirection::Next),
+                None
+            );
+            let cids: Vec<String> = ["c1", "c2", "c3"].into_iter().map(str::to_string).collect();
+            assert_eq!(
+                select_adjacent_sidebar_conversation(
+                    &cids,
+                    Some("c2"),
+                    SidebarStepDirection::Previous
+                ),
+                Some("c1")
+            );
+            assert_eq!(
+                select_adjacent_sidebar_conversation(&cids, Some("c2"), SidebarStepDirection::Next),
+                Some("c3")
+            );
+            assert_eq!(
+                select_adjacent_sidebar_conversation(
+                    &cids,
+                    Some("c1"),
+                    SidebarStepDirection::Previous
+                ),
+                None
+            );
+            assert_eq!(
+                select_adjacent_sidebar_conversation(&cids, Some("c3"), SidebarStepDirection::Next),
+                None
+            );
+            assert_eq!(
+                select_adjacent_sidebar_conversation(&cids, None, SidebarStepDirection::Next),
+                Some("c1")
+            );
+            assert_eq!(
+                select_adjacent_sidebar_conversation(
+                    &cids,
+                    Some("missing"),
+                    SidebarStepDirection::Previous
+                ),
+                Some("c1")
+            );
+        }
+
+        #[test]
+        fn find_sidebar_row_archive_action_handles_en_zh_running_and_missing() {
+            let node = |id: &str,
+                        role: &str,
+                        label: &str,
+                        parent: Option<usize>,
+                        url: Option<&str>,
+                        pressable: bool| ObservedNode {
+                element: Owned::text(id).unwrap(),
+                parent,
+                data: NodeData {
+                    role: role.into(),
+                    label: label.into(),
+                    enabled: true,
+                    pressable,
+                    url: url.map(str::to_string),
+                    ..Default::default()
+                },
+            };
+
+            let observation = WindowObservation {
+                nodes: vec![
+                    node("win", "AXWindow", "", None, None, false),
+                    node("row-en", "AXGroup", "", Some(0), None, false),
+                    node(
+                        "link-en",
+                        "AXLink",
+                        "English Idle",
+                        Some(1),
+                        Some("https://127.0.0.1:4321/c/cid-en"),
+                        true,
+                    ),
+                    node(
+                        "btn-en-archive",
+                        "AXButton",
+                        "Archive conversation",
+                        Some(1),
+                        None,
+                        true,
+                    ),
+                    node("row-zh", "AXGroup", "", Some(0), None, false),
+                    node(
+                        "link-zh",
+                        "AXLink",
+                        "中文空闲",
+                        Some(4),
+                        Some("https://127.0.0.1:4321/c/cid-zh"),
+                        true,
+                    ),
+                    node(
+                        "btn-zh-archive",
+                        "AXButton",
+                        "归档会话",
+                        Some(4),
+                        None,
+                        true,
+                    ),
+                    node("row-run-en", "AXGroup", "", Some(0), None, false),
+                    node(
+                        "link-run-en",
+                        "AXLink",
+                        "Running EN",
+                        Some(7),
+                        Some("https://127.0.0.1:4321/c/cid-run-en"),
+                        true,
+                    ),
+                    node(
+                        "btn-run-en",
+                        "AXButton",
+                        "Stop execution",
+                        Some(7),
+                        None,
+                        true,
+                    ),
+                    node("row-run-zh", "AXGroup", "", Some(0), None, false),
+                    node(
+                        "link-run-zh",
+                        "AXLink",
+                        "Running ZH",
+                        Some(10),
+                        Some("https://127.0.0.1:4321/c/cid-run-zh"),
+                        true,
+                    ),
+                    node("btn-run-zh", "AXButton", "停止执行", Some(10), None, true),
+                    node("row-missing", "AXGroup", "", Some(0), None, false),
+                    node(
+                        "link-missing",
+                        "AXLink",
+                        "No Actions",
+                        Some(13),
+                        Some("https://127.0.0.1:4321/c/cid-no-btn"),
+                        true,
+                    ),
+                ],
+            };
+
+            assert_eq!(
+                find_sidebar_row_archive_action(&observation, "cid-en"),
+                SidebarArchiveLookup::Found {
+                    archive_button_idx: 3
+                }
+            );
+            assert_eq!(
+                find_sidebar_row_archive_action(&observation, "cid-zh"),
+                SidebarArchiveLookup::Found {
+                    archive_button_idx: 6
+                }
+            );
+            assert_eq!(
+                find_sidebar_row_archive_action(&observation, "cid-run-en"),
+                SidebarArchiveLookup::RunningConversation
+            );
+            assert_eq!(
+                find_sidebar_row_archive_action(&observation, "cid-run-zh"),
+                SidebarArchiveLookup::RunningConversation
+            );
+            assert_eq!(
+                find_sidebar_row_archive_action(&observation, "cid-no-btn"),
+                SidebarArchiveLookup::ArchiveControlMissing
+            );
+            assert_eq!(
+                find_sidebar_row_archive_action(&observation, "cid-absent"),
+                SidebarArchiveLookup::RowNotFound
+            );
         }
     }
 }

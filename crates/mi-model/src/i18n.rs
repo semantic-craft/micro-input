@@ -353,6 +353,9 @@ fn compact_zh_cheat(raw: &str) -> String {
         "打开 Side Question" => "Side Q".into(),
         "打开右边栏" => "开右边栏".into(),
         "关闭右边栏" => "关右边栏".into(),
+        "归档当前会话" => "归档会话".into(),
+        "侧栏上一会话" => "侧栏上条".into(),
+        "侧栏下一会话" => "侧栏下条".into(),
         "快速向右分栏" => "向右分栏".into(),
         "内置浏览器 · 布局" | "打开内置浏览器" => "内置浏览器".into(),
         "聚焦当前输入框" => "聚焦输入框".into(),
@@ -633,6 +636,24 @@ const ACTION_NAME_EN_TABLE: &[(&str, &str, &str, &str)] = &[
         "Antigravity · Close Right Panel",
         "Close Right Panel",
         "Close Panel",
+    ),
+    (
+        "归档当前会话",
+        "Archive Current Conversation",
+        "Archive Chat",
+        "Archive",
+    ),
+    (
+        "侧栏上一会话",
+        "Previous Sidebar Conversation",
+        "Prev Sidebar",
+        "Prev Chat",
+    ),
+    (
+        "侧栏下一会话",
+        "Next Sidebar Conversation",
+        "Next Sidebar",
+        "Next Chat",
     ),
     (
         "Antigravity 会话",
@@ -1739,6 +1760,18 @@ const ACTION_DETAIL_EN_TABLE: &[(&str, &str)] = &[
         "Scrolls down in project and session sidebar",
     ),
     (
+        "归档 Antigravity 当前打开的会话",
+        "Archives the active Antigravity conversation",
+    ),
+    (
+        "在 Antigravity 左侧对话导航栏向上切换并滚动对话",
+        "Steps to and scrolls to the previous conversation in the Antigravity left sidebar",
+    ),
+    (
+        "在 Antigravity 左侧对话导航栏向下切换并滚动对话",
+        "Steps to and scrolls to the next conversation in the Antigravity left sidebar",
+    ),
+    (
         "切换到上一个活跃工作区会话",
         "Switches to previous active workspace",
     ),
@@ -2141,6 +2174,9 @@ const MODEL_EN_TABLE: &[(&str, &str)] = &[
     ("关闭右边栏", "Close Right Panel"),
     ("Antigravity · 打开右边栏", "Antigravity · Open Right Panel"),
     ("Antigravity · 关闭右边栏", "Antigravity · Close Right Panel"),
+    ("归档当前会话", "Archive Current Conversation"),
+    ("侧栏上一会话", "Previous Sidebar Conversation"),
+    ("侧栏下一会话", "Next Sidebar Conversation"),
     ("Antigravity 会话", "Antigravity Session"),
     ("上一会话（侧栏轮转）", "Previous Conversation (Cycle)"),
     ("下一会话（侧栏轮转）", "Next Conversation (Cycle)"),

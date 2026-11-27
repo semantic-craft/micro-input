@@ -70,7 +70,7 @@ fn executor_runs_after_verification_rpc_closes_and_stops_on_input_loss() {
         .recv_timeout(Duration::from_secs(3))
         .unwrap();
     assert_eq!(receipt.outcome, "executed");
-    assert_eq!(receipt.detail, "antigravity/focus-input");
+    assert_eq!(receipt.detail, "antigravity/archive-conversation");
     assert_eq!(
         receipt.profile_id,
         running.installation.plan.hosts[0].profile_id
@@ -79,7 +79,7 @@ fn executor_runs_after_verification_rpc_closes_and_stops_on_input_loss() {
         driver.events(),
         vec![
             mi_macos::executor::RecordedOsEvent::CheckAccessibilityTrusted,
-            mi_macos::executor::RecordedOsEvent::FocusAgentInput("antigravity".into()),
+            mi_macos::executor::RecordedOsEvent::ArchiveConversation("antigravity".into()),
         ]
     );
     assert!(link.writes.lock().unwrap().is_empty());
@@ -538,7 +538,7 @@ fn board_layers_route_by_physical_layer_regardless_of_foreground_app() {
     assert_eq!(receipts[0].profile_id, plan.hosts[1].profile_id);
     assert_eq!(receipts[0].detail, "dsh-desktop/browser");
     assert_eq!(receipts[1].profile_id, plan.hosts[0].profile_id);
-    assert_eq!(receipts[1].detail, "antigravity/focus-input");
+    assert_eq!(receipts[1].detail, "antigravity/archive-conversation");
     assert_eq!(observed.load(Ordering::Acquire), 2);
     let mut ctx = routing.lock().unwrap();
     ctx.update(Some("com.apple.finder"));
@@ -1016,7 +1016,7 @@ fn saved_state_migrates_antigravity_v160_top_six_and_mouse_joystick_to_session_a
         migrated_ag.actions[16],
         Some(ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
-            command: "scroll-up".into(),
+            command: "sidebar-scroll-up".into(),
         })
     );
     assert_eq!(
@@ -1030,7 +1030,7 @@ fn saved_state_migrates_antigravity_v160_top_six_and_mouse_joystick_to_session_a
         migrated_ag.actions[18],
         Some(ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
-            command: "scroll-down".into(),
+            command: "sidebar-scroll-down".into(),
         })
     );
     assert_eq!(
@@ -1095,6 +1095,141 @@ fn saved_state_migrates_antigravity_v160_top_six_and_mouse_joystick_to_session_a
         migrated_plan,
         Some("0.7.0-rc.16"),
     ));
+}
+
+#[test]
+fn saved_state_migrates_antigravity_slot7_archive_and_sidebar_scroll_joystick_preserving_custom() {
+    let mut draft = mi_model::draft::Draft::default();
+    mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
+    let ag_pid = draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, p)| p.name == "Antigravity")
+        .unwrap()
+        .0
+        .clone();
+    let desired = BoardLayerPlan::recommended(
+        draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == "Codex")
+            .unwrap()
+            .0
+            .clone(),
+        ag_pid.clone(),
+        draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == "DeepSeek Coder (DSH)")
+            .unwrap()
+            .0
+            .clone(),
+    );
+    let mut legacy_plan = mi_model::apply::AppliedSixLayerPlan::compile(
+        &desired,
+        &draft.document,
+        mi_model::host_router::BottomRowLayout::Split,
+        true,
+    )
+    .unwrap();
+    let ag_host = legacy_plan
+        .hosts
+        .iter_mut()
+        .find(|h| h.profile_id == ag_pid)
+        .unwrap();
+    ag_host.actions[7] = Some(ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".into(),
+        command: "focus-input".into(),
+    });
+    ag_host.actions[16] = Some(ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".into(),
+        command: "scroll-up".into(),
+    });
+    ag_host.actions[17] = Some(ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".into(),
+        command: "browser".into(),
+    });
+    ag_host.actions[18] = Some(ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".into(),
+        command: "scroll-down".into(),
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut saved = SavedSixLayerState {
+        version: 3,
+        legacy_native_paused_confirmation: None,
+        installation: Some(Installation {
+            status: InstallationStatus::Applied,
+            target: TargetKeyboard {
+                vendor_id: 0x303a,
+                product_id: 0x8298,
+                location_id: 1,
+                usb_parent: 1,
+                vendor_path: "synthetic".into(),
+            },
+            profile_index: 0,
+            backup: dir.path().join("backup"),
+            config: ConfigPatch {
+                path: dir.path().join("karabiner.json"),
+                original: vec![],
+                installed: vec![],
+                profile_name: "synthetic".into(),
+                original_device: None,
+                installed_device: serde_json::Value::Null,
+            },
+            plan: legacy_plan,
+        }),
+    };
+
+    assert!(saved.migrate_saved_encoder_defaults(&draft.document));
+    assert!(!saved.migrate_saved_encoder_defaults(&draft.document));
+
+    let migrated_ag = saved
+        .installation
+        .as_ref()
+        .unwrap()
+        .plan
+        .hosts
+        .iter()
+        .find(|h| h.profile_id == ag_pid)
+        .unwrap();
+    assert_eq!(
+        migrated_ag.actions[7],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "archive-conversation".into(),
+        })
+    );
+    assert_eq!(
+        migrated_ag.actions[16],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "sidebar-scroll-up".into(),
+        })
+    );
+    assert_eq!(
+        migrated_ag.actions[17],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "browser".into(),
+        })
+    );
+    assert_eq!(
+        migrated_ag.actions[18],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "sidebar-scroll-down".into(),
+        })
+    );
 }
 
 #[test]

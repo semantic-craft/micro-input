@@ -33,7 +33,8 @@ pub use executor::{
 };
 pub use instance_lock::DocumentInstanceLock;
 pub use managed_controls::{
-    CodexReasoningAction, ContainerIdentity, ModelPickerConfirmResult, SubagentOpenResult,
+    CodexReasoningAction, ContainerIdentity, ModelPickerConfirmResult, SidebarStepDirection,
+    SubagentOpenResult,
 };
 pub use native_ax::{observe_codex_live_window_signals, observe_codex_window_state};
 pub use passive_panel::{

@@ -167,6 +167,7 @@ impl DocumentStore {
                         "side-question" => "打开 Side Question",
                         "open-side-panel" => "打开右边栏",
                         "close-side-panel" => "关闭右边栏",
+                        "archive-conversation" => "归档当前会话",
                         "prev-conversation" => "上一会话（侧栏轮转）",
                         "next-conversation" => "下一会话（侧栏轮转）",
                         "voice-reply" | "toggle-voice-reply" => "切换语音回复",
@@ -174,8 +175,8 @@ impl DocumentStore {
                         "scroll-up" => "向上滚动对话", "scroll-down" => "向下滚动对话",
                         "scroll-up-fast" => "快速向上滚动", "scroll-down-fast" => "快速向下滚动",
                         "scroll-to-bottom" => "跳到底部并聚焦输入",
-                        "sidebar-scroll-up" => "在项目中向上滚动",
-                        "sidebar-scroll-down" => "在项目中向下滚动",
+                        "sidebar-scroll-up" => "侧栏上一会话",
+                        "sidebar-scroll-down" => "侧栏下一会话",
                         "prev-project" => "上一项目",
                         "next-project" => "下一项目",
                         "cycle-working-prev" => "上一个 Working 会话",
@@ -479,7 +480,7 @@ mod tests {
                     assert_eq!(by_id(&binding)["label"], format!("会话 {}", slot + 1));
                 }
                 assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
-                assert_eq!(by_id("AG07")["label"], "聚焦输入框");
+                assert_eq!(by_id("AG07")["label"], "归档当前会话");
                 assert_eq!(by_id("AG08")["label"], "打开内置浏览器");
                 assert_eq!(by_id("AG09")["label"], "打开 Side Question");
                 assert_eq!(by_id("AG10")["label"], "在项目中新建会话");
@@ -489,9 +490,9 @@ mod tests {
                 assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
                 assert_eq!(by_id("ENC_CLK")["label"], "搜索会话");
                 assert_eq!(state["encoder_hold_label"], "搜索会话");
-                assert_eq!(by_id("AG15")["label"], "向上滚动对话");
+                assert_eq!(by_id("AG15")["label"], "侧栏上一会话");
                 assert_eq!(by_id("AG16")["label"], "打开右边栏");
-                assert_eq!(by_id("AG17")["label"], "向下滚动对话");
+                assert_eq!(by_id("AG17")["label"], "侧栏下一会话");
                 assert_eq!(by_id("AG18")["label"], "关闭右边栏");
             } else {
                 assert_eq!(by_id("AG00")["label"], "选择 Subagent");

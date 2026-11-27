@@ -707,7 +707,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
             KnobJoystickPreset::DualScrollProjectsAndChat,
         ))
         .unwrap();
-    assert!(store.projection().canvas.encoder.ccw_label.contains("滚动"));
+    assert!(store.projection().canvas.encoder.ccw_label.contains("侧栏"));
 
     store
         .dispatch_session_strip_action(SessionStripAction::RestoreDefaultLayout)

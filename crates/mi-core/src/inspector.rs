@@ -649,7 +649,10 @@ impl CodexKeycapId {
             if a.id.contains("submit") {
                 return Self::Play;
             }
-            if a.id.contains("stop") {
+            if a.id.contains("stop")
+                || a.id.contains("archive")
+                || cmd == Some("archive-conversation")
+            {
                 return Self::Delete;
             }
             if a.id.contains("new") {

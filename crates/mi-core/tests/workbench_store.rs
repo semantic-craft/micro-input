@@ -3093,9 +3093,9 @@ fn coding_agent_top_six_defaults_migrate_cockpit_slots_and_preserve_explicit_ses
             );
         }
         for (binding, cmd) in [
-            ("AG15", "scroll-up"),
+            ("AG15", "sidebar-scroll-up"),
             ("AG16", "open-side-panel"),
-            ("AG17", "scroll-down"),
+            ("AG17", "sidebar-scroll-down"),
             ("AG18", "close-side-panel"),
         ] {
             assert_eq!(

@@ -359,6 +359,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                                     | "side-question"
                                     | "open-side-panel"
                                     | "close-side-panel"
+                                    | "archive-conversation"
                             ))))
                     || (adapter == "grokbot"
                         && matches!(
