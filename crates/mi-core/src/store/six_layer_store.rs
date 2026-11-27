@@ -1204,7 +1204,9 @@ mod tests {
         store
             .dispatch_session_strip_action(SessionStripAction::SetGlowOnWorking(true))
             .unwrap();
-        let _ = rpc_rx.try_recv();
+        let initial_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(initial_rpc["method"], "v.oai.thstatus");
+        wait_lighting_synced(&mut store, true);
         store.ingest_four_app_candidates(vec![
             FourAppLiveCandidate {
                 place: mi_model::navigation_history::NavigationPlace::antigravity(
@@ -1461,7 +1463,9 @@ mod tests {
         store
             .dispatch_session_strip_action(SessionStripAction::SetGlowOnWorking(true))
             .unwrap();
-        let _ = rpc_rx.try_recv();
+        let initial_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(initial_rpc["method"], "v.oai.thstatus");
+        wait_lighting_synced(&mut store, true);
         store.ingest_four_app_candidates(vec![
             FourAppLiveCandidate {
                 place: mi_model::navigation_history::NavigationPlace::antigravity(
@@ -1490,8 +1494,8 @@ mod tests {
                 status_detail: None,
             },
         ]);
-        let initial_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(initial_rpc["method"], "v.oai.thstatus");
+        let synced_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(synced_rpc["method"], "v.oai.thstatus");
         wait_lighting_synced(&mut store, true);
 
         let codex_pid = store

@@ -587,7 +587,7 @@ private struct SessionSlotExplanationSection: View {
     }
 }
 
-private struct KeycapGlyphGridSectionView: View, @MainActor Equatable {
+private struct KeycapGlyphGridSectionView: View, Equatable {
     let store: CoreStore
     let locale: ResolvedLocale
     let isVisible: Bool
@@ -595,7 +595,7 @@ private struct KeycapGlyphGridSectionView: View, @MainActor Equatable {
     let filteredKeycaps: [KeycapCatalogItemModel]
     let bindDefaultAction: Bool
 
-    static func == (lhs: KeycapGlyphGridSectionView, rhs: KeycapGlyphGridSectionView) -> Bool {
+    nonisolated static func == (lhs: KeycapGlyphGridSectionView, rhs: KeycapGlyphGridSectionView) -> Bool {
         if !lhs.isVisible && !rhs.isVisible {
             return lhs.locale == rhs.locale
         }
@@ -648,12 +648,12 @@ private struct KeycapGlyphGridSectionView: View, @MainActor Equatable {
     }
 }
 
-private struct KeycapGlyphCellButton: View, @MainActor Equatable {
+private struct KeycapGlyphCellButton: View, Equatable {
     let store: CoreStore
     let item: KeycapCatalogItemModel
     let bindDefaultAction: Bool
 
-    static func == (lhs: KeycapGlyphCellButton, rhs: KeycapGlyphCellButton) -> Bool {
+    nonisolated static func == (lhs: KeycapGlyphCellButton, rhs: KeycapGlyphCellButton) -> Bool {
         lhs.item == rhs.item && lhs.bindDefaultAction == rhs.bindDefaultAction
     }
 
@@ -690,7 +690,7 @@ private struct KeycapGlyphCellButton: View, @MainActor Equatable {
     }
 }
 
-private struct AgentActionCatalogSectionView: View, @MainActor Equatable {
+private struct AgentActionCatalogSectionView: View, Equatable {
     let store: CoreStore
     let locale: ResolvedLocale
     let isVisible: Bool
@@ -698,7 +698,7 @@ private struct AgentActionCatalogSectionView: View, @MainActor Equatable {
     let actionSearchQuery: String
     let filteredActions: [ActionRowModel]
 
-    static func == (lhs: AgentActionCatalogSectionView, rhs: AgentActionCatalogSectionView) -> Bool {
+    nonisolated static func == (lhs: AgentActionCatalogSectionView, rhs: AgentActionCatalogSectionView) -> Bool {
         if !lhs.isVisible && !rhs.isVisible {
             return lhs.locale == rhs.locale
         }
@@ -741,13 +741,13 @@ private struct AgentActionCatalogSectionView: View, @MainActor Equatable {
     }
 }
 
-private struct ActionCatalogRowButton: View, @MainActor Equatable {
+private struct ActionCatalogRowButton: View, Equatable {
     let store: CoreStore
     let locale: ResolvedLocale
     let act: ActionRowModel
     let isBound: Bool
 
-    static func == (lhs: ActionCatalogRowButton, rhs: ActionCatalogRowButton) -> Bool {
+    nonisolated static func == (lhs: ActionCatalogRowButton, rhs: ActionCatalogRowButton) -> Bool {
         lhs.locale == rhs.locale && lhs.act == rhs.act && lhs.isBound == rhs.isBound
     }
 

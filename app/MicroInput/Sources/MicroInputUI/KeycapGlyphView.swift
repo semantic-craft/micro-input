@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-public enum CodexKeycapId: String, CaseIterable, Identifiable {
+public enum CodexKeycapId: String, CaseIterable, Identifiable, Sendable {
     case blank = "blank"
     case fast = "fast"
     case approve = "approve"
@@ -119,15 +119,19 @@ public enum CodexKeycapId: String, CaseIterable, Identifiable {
     }
 }
 
-public struct CodexKeycapGlyphView: View, @MainActor Equatable {
+public struct CodexKeycapGlyphView: View, Equatable {
     public let keycap: CodexKeycapId
-    public var size: CGFloat = 22
-    public var color: Color = .white
+    public let size: CGFloat
+    public let color: Color
 
     public init(keycap: CodexKeycapId, size: CGFloat = 22, color: Color = .white) {
         self.keycap = keycap
         self.size = size
         self.color = color
+    }
+
+    nonisolated public static func == (lhs: CodexKeycapGlyphView, rhs: CodexKeycapGlyphView) -> Bool {
+        lhs.keycap == rhs.keycap && lhs.size == rhs.size && lhs.color == rhs.color
     }
 
     public var body: some View {

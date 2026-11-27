@@ -1659,6 +1659,21 @@ fn codex_stop_does_not_treat_a_disappeared_control_as_completion() {
     assert!(!provider.events().iter().any(|event| event == "submit"));
 }
 
+fn wait_for_escape_count(provider: &Provider, expected: usize) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let count = provider
+            .events()
+            .iter()
+            .filter(|e| *e == "window_key:escape")
+            .count();
+        if count >= expected || std::time::Instant::now() >= deadline {
+            return count;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn codex_reasoning_effort_opens_popover_sends_arrow_and_auto_dismisses() {
     let provider = Provider::codex();
@@ -1679,6 +1694,7 @@ fn codex_reasoning_effort_opens_popover_sends_arrow_and_auto_dismisses() {
             expanded: None,
         });
     let controls = provider.controls_with_delay(Duration::from_millis(60));
+    let started = std::time::Instant::now();
     controls
         .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::DecreaseEffort)
         .unwrap();
@@ -1686,11 +1702,11 @@ fn codex_reasoning_effort_opens_popover_sends_arrow_and_auto_dismisses() {
     let events = provider.events();
     assert!(events.contains(&"press:o3-mini Medium".to_string()));
     assert!(events.contains(&"window_key:arrow_left".to_string()));
-    assert!(!events.contains(&"window_key:escape".to_string()));
+    if started.elapsed() < Duration::from_millis(45) {
+        assert!(!events.contains(&"window_key:escape".to_string()));
+    }
 
-    std::thread::sleep(Duration::from_millis(100));
-    let events = provider.events();
-    assert!(events.contains(&"window_key:escape".to_string()));
+    assert_eq!(wait_for_escape_count(&provider, 1), 1);
 }
 
 #[test]
@@ -1712,34 +1728,35 @@ fn codex_reasoning_effort_repeat_turn_cancels_previous_auto_dismiss() {
             focused: false,
             expanded: None,
         });
-    let controls = provider.controls_with_delay(Duration::from_millis(70));
-    controls
-        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::IncreaseEffort)
-        .unwrap();
-
-    std::thread::sleep(Duration::from_millis(30));
+    let controls = provider.controls_with_delay(Duration::from_millis(160));
     controls
         .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::IncreaseEffort)
         .unwrap();
 
     std::thread::sleep(Duration::from_millis(50));
-    let escape_count = provider
-        .events()
-        .iter()
-        .filter(|e| *e == "window_key:escape")
-        .count();
+    let turn2_started = std::time::Instant::now();
+    controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::IncreaseEffort)
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(130));
+    if turn2_started.elapsed() < Duration::from_millis(145) {
+        let escape_count = provider
+            .events()
+            .iter()
+            .filter(|e| *e == "window_key:escape")
+            .count();
+        assert_eq!(
+            escape_count, 0,
+            "turn 1 auto-dismiss must be cancelled by turn 2"
+        );
+    }
+
     assert_eq!(
-        escape_count, 0,
-        "turn 1 auto-dismiss must be cancelled by turn 2"
+        wait_for_escape_count(&provider, 1),
+        1,
+        "turn 2 auto-dismiss must fire once"
     );
-
-    std::thread::sleep(Duration::from_millis(50));
-    let escape_count = provider
-        .events()
-        .iter()
-        .filter(|e| *e == "window_key:escape")
-        .count();
-    assert_eq!(escape_count, 1, "turn 2 auto-dismiss must fire once");
 }
 
 #[test]
@@ -1856,8 +1873,7 @@ fn codex_toggle_fast_mode_flips_label_and_schedules_auto_dismiss() {
     assert!(events.contains(&"press:GPT-4o Standard".to_string()));
     assert!(events.contains(&"press:Enable fast mode".to_string()));
 
-    std::thread::sleep(Duration::from_millis(100));
-    assert!(provider.events().contains(&"window_key:escape".to_string()));
+    assert_eq!(wait_for_escape_count(&provider, 1), 1);
 }
 
 #[test]

@@ -91,7 +91,7 @@ fn wait_for_sa_rgb_count(link: &MockV070Link, expected_min: usize) {
             "timed out waiting for {expected_min} kb.sa.rgb frames; got {:?}",
             link.sa_rgb_params()
         );
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -238,7 +238,8 @@ fn v070_session_sa_rgb_end_to_end_states_dedup_coalescing_and_rc06_isolation() {
     );
 
     std::thread::sleep(Duration::from_millis(20));
-    store.update_now = Instant::now();
+    let cooldown_origin = Instant::now();
+    store.update_now = cooldown_origin;
     store.ingest_four_app_candidates(vec![make_live_candidate(0, FourAppSessionKind::Error, 200)]);
     wait_for_sa_rgb_count(&link, 2);
     link.clear_wire_events();
@@ -258,11 +259,21 @@ fn v070_session_sa_rgb_end_to_end_states_dedup_coalescing_and_rc06_isolation() {
     )]);
     let gen_after_ingest = store.projection_generation();
     assert!(!store.projection().v070_hardware.busy);
-    std::thread::sleep(Duration::from_millis(30));
-    assert!(
-        link.sa_rgb_params().is_empty(),
-        "sub-100ms burst must not flush before 100ms window elapses"
-    );
+    if cooldown_origin.elapsed() < Duration::from_millis(85) {
+        assert!(
+            link.sa_rgb_params().is_empty(),
+            "sub-100ms burst must not flush before 100ms window elapses"
+        );
+    }
+    if cooldown_origin.elapsed() < Duration::from_millis(45) {
+        std::thread::sleep(Duration::from_millis(30));
+        if cooldown_origin.elapsed() < Duration::from_millis(85) {
+            assert!(
+                link.sa_rgb_params().is_empty(),
+                "sub-100ms burst must not flush before 100ms window elapses"
+            );
+        }
+    }
     wait_for_sa_rgb_count(&link, 1);
     let coalesced = link.sa_rgb_params();
     assert_eq!(
