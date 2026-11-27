@@ -38,6 +38,17 @@ pub(crate) fn select_adjacent_sidebar_conversation<'a>(
     }
 }
 
+pub(crate) fn select_post_archive_conversation<'a>(
+    before_cids: &'a [String],
+    archived_cid: &str,
+) -> Option<&'a str> {
+    let idx = before_cids.iter().position(|cid| cid == archived_cid)?;
+    before_cids
+        .get(idx + 1)
+        .or_else(|| idx.checked_sub(1).and_then(|prev| before_cids.get(prev)))
+        .map(String::as_str)
+}
+
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug, Default)]
 pub struct NativeAxProvider;
@@ -1645,6 +1656,33 @@ mod macos {
         )?;
         let (_, active_cid) = read_hub_active_cid(&obs);
         Ok(active_cid)
+    }
+
+    fn press_sidebar_conversation_link(
+        window: &Owned,
+        hub_web_area: Option<&Owned>,
+        observation: &WindowObservation,
+        node_idx: usize,
+        target_cid: &str,
+    ) -> Result<(), String> {
+        let link_node = &observation.nodes[node_idx];
+        if !link_node.data.enabled {
+            return Err(blocked("sidebar_conversations_unavailable"));
+        }
+        let _ = link_node.element.action("AXScrollToVisible");
+        link_node.element.action("AXPress")?;
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if let Ok(live_cid) = read_live_hub_cid(window, hub_web_area, deadline) {
+                if live_cid.as_deref() == Some(target_cid) {
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("unconfirmed:sidebar_conversation_step_readback".into());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     fn observe_sidebar_conversations(
@@ -4365,24 +4403,13 @@ mod macos {
             let Some((_, node_idx)) = links.iter().find(|(cid, _)| cid == next_cid) else {
                 return Err(blocked("sidebar_conversations_unavailable"));
             };
-            let link_node = &observation.nodes[*node_idx];
-            if !link_node.data.enabled {
-                return Err(blocked("sidebar_conversations_unavailable"));
-            }
-            let _ = link_node.element.action("AXScrollToVisible");
-            link_node.element.action("AXPress")?;
-            let deadline = Instant::now() + Duration::from_millis(500);
-            loop {
-                if let Ok(live_cid) = read_live_hub_cid(&window, hub_web_area.as_ref(), deadline) {
-                    if live_cid.as_deref() == Some(next_cid) {
-                        return Ok(());
-                    }
-                }
-                if Instant::now() >= deadline {
-                    return Err("unconfirmed:sidebar_conversation_step_readback".into());
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
+            press_sidebar_conversation_link(
+                &window,
+                hub_web_area.as_ref(),
+                &observation,
+                *node_idx,
+                next_cid,
+            )
         }
         fn archive_conversation(&mut self, target: &ManagedWindowIdentity) -> Result<(), String> {
             let (_, window) = self.validate(target)?;
@@ -4390,6 +4417,12 @@ mod macos {
             let (hub_web_area, Some(active_cid)) = read_hub_active_cid(&observation) else {
                 return Err(blocked("no_active_conversation"));
             };
+            let before_cids: Vec<String> = collect_ordered_sidebar_conversation_links(&observation)
+                .into_iter()
+                .map(|(cid, _)| cid)
+                .collect();
+            let follow_up_cid =
+                select_post_archive_conversation(&before_cids, &active_cid).map(str::to_owned);
             let archive_button_idx =
                 match find_sidebar_row_archive_action(&observation, &active_cid) {
                     SidebarArchiveLookup::Found { archive_button_idx } => archive_button_idx,
@@ -4408,10 +4441,10 @@ mod macos {
             let _ = button.element.action("AXScrollToVisible");
             button.element.action("AXPress")?;
             let deadline = Instant::now() + Duration::from_millis(700);
-            loop {
+            let (confirmed_observation, live_cid) = loop {
                 if let Ok(live_cid) = read_live_hub_cid(&window, hub_web_area.as_ref(), deadline) {
                     if live_cid.as_deref() != Some(active_cid.as_str()) {
-                        return Ok(());
+                        break (None, live_cid);
                     }
                 }
                 if let Ok(refreshed) =
@@ -4421,14 +4454,45 @@ mod macos {
                         .iter()
                         .all(|(cid, _)| cid != &active_cid)
                     {
-                        return Ok(());
+                        let (_, refreshed_live_cid) = read_hub_active_cid(&refreshed);
+                        break (Some(refreshed), refreshed_live_cid);
                     }
                 }
                 if Instant::now() >= deadline {
                     return Err("unconfirmed:archive_conversation_readback".into());
                 }
                 std::thread::sleep(Duration::from_millis(25));
+            };
+            let Some(next_cid) = follow_up_cid else {
+                return Ok(());
+            };
+            if live_cid.as_deref() == Some(next_cid.as_str()) {
+                return Ok(());
             }
+            let post_obs = match confirmed_observation {
+                Some(obs) => obs,
+                None => observe_window_until(
+                    window.clone(),
+                    ObservationPurpose::Sessions,
+                    Instant::now() + Duration::from_millis(500),
+                )?,
+            };
+            let remaining_links = collect_ordered_sidebar_conversation_links(&post_obs);
+            let Some((target_cid, target_idx)) = remaining_links
+                .iter()
+                .find(|(cid, _)| cid == &next_cid)
+                .or_else(|| remaining_links.iter().find(|(cid, _)| cid != &active_cid))
+            else {
+                return Ok(());
+            };
+            let (post_hub_web_area, _) = read_hub_active_cid(&post_obs);
+            press_sidebar_conversation_link(
+                &window,
+                post_hub_web_area.as_ref().or(hub_web_area.as_ref()),
+                &post_obs,
+                *target_idx,
+                target_cid,
+            )
         }
         fn send_window_key(
             &mut self,
@@ -8727,6 +8791,17 @@ mod macos {
                 ),
                 Some("c1")
             );
+        }
+
+        #[test]
+        fn select_post_archive_conversation_picks_next_then_previous_then_none() {
+            let cids: Vec<String> = ["c1", "c2", "c3"].into_iter().map(str::to_string).collect();
+            assert_eq!(select_post_archive_conversation(&cids, "c2"), Some("c3"));
+            assert_eq!(select_post_archive_conversation(&cids, "c1"), Some("c2"));
+            assert_eq!(select_post_archive_conversation(&cids, "c3"), Some("c2"));
+            let single = vec!["c1".to_string()];
+            assert_eq!(select_post_archive_conversation(&single, "c1"), None);
+            assert_eq!(select_post_archive_conversation(&cids, "missing"), None);
         }
 
         #[test]
