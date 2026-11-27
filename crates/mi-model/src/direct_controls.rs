@@ -1,5 +1,3 @@
-//! Firmware 0.6.3 keyboard usages, checked against Karabiner 16.3.0.
-//! Firmware SHA-256: 1d8bd545b9047182d7112dd86b14f6c636bad3834725ee0a6eca7cacee0ec6a7.
 #[derive(Clone, Copy, Debug)]
 pub struct DirectControl {
     pub id: u8,

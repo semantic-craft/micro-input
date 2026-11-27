@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Canonical macOS installer for /Applications/Micro Input.app with Developer ID and TCC continuity gates."""
 from __future__ import annotations
 
 import argparse
@@ -31,7 +30,7 @@ SleepFn = Callable[[float], None]
 
 
 class InstallerError(RuntimeError):
-    """Raised when bundle validation, signature checks, or atomic install fail."""
+    pass
 
 
 @dataclass
@@ -396,7 +395,11 @@ def install_app(
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog='scripts/install-app', description=__doc__, allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        prog='scripts/install-app',
+        description='Canonical macOS installer for /Applications/Micro Input.app with Developer ID and TCC continuity gates.',
+        allow_abbrev=False,
+    )
     parser.add_argument('source', nargs='?', type=Path, help='Path to source .app bundle')
     parser.add_argument('--zip', dest='zip_path', type=Path, help='Path to notarized release .zip archive')
     parser.add_argument('--dest', type=Path, default=DEFAULT_DEST_APP, help='Destination .app path')

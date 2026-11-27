@@ -1,4 +1,3 @@
-//! Local board intent. This does not describe an installed device configuration.
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]

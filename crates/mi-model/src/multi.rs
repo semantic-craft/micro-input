@@ -1,4 +1,3 @@
-//! Local four-branch intent. This format, term and references never become a device payload.
 use crate::{
     document::{new_id, Graph, LocalDocumentV2},
     draft::{Action, ActionKind, Draft},

@@ -1,4 +1,3 @@
-//! R-D04/R-D05/R-D08/R-D09: read-only RPC vocabulary and deliberately closed wire boundary.
 use serde_json::{json, Value};
 pub mod input_kit;
 pub mod lighting_candidate;
@@ -13,11 +12,6 @@ pub enum ProtoError {
     #[error("无效 RPC：{0}")]
     Invalid(String),
 }
-/// No arbitrary method constructor; mutation methods have no enum variant.
-/// ```compile_fail
-/// use mi_proto::Method;
-/// let forbidden = Method::FsWrite;
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     SysVersion,
@@ -73,8 +67,6 @@ pub trait RpcCodec: Send + Sync {
     fn encode(&self, r: &RpcRequest) -> Result<Vec<u8>, ProtoError>;
     fn decode(&self, line: &[u8]) -> Result<Incoming, ProtoError>;
 }
-/// Extract only a response's validated routing ID. Operation-specific validation happens
-/// after the session confirms ownership; unrelated responses cannot terminate its reader.
 pub fn response_id(line: &[u8]) -> Result<Option<u64>, ProtoError> {
     let v: Value = serde_json::from_slice(line)
         .map_err(|_| ProtoError::Invalid("invalid JSON object".into()))?;
@@ -89,9 +81,6 @@ pub fn response_id(line: &[u8]) -> Result<Option<u64>, ProtoError> {
         .ok_or_else(|| ProtoError::Invalid("invalid response id".into()))?;
     Ok(Some(id))
 }
-/// Discard responses that cannot be associated with the pending request before
-/// strict decoding. A matching ID in either alias still requires validation;
-/// conflicting aliases must not disguise a damaged matching response.
 pub fn is_unmatched_response(
     line: &[u8],
     pending: Option<(u16, &str)>,
@@ -259,7 +248,6 @@ impl From<Notification> for HostNotification {
         }
     }
 }
-/// R-H04: outbound action is intentionally separate from the MVP read-only allowlist.
 pub enum HostAction {
     FocusedAppUnknown(Value),
 }

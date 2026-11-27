@@ -911,7 +911,7 @@ public struct AgentBadge: View {
     }
 }
 
-public enum AgentProfileKind: String {
+public enum AgentProfileKind: String, Sendable {
     case codex = "Codex"
     case antigravity = "Antigravity"
     case dsh = "DeepSeek Coder (DSH)"

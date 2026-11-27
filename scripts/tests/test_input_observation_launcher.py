@@ -1,4 +1,3 @@
-"""Run the real launcher with only process/signal boundaries replaced; never USB."""
 import contextlib
 import io
 import os

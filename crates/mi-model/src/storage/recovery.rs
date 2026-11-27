@@ -1,4 +1,3 @@
-//! Local document recovery only; no device/session/host execution dependencies.
 use super::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -20,7 +19,6 @@ pub(super) struct InspectedRecovery {
     draft: Option<Draft>,
 }
 impl DocumentStore {
-    /// Discover only owned document and recovery file names. Other app data is not a backup.
     pub fn recovery_files(&self) -> Result<Vec<String>, String> {
         let (selection, _) = self.selection.as_ref().ok_or("请先打开工作台")?;
         let parent = selection.parent().ok_or("无效文档目录")?;
@@ -46,7 +44,6 @@ impl DocumentStore {
         paths.sort();
         Ok(paths)
     }
-    /// Pin exact bytes to this preview; confirmation must not consume a changed source.
     pub fn inspect_recovery(&mut self, path: PathBuf) -> Result<RecoveryPreview, String> {
         self.recovery_preview = None;
         let bytes = read(&path)?.ok_or("恢复来源不存在；原件保留")?;
@@ -121,7 +118,6 @@ impl DocumentStore {
         document.document_id = crate::document::new_id();
         self.select_copy(Draft::from_document(document, 2, false)?, false)
     }
-    /// Never replace an existing destination, including the original or an interrupted file.
     pub fn copy_recovery_original(&self, token: &str, destination: PathBuf) -> Result<(), String> {
         let item = self.checked_recovery(token)?;
         let mut file = OpenOptions::new()

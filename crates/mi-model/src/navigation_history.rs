@@ -1,10 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// Maximum number of entries retained in the keypad cross-agent navigation stack,
-/// matching `paseo-creator-micro` (`MAX_HISTORY = 50`).
 pub const MAX_HISTORY: usize = 50;
 
-/// A target place opened or focused via the keypad across desktop agents, apps, and sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NavigationPlace {
@@ -100,15 +97,6 @@ impl NavigationPlace {
     }
 }
 
-/// Browser-like back/forward history stack for targets opened from the keypad.
-///
-/// Semantics match `paseo-creator-micro/Plugin/server/history.ts`:
-/// - `visit` appends a newly opened target, truncating any forward branch when stepping
-///   off a historical position.
-/// - Re-visiting the current target is a no-op and preserves the forward stack.
-/// - `back` and `forward` move the cursor without recording a new visit, skipping
-///   targets that are currently unavailable.
-/// - Retains at most [`MAX_HISTORY`] (50) entries, evicting the oldest entries first.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NavigationHistory {
     entries: Vec<NavigationPlace>,

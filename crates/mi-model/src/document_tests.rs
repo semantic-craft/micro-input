@@ -1,4 +1,3 @@
-//! R-E07/R-E08/R-K05 regression checks against data loss and wrong-target edits.
 use crate::{draft::*, storage::DocumentStore};
 use serde_json::json;
 use std::{

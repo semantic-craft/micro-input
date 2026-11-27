@@ -1,4 +1,3 @@
-//! Compile reviewed configuration changes without transport or device side effects.
 use crate::{comparison, document::LocalDocumentV2, draft::ActionKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, value::RawValue, Value};
@@ -503,8 +502,6 @@ impl Pending {
     }
 }
 
-/// Frozen candidate issued only after the private backup has been verified.
-/// It carries no transport authority. Production execution is not implemented.
 #[derive(Clone)]
 pub struct PreparedCandidate {
     pub(crate) operation_id: String,

@@ -1,4 +1,3 @@
-//! R-C03/R-C05/R-N03: owned display projection retaining raw values; exact device bytes remain in the session.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -579,12 +578,10 @@ pub fn is_supported_native_firmware(version: &str) -> bool {
     }
 }
 
-/// Returns `true` when `version` is valid for reading/planning device configs (native or synthetic).
 pub fn is_supported_config_firmware(version: &str) -> bool {
     is_supported_native_firmware(version) || version == "synthetic-0.6.3"
 }
 
-/// Returns `true` when `version` is allowed to enter the USB bootloader (`0.6.3` or strict semver `>= 0.7.0-0`).
 pub fn is_supported_bootloader_firmware(version: &str) -> bool {
     if version == "0.6.3" {
         return true;
@@ -595,12 +592,10 @@ pub fn is_supported_bootloader_firmware(version: &str) -> bool {
     (v.major == 0 && v.minor >= 7) || v.major >= 1
 }
 
-/// Returns `true` when `version` supports `0.7.0-rc.16+` hardware capabilities (`mouse.config`, `joystick.deadzone`, `kb.pl.set`, `pm.config`, `pm.state`, `device.name`, `kb.sa.rgb`).
 pub fn supports_v070_hardware_capabilities(version: &str) -> bool {
     supports_v070_mouse_tokens(version)
 }
 
-/// Returns `true` when `version` supports `0.7.0-rc.16` `MS_*` hardware tokens and `MOUSE`/`SCROLL` joystick modes.
 pub fn supports_v070_mouse_tokens(version: &str) -> bool {
     let Some(v) = parse_strict_semver(version) else {
         return false;

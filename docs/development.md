@@ -8,12 +8,12 @@ Micro Input 采用「纯 Rust 内核 + 极简 C-ABI 边界 + 原生 macOS 14+ Sw
 - 持续交付范围与工单接续规则见[持续交付入口](autonomous-delivery.md)与 [#44](https://github.com/semantic-craft/micro-input/issues/44)。
 - 模块职责、C-ABI 投影边界、本地文档与恢复契约见[模块契约](module-contracts.md)。
 - Input 1.1.0 静态证据索引与接入约束见[研究成果接入规则](agents/research-context.md)和[只读协议说明](protocol-readonly.md)。
-- 完整阶段验收清单与未知项边界见 [SPEC](spec/SPEC.md)、[BUILD_PROMPT](spec/BUILD_PROMPT.md)、[EVIDENCE](spec/EVIDENCE.md) 与 [UNKNOWNS](spec/UNKNOWNS.md)。
+- 完整产品规格与未知项边界见 [SPEC](spec/SPEC.md) 与 [UNKNOWNS](spec/UNKNOWNS.md)。
 
 ## 构建与离线验证
 
 - `scripts/verify-offline` 执行全部静态门禁、Rust/Swift 单元测试、开发包构建以及六个隔离合成 QA 场景（`host-execution`、`dsh-navigation`、`antigravity-status`、`config-write`、`lighting-control`、`diagnostic-export`），自动核对 `launcher.json` 与清理结果后保留原构建包，不连接真实硬件或启动生产应用。附加 `--qa-only` 跳过单元门禁，仍执行构建和场景复验。
-- `scripts/check` 运行 Python 启动器单测、`cargo fmt --all -- --check`、`cargo test --locked --workspace --all-features`、`scripts/build`、`swift test --package-path app/MicroInput` 与 `scripts/check-boundaries.py`（含 `UNKNOWN-*` 清单对齐、生产只读边界、`R-C01`–`R-C15` 静态门禁及全部已跟踪 Markdown 断链检查）。
+- `scripts/check` 运行 Python 启动器单测、`cargo fmt --all -- --check`、`cargo test --locked --workspace --all-features`、`scripts/build`、`swift test --package-path app/MicroInput` 与 `scripts/check-boundaries.py`（含 `UNKNOWN-*` 清单对齐、生产只读边界、`R-C01`–`R-C16` 静态门禁及全部已跟踪 Markdown 断链检查）。
 - `scripts/build` 编译 `mi-model`、`mi-ffi` 静态库与 SwiftUI 可执行文件，调用 `scripts/generate-app-icon.swift` 与 `scripts/verify-app-icon.swift` 生成并校验 `AppIcon.icns`，打包并签名 `target/MicroInput.app`，随后注销临时包的 LaunchServices 登记（支持 `--release`）。
 - `scripts/install-app` 作为安装 `/Applications/Micro Input.app` 的唯一入口，接收 `.app` 目录或 `--zip <release-archive.zip>`，默认强制校验 `CFBundleIdentifier`、`codesign --verify --deep --strict`、`Developer ID Application:` 签名与 `spctl --assess --type execute`（安装开发/ad-hoc 包须显式传 `--allow-dev`）；同时比对现有包与来包的 `codesign -d -r -`（Designated Requirement），仅当签名要求变化时执行 `tccutil reset Accessibility craft.semantic.micro-input.dev`（除非 `--skip-tcc-reset` / `--dry-run`），避免系统设置保留旧签名假开启开关。
 - `scripts/release-macos` 构建、Developer ID 签名、公证、staple 并生成 Sparkle `appcast.xml` 与 `SHA256SUMS`（公证凭据依次读取 `MI_NOTARY_PROFILE`、`NOTARY_PROFILE` 或 `macos-notary-profile`；传 `--install` 在打包后调用 `scripts/install-app` 安装到 `/Applications/Micro Input.app`，传 `--publish` 发布到 GitHub Releases）。

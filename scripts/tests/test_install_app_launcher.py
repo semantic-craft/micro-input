@@ -1,4 +1,3 @@
-"""Deterministic unit tests for scripts/install-app Developer ID and TCC continuity gates."""
 from __future__ import annotations
 
 import importlib.machinery

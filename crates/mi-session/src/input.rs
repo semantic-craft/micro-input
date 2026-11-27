@@ -1,4 +1,3 @@
-//! Community input candidates are diagnostic only (UNKNOWN-07/10). Raw payloads never leave this module.
 use crate::DeviceSession;
 use mi_proto::HostNotification;
 use std::{
@@ -35,19 +34,14 @@ pub struct RadialPosition {
 #[derive(Debug, Clone)]
 pub struct InputEvent {
     pub session_id: u64,
-    /// Local subscription order, including skipped items; not a firmware sequence.
     pub sequence: u64,
     pub ingress_sequence: u64,
-    /// One-based layer identified by the managed keymap token, when present.
     pub board_layer: Option<u8>,
-    /// Physical radial state, including notifications that do not create an action edge.
     pub radial_center: Option<bool>,
     pub radial_position: Option<RadialPosition>,
-    /// Local receipt time, not a device timestamp.
     pub timestamp_ms: u64,
     pub kind: InputEventKind,
     pub logical_switch: Option<String>,
-    /// Community vendor binding name; never an immutable physical scan position.
     pub binding_id: Option<String>,
     pub physical_control: Option<String>,
     pub keycap_group: Option<String>,
@@ -55,9 +49,6 @@ pub struct InputEvent {
     pub lost_count: u64,
     pub action_eligible: bool,
 }
-/// An evidence-backed decoder may supply logical switches. Physical control, keycap coverage
-/// and action role must be mapped separately after physical verification (UNKNOWN-10).
-/// This seam is not an outbound request or a firmware schema.
 pub trait InputDecoder: Send + Sync {
     fn decode(&self, notification: &HostNotification) -> Option<(InputEventKind, String)>;
 }
@@ -231,8 +222,6 @@ fn is_radial_notification(notification: &HostNotification) -> bool {
     candidate_alias(raw, "method", "m").and_then(|v| v.as_str()) == Some("v.oai.rad")
 }
 
-/// Dispatch's public 0.6.2 observation, not current-device or physical-mapping evidence.
-/// This accepts only the AG00–AG18 variant; historical ACT/ENC/act=2 remain unknown.
 pub struct CandidateInputDecoder;
 impl InputDecoder for CandidateInputDecoder {
     fn decode(&self, notification: &HostNotification) -> Option<(InputEventKind, String)> {
@@ -246,8 +235,6 @@ impl InputDecoder for CandidateInputDecoder {
     }
 }
 
-/// Verified host routing decoder for AG00–AG18 and stock 0.6.3 Codex layer (ACT06–12, ENC_*, v.oai.rad)
-/// with 2U wide-key coalescing and radial edge-triggering in InputMonitor.
 pub struct VerifiedInputDecoder;
 impl InputDecoder for VerifiedInputDecoder {
     fn decode(&self, notification: &HostNotification) -> Option<(InputEventKind, String)> {
@@ -400,8 +387,6 @@ impl InputMonitor {
         self.presses = std::array::from_fn(|_| PressState::default());
         self.active_radial_sector = None;
     }
-    /// Overflow is terminal for this subscription. Recovery creates a new subscription and
-    /// empty state; no old buffered notification can resume delivery after a gap.
     pub async fn next(&mut self) -> Option<InputEvent> {
         loop {
             if self.stopped || self.session.invalid.load(Ordering::SeqCst) {

@@ -161,12 +161,12 @@ struct CreatorMicroStageView: View {
     }
 }
 
-struct CreatorMicroBoardView: View, @MainActor Equatable {
+struct CreatorMicroBoardView: View, Equatable {
     let store: CoreStore
     let agentKind: AgentProfileKind
     @AppStorage("mi.jumpDirectlyOnGlowingSlotTap") private var jumpDirectlyOnGlowingSlotTap = true
 
-    static func == (lhs: CreatorMicroBoardView, rhs: CreatorMicroBoardView) -> Bool {
+    nonisolated static func == (lhs: CreatorMicroBoardView, rhs: CreatorMicroBoardView) -> Bool {
         lhs.store === rhs.store && lhs.agentKind == rhs.agentKind
     }
 
@@ -651,7 +651,7 @@ struct SimpleLightingControlCard: View {
     }
 }
 
-private struct BoardKeycapCellButton: View, @MainActor Equatable {
+private struct BoardKeycapCellButton: View, Equatable {
     let store: CoreStore
     let slot: Int
     let width: CGFloat
@@ -666,7 +666,7 @@ private struct BoardKeycapCellButton: View, @MainActor Equatable {
     let jumpDirectlyOnGlowingSlotTap: Bool
     let locale: ResolvedLocale
 
-    static func == (lhs: BoardKeycapCellButton, rhs: BoardKeycapCellButton) -> Bool {
+    nonisolated static func == (lhs: BoardKeycapCellButton, rhs: BoardKeycapCellButton) -> Bool {
         lhs.slot == rhs.slot
             && lhs.width == rhs.width
             && lhs.cellSize == rhs.cellSize

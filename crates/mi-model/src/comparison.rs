@@ -42,7 +42,6 @@ pub struct Comparison {
     #[serde(skip)]
     merged: EditableState,
 }
-/// New baselines carry their projection; old T06 documents retain it in immutable origin.
 pub fn base_config(doc: &LocalDocumentV2) -> Result<DeviceConfig, String> {
     serde_json::from_value(
         doc.baseline
@@ -530,8 +529,6 @@ impl Comparison {
             merged,
         })
     }
-    /// Explicit user resolution for a transient interface change, scoped to this exact snapshot.
-    /// This does not upgrade observed identity or make automatic merge eligible.
     pub fn confirm_identity(
         &mut self,
         local: &LocalDocumentV2,

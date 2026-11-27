@@ -1,4 +1,3 @@
-//! Evidence-based fs.list/readbin adapter; only two exact paths are representable.
 use super::*;
 use base64::Engine;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

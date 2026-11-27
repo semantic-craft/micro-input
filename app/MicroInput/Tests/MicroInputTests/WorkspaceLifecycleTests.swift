@@ -52,7 +52,11 @@ final class WorkspaceLifecycleTests: XCTestCase {
         let center = CapturingNotificationCenter()
         var events: [WorkspaceLifecycle.Event] = []
         var lifecycle: WorkspaceLifecycle? = WorkspaceLifecycle(center: center) { events.append($0) }
+        #if swift(>=6.2)
         weak let weakLifecycle = lifecycle
+        #else
+        weak var weakLifecycle = lifecycle
+        #endif
         let callbacks = center.callbacks
         lifecycle?.stop()
         callbacks.forEach { $0(Notification(name: NSWorkspace.willSleepNotification)) }
@@ -65,7 +69,11 @@ final class WorkspaceLifecycleTests: XCTestCase {
         XCTAssertTrue(events.isEmpty)
 
         var another: WorkspaceLifecycle? = WorkspaceLifecycle(center: center) { events.append($0) }
+        #if swift(>=6.2)
         weak let weakAnother = another
+        #else
+        weak var weakAnother = another
+        #endif
         another = nil
         XCTAssertNil(weakAnother)
         XCTAssertEqual(center.removedCount, 4)

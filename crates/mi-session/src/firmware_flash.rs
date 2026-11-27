@@ -355,7 +355,6 @@ impl ConfirmedFlashAuthorization {
     }
 }
 
-/// Success verifies flash bytes, not the restarted firmware or preserved device configuration.
 pub fn flash(
     authorization: &ConfirmedFlashAuthorization,
     firmware: &DownloadedFirmware,

@@ -1,4 +1,3 @@
-//! Private H0/H1 executor. Never linked into the application or FFI.
 use super::{temp_name, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use mi_proto::{Framer, Incoming, JsonCodec, NativeFramer, RpcCodec};

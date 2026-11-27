@@ -144,7 +144,6 @@ fn valid_identifiers(value: &str, numeric_rule: bool) -> bool {
     })
 }
 
-/// Compares current against candidate; Less means an upgrade is available.
 pub fn compare_versions(current: &str, candidate: &str) -> Result<Ordering, String> {
     Ok(Version::parse(current)?.compare(&Version::parse(candidate)?))
 }
@@ -343,7 +342,6 @@ where
     ))
 }
 
-/// Blocking network operation; invoke on a worker thread, never on the UI thread.
 pub fn fetch_release(channel: FirmwareChannel) -> Result<FirmwareRelease, String> {
     if channel == FirmwareChannel::Stable {
         return parse_stable_release(&request(&format!("{API}/latest"), None)?);
@@ -385,8 +383,6 @@ pub fn verify_release_bytes(release: &FirmwareRelease, bytes: &[u8]) -> Result<S
     Ok(digest)
 }
 
-/// Saves a new file only after size and published digest validation. Missing upstream
-/// digests remain explicitly unverified; a local hash is not an authenticity proof.
 pub fn download_release(
     release: &FirmwareRelease,
     destination: &Path,

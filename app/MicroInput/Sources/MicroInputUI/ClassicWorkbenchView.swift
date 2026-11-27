@@ -412,13 +412,13 @@ private struct WorkbenchFooterBarView: View {
     }
 }
 
-private struct SidebarProfileRowButton: View, @MainActor Equatable {
+private struct SidebarProfileRowButton: View, Equatable {
     let store: CoreStore
     let row: SidebarRowModel
     let locale: ResolvedLocale
     var onBrowse: () -> Void
 
-    static func == (lhs: SidebarProfileRowButton, rhs: SidebarProfileRowButton) -> Bool {
+    nonisolated static func == (lhs: SidebarProfileRowButton, rhs: SidebarProfileRowButton) -> Bool {
         lhs.row == rhs.row && lhs.locale == rhs.locale
     }
 

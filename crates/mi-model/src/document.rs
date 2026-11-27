@@ -1,4 +1,3 @@
-//! R-E09: local identities and editable ownership graph; never a device payload.
 use crate::{
     draft::{binding_key, Action, LegacyDocumentV1},
     *,

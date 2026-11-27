@@ -1,4 +1,3 @@
-//! Workbench-owned host preferences. One atomic save per routing transition.
 use super::DocumentStore;
 use serde::Deserialize;
 use serde_json::{json, Value};

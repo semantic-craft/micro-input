@@ -1,4 +1,3 @@
-//! Durable offline operation evidence. No transport or automatic recovery.
 use crate::{
     apply::{Prepared, PreparedCandidate},
     document::LocalDocumentV2,
@@ -248,7 +247,6 @@ fn validate_plan(p: &PreparedCandidate) -> Result<(), String> {
     }
     Ok(())
 }
-/// One directory is the durable consumption marker. Reopening it never sends anything.
 pub struct OperationRecord {
     path: PathBuf,
     status: Status,
@@ -440,7 +438,6 @@ impl OperationRecord {
         self.status.error_category = Some(category);
         self.advance(phase, self.status.confirmed_chunks)
     }
-    /// Never opens a device. A process restart requires persisted verification evidence.
     pub fn retry_local_save(&mut self) -> Result<(), String> {
         let result = self.repair_local();
         if result.is_err() && self.status.device_verified && !self.status.local_saved {
@@ -513,7 +510,6 @@ impl OperationRecord {
     pub fn prepare_restore(&self, current: Value) -> Result<PreparedCandidate, String> {
         PreparedCandidate::restore(self, current)
     }
-    /// Explicit readback classification is read-only; it does not restart an operation.
     pub fn classify(&self, current: &Value) -> Result<&'static str, String> {
         let p = self.plan()?;
         same_device(&p.baseline, current)?;
@@ -565,7 +561,6 @@ fn checked_file(v: &Value, key: &str) -> Result<Option<Vec<u8>>, String> {
     }
     Ok(Some(b))
 }
-/// A failed/corrupt record cannot silently unlock an affected document.
 pub fn ensure_document_editable(path: &Path) -> Result<(), String> {
     ensure_available(path, None)
 }

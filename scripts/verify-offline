@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""Offline gates + isolated app scenarios, with automatic evidence validation and cleanup.
-No hardware probe or production app is launched. --qa-only skips unit gates, not builds.
-"""
 import argparse
 import json
 import os
@@ -263,7 +260,12 @@ def alive(pid):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Offline gates + isolated app scenarios, with automatic evidence validation and cleanup. "
+            "No hardware probe or production app is launched. --qa-only skips unit gates, not builds."
+        )
+    )
     parser.add_argument("--qa-only", action="store_true")
     args = parser.parse_args()
     env = dict(os.environ, MI_AUTO_HOST_READY="0")

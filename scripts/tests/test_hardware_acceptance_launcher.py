@@ -1,4 +1,3 @@
-"""Preparation must never turn imported bytes or a dry run into hardware acceptance."""
 import contextlib
 import importlib.machinery
 import importlib.util

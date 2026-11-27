@@ -120,7 +120,7 @@ SDK 区分有 ID 的回应与无 ID 的 method 通知，并兼容部分紧凑字
 - 该来源布局将 AG00–12 分配给 13 个矩阵开关，将 AG10/11 作为同一宽键帽的两个开关，将 AG13/14 分配给旋钮两方向、AG15–18 分配给摇杆四个 cardinal sectors。这些只是该布局的候选对应，本项目保留每条绑定按/放，不合并 AG10/11、不计算 detent、不生成方向或动作角色；旋钮按压没有已证明的 AG ID，AG19 继续 unknown。
 - [cm2-probe 的历史基线](https://github.com/panghy/cm2-probe/blob/1cb03f970bc86061be903fdd49f534e3fdaf0862/README.md#vendor-key-events-codex-layer)是固件 0.6.0 / Input 0.18.0-rc.8，包含 ACT/ENC 名称与旋转 `act=2`；不与本候选合并。`kb.radial`、`v.oai.rad` 连续摇杆和 `kb.sa.*` 执行语义通知均不投影为本候选按键事件。
 
-Rust→UniFFI→Swift 仅公开 candidate kind、`binding_id`、本地会话/序号/时间和候选来源状态；`logical_switch`、物理控件、键帽组和动作角色为空，`action_eligible=false`。本地序号不是固件序号，接收时间不是设备时间。unknown 不公开原始字段。流溢出终止订阅，断连与旧会话回调保护继续生效；重建订阅不补猜旧释放。
+Rust 核心仅公开 candidate kind、`binding_id`、本地会话/序号/时间和候选来源状态；`logical_switch`、物理控件、键帽组和动作角色为空，`action_eligible=false`。本地序号不是固件序号，接收时间不是设备时间。unknown 不公开原始字段。流溢出终止订阅，断连与旧会话回调保护继续生效；重建订阅不补猜旧释放。
 
 进一步解锁仍须独立核实当前活动配置与绑定是否唯一、逐实体按住/释放、宽键两开关、旋钮方向与 detent、摇杆回中，以及丢包/重连和其他消费者副作用；不能为取得事件自动 provision、切 Profile/Layer 或写设备。E-089 仅记录候选实现与合成验证，#14 / UNKNOWN-06/07/10/12/17 的实机缺口保持开放。
 

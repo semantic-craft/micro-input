@@ -1,8 +1,3 @@
-//! Typed InputKit local WebSocket JSON-RPC 2.0 protocol contract and boundary validators.
-//!
-//! Aligned with `worklouder/input-kit` v0.3.0 (Apache-2.0) and reusing `SaRgbEffect` / `SaRgbUpdate`
-//! as the single source of truth for per-Smart-Action lighting semantics.
-
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
 

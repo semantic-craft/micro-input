@@ -1,4 +1,3 @@
-//! R-E07/R-E08/R-K05: versioned local intents; never firmware payloads.
 use crate::DeviceConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -311,8 +310,6 @@ pub const FIRMWARE_V063_TOKENS: [&str; 304] = [
     "KV_OAI_ENC_CW",
 ];
 
-/// Non-OAI firmware v0.6.3 tokens (260 entries) plus legacy aliases ("KC_ENTER", "KC_SPACE")
-/// and firmware 0.7.0-rc.16+ MS_* mouse tokens (19 entries).
 pub const DEVICE_KEY_TOKENS: [&str; 281] = [
     "ENC_CC",
     "ENC_CLK",
@@ -882,8 +879,6 @@ pub fn actions() -> Vec<Action> {
         .clone()
 }
 
-/// Document-scoped identity: source IDs, not array offsets or display names.
-/// Logical positions remain schematic until UNKNOWN-10 is resolved.
 pub fn binding_key(profile: &Value, layer: &Value, slot: u32) -> String {
     serde_json::to_string(&(profile, layer, format!("logical-{slot}"))).unwrap()
 }
@@ -1052,7 +1047,6 @@ impl LegacyDocumentV1 {
     }
 }
 
-/// Runtime projection plus one authoritative v2 document. History is session-local.
 #[derive(Clone, Serialize)]
 pub struct Draft {
     pub config: DeviceConfig,

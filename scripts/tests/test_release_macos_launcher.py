@@ -1,4 +1,3 @@
-"""Unit tests for scripts/release-macos metadata validation, Mach-O path hygiene, and appcast checks."""
 from __future__ import annotations
 
 import importlib.machinery

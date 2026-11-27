@@ -1,6 +1,6 @@
 import Foundation
 
-public struct SidebarRowModel: Identifiable, Equatable {
+public struct SidebarRowModel: Identifiable, Equatable, Sendable {
     public var id: String { profileId }
     public let profileId: String
     public let rawName: String
@@ -95,7 +95,7 @@ public struct JoystickSectorModel: Identifiable, Equatable {
     public let isSelected: Bool
 }
 
-public struct SessionSlotModel: Identifiable, Equatable {
+public struct SessionSlotModel: Identifiable, Equatable, Sendable {
     public var id: Int { slotIndex }
     public let slotIndex: Int
     public let keyBindingId: String
@@ -159,7 +159,7 @@ public struct SimpleLightingModel: Equatable {
     public var suspendedByProtectedLayer: Bool = false
 }
 
-public struct KeycapCatalogItemModel: Identifiable, Equatable {
+public struct KeycapCatalogItemModel: Identifiable, Equatable, Sendable {
     public var id: String { keycapId }
     public let keycapId: String
     public let silkCode: String
@@ -170,7 +170,7 @@ public struct KeycapCatalogItemModel: Identifiable, Equatable {
     public let isSelected: Bool
 }
 
-public struct ActionRowModel: Identifiable, Equatable {
+public struct ActionRowModel: Identifiable, Equatable, Sendable {
     public var id: String { actionId }
     public let actionId: String
     public let name: String

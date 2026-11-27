@@ -1,4 +1,3 @@
-//! Versioned local editing intent. Key labels and delays are not firmware tokens or limits.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

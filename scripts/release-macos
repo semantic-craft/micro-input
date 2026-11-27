@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Build, Developer-ID sign, notarize, staple, generate Sparkle appcast, and optionally publish a macOS release."""
 from __future__ import annotations
 
 import argparse
@@ -75,7 +74,11 @@ def format_notary_failure_log(
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog='scripts/release-macos', description=__doc__, allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        prog='scripts/release-macos',
+        description='Build, Developer-ID sign, notarize, staple, generate Sparkle appcast, and optionally publish a macOS release.',
+        allow_abbrev=False,
+    )
     parser.add_argument('tag', help='Release tag in vX.Y.Z format')
     parser.add_argument('--publish', action='store_true', help='Create or update GitHub Release and upload assets')
     parser.add_argument(

@@ -1,4 +1,3 @@
-//! R-E08: bounded local storage, conflict detection, atomic replacement. No device access.
 pub mod routing;
 use crate::board_layers::{
     BoardLayer, BoardLayerPlan, BoardLayerRoute, BoardPreviewSelection, LegacyThreeBindings,
@@ -192,7 +191,6 @@ impl DocumentStore {
         self.apply_preview.as_mut().unwrap().prepared = Some(result.clone());
         Ok(result)
     }
-    /// Consumes the frozen software plan once, after checking the saved document and session.
     pub fn take_prepared_candidate(
         &mut self,
         token: &str,
@@ -575,7 +573,6 @@ impl DocumentStore {
         }
         Ok(())
     }
-    /// Explicitly save a separate document, then select it. The previously open file is untouched.
     pub fn create_independent(
         &mut self,
         config: crate::DeviceConfig,

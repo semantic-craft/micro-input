@@ -1193,6 +1193,14 @@ def run_boundary_checks(root: Path = ROOT) -> None:
         'docs/designs/input-protocol-reconstruction.md',
         'docs/designs/host-execution-and-agent-presets.md',
         'docs/designs/device-write-and-rgb.md',
+        'docs/spec/EVIDENCE.md',
+        'docs/spec/BUILD_PROMPT.md',
+        'docs/protocol-vectors.json',
+        'docs/designs/creator-micro-workbench.md',
+        'docs/designs/hardware-acceptance.md',
+        'docs/designs/host-input-latency.md',
+        'docs/verification/desktop-agent-controls.md',
+        'docs/verification/push-to-talk.md',
     )
     for rel_doc in forbidden_retired_docs:
         assert not (root / rel_doc).exists(), (

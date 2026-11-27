@@ -1,5 +1,3 @@
-//! Verified `0.7.0-rc.16+` hardware capability RPC helpers gated behind exclusive vendor ownership.
-
 use std::fs;
 use std::io::{Read, Write};
 #[cfg(unix)]
